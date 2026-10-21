@@ -2850,8 +2850,9 @@ const App = {
     const route = ref('home');
     const loginForm = reactive({ username: '', password: '' });
     const loginLoading = ref(false);
-    // 登录页背景 / 品牌：由公开接口提供（登录页在鉴权前就要取到）
-    const loginBg = ref('/login-bg/ink-color.jpg');
+    // 登录页背景 / 品牌：背景由服务端直出到 CSS 变量 --login-bg（无闪跳），
+    // 这里仅作为回退（如从非 / 路径进入）与品牌名同步。
+    const loginBg = ref('');
     const loginBrand = reactive({ systemName: '', companyName: '' });
 
     const allMenu = [
@@ -2912,7 +2913,11 @@ const App = {
       if (token.value) fetchMe();
       // 登录页公开配置（无需登录）：背景图 + 系统名 / 企业名
       api.get('/api/public-config').then(c => {
-        loginBg.value = c.loginBg || '/login-bg/ink-color.jpg';
+        const bg = c.loginBg || '/login-bg/ink-color.jpg';
+        loginBg.value = bg;
+        // 回退设置：仅当服务端未注入（值为 none）时才覆盖，避免覆盖正确的直出值造成闪跳
+        const cur = getComputedStyle(document.documentElement).getPropertyValue('--login-bg').trim();
+        if (!cur || cur === 'none') document.documentElement.style.setProperty('--login-bg', "url('" + bg + "')");
         loginBrand.systemName = c.systemName || '';
         loginBrand.companyName = c.companyName || '';
       }).catch(() => {});
@@ -2937,7 +2942,7 @@ const App = {
   template: `
   <div v-if="!token">
     <div class="login-wrap">
-      <div class="login-bg-layer" :style="{ backgroundImage: 'url(' + loginBg + ')' }"></div>
+      <div class="login-bg-layer"></div>
       <div class="login-card">
         <div class="brand">
           <h2>{{ loginBrand.systemName || '电网生产ERP' }}</h2>

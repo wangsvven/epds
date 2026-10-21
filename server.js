@@ -2002,6 +2002,25 @@ app.post('/api/settings/login-bg', upload.single('file'), (req, res) => {
 
 // ---------- 静态前端 ----------
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
+
+// 首页直出：把当前登录页背景注入 CSS 变量 --login-bg，避免前端异步取配置造成的「闪跳先默认图」
+const INDEX_PATH = path.join(__dirname, 'public', 'index.html');
+let INDEX_TPL = null;
+function renderIndexHtml() {
+  if (INDEX_TPL === null) INDEX_TPL = fs.readFileSync(INDEX_PATH, 'utf8');
+  const raw = String((DB.settings && DB.settings.loginBg) || '/login-bg/ink-color.jpg');
+  // 仅允许站内相对路径或 http(s) 地址，剥离引号/尖括号，防注入
+  const safe = raw.replace(/[\\"'<>]/g, '').replace(/\s+/g, '');
+  const style = `<style>:root{--login-bg:url('${safe}');}</style>`;
+  return INDEX_TPL.includes('<!--LOGIN_BG-->')
+    ? INDEX_TPL.replace('<!--LOGIN_BG-->', style)
+    : INDEX_TPL.replace('</head>', style + '</head>');
+}
+app.get(['/', '/index.html'], (req, res) => {
+  try { res.type('html').send(renderIndexHtml()); }
+  catch (e) { res.status(500).type('html').send('index render error'); }
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.listen(PORT, () => {

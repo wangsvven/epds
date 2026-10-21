@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>电网生产ERP（本地版）</title>
   <link rel="stylesheet" href="/vendor/element-plus.css" />
+  <!--LOGIN_BG-->
   <style>
     * { box-sizing: border-box; }
     html, body, #app { height: 100%; margin: 0; padding: 0; }
@@ -54,16 +55,19 @@
     .main { flex:1; padding:18px; overflow:auto; }
     .page-title { font-size:18px; font-weight:600; margin:0 0 16px; color:#1f2d3d; }
     /* ===== 登录页：全屏背景图 + 毛玻璃卡片 ===== */
+    :root { --login-bg: none; }
     .login-wrap { position:relative; height:100vh; height:100dvh; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#0d1f33; }
-    .login-bg-layer { position:absolute; inset:0; background-repeat:no-repeat; background-position:center center; background-size:cover; }
-    .login-bg-layer.is-mobile { background-position:center 30%; }
-    /* 顶部暗色遮罩：压住背景，突出卡片与文字 */
-    .login-wrap::after { content:''; position:absolute; inset:0; z-index:1;
-      background:linear-gradient(160deg, rgba(13,31,51,.46) 0%, rgba(13,31,51,.20) 46%, rgba(13,31,51,.38) 100%); }
+    /* 背景由 CSS 变量承载：服务端渲染时直接注入当前值，避免前端异步切换造成闪跳 */
+    .login-bg-layer { position:absolute; inset:0; background-image:var(--login-bg, none); background-repeat:no-repeat; background-position:center center; background-size:cover; }
+    /* 极轻的四周暗角 + 底部渐变：只压边角、保留中心画面清晰度 */
+    .login-wrap::after { content:''; position:absolute; inset:0; z-index:1; pointer-events:none;
+      background:
+        radial-gradient(140% 110% at 50% 42%, rgba(13,31,51,0) 48%, rgba(13,31,51,.16) 100%),
+        linear-gradient(180deg, rgba(13,31,51,.04) 0%, rgba(13,31,51,0) 26%, rgba(13,31,51,.18) 100%); }
     .login-card { position:relative; z-index:2; width:400px; max-width:calc(100vw - 32px);
-      background:rgba(255,255,255,.88); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
-      border:1px solid rgba(255,255,255,.6); border-radius:12px; padding:38px 36px 30px;
-      box-shadow:0 18px 48px rgba(0,20,40,.28); }
+      background:rgba(255,255,255,.93); backdrop-filter:blur(14px) saturate(140%); -webkit-backdrop-filter:blur(14px) saturate(140%);
+      border:1px solid rgba(255,255,255,.65); border-radius:12px; padding:38px 36px 30px;
+      box-shadow:0 20px 52px rgba(0,15,35,.30); }
     .login-card .brand { text-align:center; margin-bottom:24px; }
     .login-card .brand h2 { margin:0 0 8px; color:#1d3b6e; font-size:24px; letter-spacing:3px; font-weight:600; }
     .login-card .brand .sub { color:#6b7a90; font-size:13px; letter-spacing:1px; }
