@@ -61,11 +61,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # 仓库是私有的，确保镜像包也保持私有（双重保险）
-      - name: Ensure package is private
+      # 仓库是开源的，确保镜像包也保持公开，便于无需登录直接拉取部署
+      - name: Ensure package is public
         if: ${{ github.event_name == 'push' }}
         run: |
           PKG=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]' | cut -d/ -f2)
-          gh api -X PUT "users/${{ github.repository_owner }}/packages/container/$PKG/visibility" -f visibility=private || true
+          gh api -X PUT "users/${{ github.repository_owner }}/packages/container/$PKG/visibility" -f visibility=public || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
