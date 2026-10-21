@@ -1,0 +1,54 @@
+name: Build and Push to GHCR
+
+# 触发：推送到 main 分支 / 打 v* 标签 / 手动
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+# 最小权限原则：仅读代码、写包
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch      # main 分支推送 → :main（群晖拉取用这个“最新”标签）
+            type=ref,event=tag         # 打 tag 推送 → :v2.0.0 等（可固定版本）
+            type=sha,format=short      # 附带 commit 短哈希，便于追溯
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # 仓库是私有的，确保镜像包也保持私有（双重保险）
+      - name: Ensure package is private
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          PKG=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]' | cut -d/ -f2)
+          gh api -X PUT "users/${{ github.repository_owner }}/packages/container/$PKG/visibility" -f visibility=private || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

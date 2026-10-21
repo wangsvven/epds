@@ -1,0 +1,13 @@
+# 依赖
+node_modules
+
+# 运行时数据：首次启动会自动 seedDB() 初始化，不进仓库
+data
+uploads
+
+# 项目记忆 / 个人数据（含本地工作日志，不应上传）
+.workbuddy
+
+# 日志与系统文件
+*.log
+.DS_Store

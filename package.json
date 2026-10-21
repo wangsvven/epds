@@ -1,0 +1,16 @@
+{
+  "name": "grid-production-erp",
+  "version": "2.0.0",
+  "description": "本地自托管版电网生产ERP管理系统。零构建，Node + Express + 本地 JSON 存储 + Vue3 + Element Plus。",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^2.4.0",
+    "xlsx": "^0.18.5"
+  }
+}

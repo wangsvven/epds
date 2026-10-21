@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>电网生产ERP（本地版）</title>
+  <link rel="stylesheet" href="/vendor/element-plus.css" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body, #app { height: 100%; margin: 0; padding: 0; }
+    body { font-family: "Microsoft YaHei", "PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#f0f2f5; }
+    /* ===== 全局扁平化主题：统一主色 #3370ff，去阴影、小圆角、细边框 ===== */
+    :root {
+      --el-color-primary: #3370ff;
+      --el-color-primary-light-3: #6b9bff;
+      --el-color-primary-light-5: #99bbff;
+      --el-color-primary-light-7: #c6d8ff;
+      --el-color-primary-light-8: #dbe6ff;
+      --el-color-primary-light-9: #eef3ff;
+      --el-color-primary-dark-2: #2a5acc;
+      --el-border-radius-base: 3px;
+      --el-border-radius-small: 2px;
+      --el-border-radius-round: 3px;
+    }
+    .el-card { box-shadow: none !important; border: 1px solid #e7e9ec; border-radius: 4px; }
+    .el-button { box-shadow: none; font-weight: 400; }
+    .el-button.is-text { padding-left:8px; padding-right:8px; }
+    .el-dialog { border-radius: 4px; box-shadow: 0 8px 28px rgba(0,0,0,.1); max-width: 94vw; }
+    .el-dialog .el-dialog__body { padding-top: 16px; }
+    .el-dialog__header { border-bottom: 1px solid #f0f1f3; margin-right: 0; padding-bottom: 14px; }
+    .el-tag { border-radius: 2px; }
+    .el-table { --el-table-header-bg-color: #f7f8fa; --el-table-border-color: #ebedf0; font-size: 13px; }
+    .el-table th.el-table__cell { color: #4e5969; font-weight: 600; }
+    .el-table .el-table__cell { padding: 9px 0; }
+    .el-pagination { font-weight: 400; }
+    .el-message-box { border-radius: 4px; }
+    .el-popper.is-light { border-radius: 4px; }
+    /* 统一筛选行标签样式 */
+    .f-label { color:#4e5969; font-size:13px; white-space:nowrap; }
+    ::-webkit-scrollbar { width:8px; height:8px; }
+    ::-webkit-scrollbar-thumb { background:#d4d8de; border-radius:4px; }
+    ::-webkit-scrollbar-thumb:hover { background:#bcc2cb; }
+    ::-webkit-scrollbar-track { background:transparent; }
+    .app-header { display:flex; align-items:center; justify-content:space-between; height:56px; padding:0 18px; background:#001529; color:#fff; }
+    .app-header .left { display:flex; align-items:center; gap:14px; }
+    .app-header .sysname { font-size:17px; font-weight:600; letter-spacing:1px; }
+    .app-header .right { display:flex; align-items:center; gap:14px; font-size:14px; }
+    .layout { display:flex; height: calc(100% - 56px); }
+    .aside { width:220px; background:#001529; transition:width .2s; overflow:hidden; }
+    .aside.collapsed { width:0; }
+    .aside .menu-item { color:#b8c2cc; padding:13px 22px; cursor:pointer; font-size:14px; display:flex; align-items:center; gap:10px; white-space:nowrap; }
+    .aside .menu-item:hover { background:#16283f; color:#fff; }
+    .aside .menu-item.active { background:#3370ff; color:#fff; }
+    .main { flex:1; padding:18px; overflow:auto; }
+    .page-title { font-size:18px; font-weight:600; margin:0 0 16px; color:#1f2d3d; }
+    .login-wrap { height:100%; display:flex; align-items:center; justify-content:center; background:#0d1f33; }
+    .login-card { width:380px; background:#fff; border-radius:4px; padding:34px 30px; box-shadow:0 4px 16px rgba(0,0,0,.2); }
+    .login-card h2 { text-align:center; margin:0 0 6px; color:#3370ff; }
+    .login-card .sub { text-align:center; color:#888; font-size:13px; margin-bottom:22px; }
+    .stat-card { background:#fff; border:1px solid #e7e9ec; border-radius:4px; padding:20px; }
+    .stat-card .num { font-size:30px; font-weight:700; color:#3370ff; }
+    .stat-card .label { color:#666; font-size:13px; margin-top:6px; }
+    .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+    .toolbar .spacer { flex:1; }
+    /* ===== 窗口缩放自适应 ===== */
+    @media (max-width: 1100px) {
+      .app-header { padding: 0 12px; }
+      .app-header .left, .app-header .right { gap: 8px; }
+      .app-header .sysname { font-size: 15px; }
+      .aside { width: 176px; }
+      .main { padding: 12px; }
+    }
+    @media (max-width: 820px) {
+      .aside { width: 148px; }
+      .aside .menu-item { padding: 12px 14px; font-size: 13px; }
+      .main { padding: 10px; }
+      .page-title { font-size: 16px; margin-bottom: 12px; }
+    }
+    /* 领料单确认入库弹窗 */
+    .el-table .rq-this-qty, .el-table .rq-this-qty:hover, .el-table .el-table__row:hover .rq-this-qty { background:#e8f4fd !important; }
+    .el-table .rq-confirm tr, .el-table .rq-confirm td { background:#ffffff; }
+    .el-table .rq-ab-row td { background:#fdf0f0 !important; }
+    .rq-main .el-table__expand-icon .el-icon { display:none; }
+    .rq-main .el-table__expand-icon::after { content:'+'; font-size:15px; color:#409eff; font-weight:600; }
+    .rq-main .el-table__expand-icon--expanded::after { content:'⊖'; }
+  /* 计划管理：进行中（覆盖今天）的计划行淡黄高亮 */
+  .el-table tr.plan-ongoing td.el-table__cell { background:#fdf6ec !important; }
+
+  /* ===== iPhone / 移动端适配 ===== */
+  /* 顶栏团队切换器宽度（桌面端原尺寸，移动端由媒体查询覆盖） */
+  .team-select { width:150px; margin-right:8px; }
+  .team-select-wide { width:210px; margin-right:8px; }
+  /* 抽屉遮罩：仅移动端显示 */
+  .aside-mask { display:none; }
+  @media (max-width: 768px) {
+    /* 刘海 / 灵动岛安全区 */
+    .app-header { height:auto; min-height:56px; padding-top:0;
+      padding-top:env(safe-area-inset-top, 0px);
+      padding-left:max(12px, env(safe-area-inset-left, 0px));
+      padding-right:max(12px, env(safe-area-inset-right, 0px)); }
+    .layout { height:calc(100% - 56px); height:calc(100% - 56px - env(safe-area-inset-top, 0px)); }
+    /* 侧栏 → 浮层抽屉：默认收起，浮在内容之上，不挤压主区 */
+    .aside { position:fixed; top:56px; top:calc(56px + env(safe-area-inset-top, 0px));
+      left:0; bottom:0; width:200px; z-index:1000; overflow-y:auto;
+      transform:translateX(-100%); transition:transform .22s ease; box-shadow:2px 0 14px rgba(0,0,0,.28); }
+    .aside:not(.collapsed) { transform:translateX(0); }
+    .aside.collapsed { width:200px; }
+    .aside-mask { display:block; position:fixed; top:56px; left:0; right:0; bottom:0;
+      background:rgba(0,0,0,.42); z-index:999; }
+    .aside .menu-item { padding:14px 18px; font-size:15px; }
+    /* 顶栏精简：隐藏次要文字，团队切换弹性宽度 */
+    .app-header .left { min-width:0; flex:1 1 auto; }
+    .app-header .sysname { font-size:15px; letter-spacing:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+    .app-header .tenant-name { display:none; }
+    .app-header .user-name { display:none; }
+    .app-header .team-select { width:auto !important; min-width:100px; max-width:46vw; margin-right:6px; }
+    .app-header .right { gap:6px; font-size:13px; }
+    /* 内容区 */
+    .main { padding:10px; padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px)); }
+    .page-title { font-size:16px; margin:0 0 10px; }
+    .stat-card { padding:12px; }
+    .stat-card .num { font-size:22px; }
+    /* 工具栏自适应换行 */
+    .toolbar { gap:8px; }
+    .toolbar .spacer { display:none; }
+    .toolbar > * { flex:1 1 140px !important; min-width:0; }
+    /* 表格瘦身 + 允许横向滚动 */
+    .el-table { font-size:12px; }
+    .el-table .el-table__cell { padding:8px 4px; }
+    .el-table__body-wrapper, .el-table__header-wrapper { overflow-x:auto !important; -webkit-overflow-scrolling:touch; }
+    /* 弹窗铺满 + 表单标签上移、字段单列 */
+    .el-dialog { width:94vw !important; max-width:94vw !important; margin:5vh auto !important; }
+    .el-dialog .el-col { width:100% !important; }
+    /* 选择器需与 EP 的 .el-form--label-right .el-form-item__label 同权重，靠源码顺序取胜 */
+    .el-form .el-form-item__label { display:block; float:none; text-align:left; width:auto !important; padding:0 0 5px; line-height:1.5; }
+    .el-form-item__content { margin-left:0 !important; }
+    .el-pagination { display:flex !important; flex-wrap:wrap; justify-content:center !important; }
+  }
+  /* 登录页自适应 */
+  @media (max-width: 480px) {
+    .login-card { width:calc(100vw - 32px); max-width:380px; padding:26px 20px; }
+  }
+  /* 小屏（iPhone SE / mini 等）再收紧 */
+  @media (max-width: 375px) {
+    .aside { width:180px; }
+    .toolbar > * { flex-basis:118px !important; }
+    .stat-card .num { font-size:20px; }
+    .stat-card .label { font-size:12px; }
+  }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="/vendor/vue.global.prod.js"></script>
+  <script src="/vendor/element-plus.full.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
+<style>
+  /* 材料明细表头漏斗筛选图标 */
+  .col-funnel{margin-left:4px;cursor:pointer;color:#c0c4cc;vertical-align:-1px}
+  .col-funnel.on,.col-funnel:hover{color:#409eff}
+  /* 表头内容：左侧标签 + 右侧漏斗 */
+  .th-inner{display:flex;align-items:center;justify-content:space-between;width:100%}
+  .th-inner .col-funnel{margin-left:0}
+</style>

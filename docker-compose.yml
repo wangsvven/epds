@@ -1,0 +1,14 @@
+services:
+  grid-erp:
+    build: .
+    container_name: grid-erp
+    ports:
+      - "5173:5173"
+    environment:
+      - PORT=5173
+      - NODE_ENV=production
+    # 持久化：数据与用户上传文件落在外挂卷，容器重建/升级不丢数据
+    # 若宿主机 ./data 已存在（含现有 db.json），会直接复用，无需重新初始化
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

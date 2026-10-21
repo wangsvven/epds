@@ -1,0 +1,13 @@
+# 依赖与版本控制
+node_modules
+.git
+.gitignore
+
+# 运行时数据：交给 volume 管理，不进镜像（容器启动会自动 seedDB 初始化）
+data
+uploads
+
+# 杂项
+*.log
+.DS_Store
+.workbuddy
