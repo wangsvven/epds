@@ -19,6 +19,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 安全闸门：确保任何运行时数据都不会被构建进镜像/上传。
+      # 本地开发产生的示例数据只存在于 data/ 与 uploads/，二者已被
+      # .gitignore 与 .dockerignore 排除；若有人强塞提交，这里直接让构建失败。
+      - name: Scan for accidentally-committed runtime data
+        run: |
+          echo "::group::扫描被追踪的运行时数据文件"
+          LEAK=0
+          if git ls-files | grep -E '^(data|uploads)/'; then LEAK=1; fi
+          if git ls-files | grep -E 'db\.json$'; then LEAK=1; fi
+          echo "::endgroup::"
+          if [ "$LEAK" -ne 0 ]; then
+            echo "::error::检测到运行时数据（data/、uploads/ 或 db.json）被提交，已中止构建。"
+            echo "::error::请运行 'git rm -r --cached data uploads' 移除追踪后重新推送。"
+            exit 1
+          fi
+          echo "✓ 未发现被追踪的运行时数据，继续构建。"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
