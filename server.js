@@ -115,6 +115,10 @@ function seedDB() {
       welcome: { greeting: '欢迎来到我们的企业工作台', logoUrl: '' },
       // 登录页背景：预设图路径或本地上传后的接口路径（可在「全局设置 → 登录界面」更换）
       loginBg: '/login-bg/ink-color.jpg',
+      // 背景铺展方式：cover(填充) / contain(适应) / stretch(拉伸) / tile(平铺) / center(居中)
+      loginBgMode: 'cover',
+      // 自定义上传背景的占位元数据（LQIP 缩略图 + 平均色），用于首帧避免黑闪
+      loginBgMeta: null,
       // 建管 / 实施单位：留空，由用户自行设置
       unitBuildCity: '',
       unitBuildCounty: '',
@@ -235,6 +239,16 @@ function migrateDB() {
   // 设置：补登录页背景（旧实例无该字段时给默认预设，不覆盖用户已选）
   if (DB.settings && !DB.settings.loginBg) {
     DB.settings.loginBg = '/login-bg/ink-color.jpg';
+  }
+  // 设置：补背景铺展方式与占位元数据
+  if (DB.settings && !DB.settings.loginBgMode) {
+    DB.settings.loginBgMode = 'cover';
+  }
+  if (DB.settings && DB.settings.loginBgMode && !['cover', 'contain', 'stretch', 'tile', 'center'].includes(DB.settings.loginBgMode)) {
+    DB.settings.loginBgMode = 'cover';
+  }
+  if (DB.settings && DB.settings.loginBgMeta === undefined) {
+    DB.settings.loginBgMeta = null;
   }
   // 单位维护：集合 + 作业建管/实施单位（周计划弹窗自动带出）
   if (!Array.isArray(DB.units)) DB.units = [];
@@ -554,6 +568,7 @@ app.get('/api/login-bg/:name', (req, res) => {
   if (!name) return res.status(400).json({ error: '参数错误' });
   const file = path.join(__dirname, 'data', 'uploads', 'login-bg', name);
   if (!fs.existsSync(file)) return res.status(404).json({ error: '背景不存在' });
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.sendFile(file);
 });
 
@@ -1995,32 +2010,102 @@ app.post('/api/settings/login-bg', upload.single('file'), (req, res) => {
     const diskName = 'bg_' + Date.now() + '_' + name.replace(/[\\/:*?"<>|]/g, '_');
     fs.writeFileSync(path.join(upDir, diskName), req.file.buffer);
     DB.settings.loginBg = '/api/login-bg/' + diskName;
+    // 前端通过 canvas 生成的 LQIP / 平均色（用于首帧占位，避免黑闪）
+    const lqip = String((req.body && req.body.lqip) || '');
+    const avg = String((req.body && req.body.avg) || '');
+    DB.settings.loginBgMeta = {
+      url: DB.settings.loginBg,
+      lqip: /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]{20,200000}$/.test(lqip) ? lqip : '',
+      avg: /^#[0-9a-fA-F]{3,8}$/.test(avg) ? avg : ''
+    };
     saveDB();
-    res.json({ ok: true, loginBg: DB.settings.loginBg });
+    res.json({ ok: true, loginBg: DB.settings.loginBg, meta: DB.settings.loginBgMeta });
   } catch (e) { res.status(500).json({ error: '上传失败：' + e.message }); }
+});
+
+// 回填/更新当前背景的占位元数据（LQIP + 平均色），用于旧上传图或前端补算
+app.put('/api/settings/login-bg/meta', (req, res) => {
+  try {
+    const lqip = String((req.body && req.body.lqip) || '');
+    const avg = String((req.body && req.body.avg) || '');
+    const okLqip = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]{20,200000}$/.test(lqip) ? lqip : '';
+    const okAvg = /^#[0-9a-fA-F]{3,8}$/.test(avg) ? avg : '';
+    if (!okLqip && !okAvg) return res.status(400).json({ error: '缺少有效的 lqip / avg' });
+    DB.settings.loginBgMeta = { url: DB.settings.loginBg, lqip: okLqip, avg: okAvg };
+    saveDB();
+    res.json({ ok: true, meta: DB.settings.loginBgMeta });
+  } catch (e) { res.status(500).json({ error: '更新失败：' + e.message }); }
+});
+
+// 删除自定义背景：删磁盘文件并恢复为默认预设
+app.delete('/api/settings/login-bg', (req, res) => {
+  try {
+    const cur = DB.settings.loginBg || '';
+    if (cur.startsWith('/api/login-bg/')) {
+      const upDir = path.join(__dirname, 'data', 'uploads', 'login-bg');
+      try { fs.unlinkSync(path.join(upDir, path.basename(cur))); } catch (e) {}
+    }
+    DB.settings.loginBg = '/login-bg/ink-color.jpg';
+    DB.settings.loginBgMode = 'cover';
+    DB.settings.loginBgMeta = null;
+    saveDB();
+    res.json({ ok: true, loginBg: DB.settings.loginBg, loginBgMode: DB.settings.loginBgMode });
+  } catch (e) { res.status(500).json({ error: '删除失败：' + e.message }); }
 });
 
 // ---------- 静态前端 ----------
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 // 首页直出：把当前登录页背景注入 CSS 变量 --login-bg，避免前端异步取配置造成的「闪跳先默认图」
+// 同时注入 LQIP 占位图（超小模糊图）与平均色底，避免图片字节未下载完时出现「黑一下」
 const INDEX_PATH = path.join(__dirname, 'public', 'index.html');
 let INDEX_TPL = null;
+// 预设背景的 LQIP + 平均色（构建期生成，见 public/login-bg/meta.json）
+let PRESET_BG_META = {};
+try {
+  PRESET_BG_META = JSON.parse(fs.readFileSync(path.join(__dirname, 'public', 'login-bg', 'meta.json'), 'utf8'));
+} catch (e) { PRESET_BG_META = {}; }
+const LOGIN_BG_MODE_CSS = {
+  cover: 'background-size:cover;background-repeat:no-repeat;background-position:center center;',
+  contain: 'background-size:contain;background-repeat:no-repeat;background-position:center center;',
+  stretch: 'background-size:100% 100%;background-repeat:no-repeat;background-position:center center;',
+  tile: 'background-size:auto;background-repeat:repeat;background-position:top left;',
+  center: 'background-size:auto;background-repeat:no-repeat;background-position:center center;'
+};
+function getLoginBgMeta(url) {
+  const meta = DB.settings && DB.settings.loginBgMeta;
+  if (meta && meta.url === url) return meta;
+  const base = path.basename(String(url || ''));
+  return PRESET_BG_META[base] || null;
+}
 function renderIndexHtml() {
   if (INDEX_TPL === null) INDEX_TPL = fs.readFileSync(INDEX_PATH, 'utf8');
   const raw = String((DB.settings && DB.settings.loginBg) || '/login-bg/ink-color.jpg');
   // 仅允许站内相对路径或 http(s) 地址，剥离引号/尖括号，防注入
   const safe = raw.replace(/[\\"'<>]/g, '').replace(/\s+/g, '');
-  const style = `<style>:root{--login-bg:url('${safe}');}</style>`;
+  const mode = (DB.settings && LOGIN_BG_MODE_CSS[DB.settings.loginBgMode]) ? DB.settings.loginBgMode : 'cover';
+  const meta = getLoginBgMeta(safe) || {};
+  const avg = /^#[0-9a-fA-F]{3,8}$/.test(String(meta.avg || '')) ? meta.avg : '#e9edf2';
+  const lqip = /^data:image\//.test(String(meta.lqip || '')) ? meta.lqip : '';
+  // preload 让浏览器以高优先级先取图；LQIP 与平均色保证首帧不是黑屏
+  const head = [
+    `<link rel="preload" as="image" href="${safe}" fetchpriority="high">`,
+    `<style>:root{--login-bg:url('${safe}');--login-bg-color:${avg};${lqip ? `--login-bg-lqip:url('${lqip}');` : ''}}`,
+    `.login-bg-layer{${LOGIN_BG_MODE_CSS[mode] || LOGIN_BG_MODE_CSS.cover}}</style>`
+  ].join('');
   return INDEX_TPL.includes('<!--LOGIN_BG-->')
-    ? INDEX_TPL.replace('<!--LOGIN_BG-->', style)
-    : INDEX_TPL.replace('</head>', style + '</head>');
+    ? INDEX_TPL.replace('<!--LOGIN_BG-->', head)
+    : INDEX_TPL.replace('</head>', head + '</head>');
 }
 app.get(['/', '/index.html'], (req, res) => {
-  try { res.type('html').send(renderIndexHtml()); }
+  try { res.setHeader('Cache-Control', 'no-cache'); res.type('html').send(renderIndexHtml()); }
   catch (e) { res.status(500).type('html').send('index render error'); }
 });
 
+// 登录背景图长缓存（文件名唯一，可 immutable；预设图按天缓存）
+app.use('/login-bg', express.static(path.join(__dirname, 'public', 'login-bg'), {
+  setHeaders: (res) => res.setHeader('Cache-Control', 'public, max-age=86400')
+}));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.listen(PORT, () => {

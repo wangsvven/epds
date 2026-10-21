@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>电网生产ERP（本地版）</title>
   <link rel="stylesheet" href="/vendor/element-plus.css" />
-  <!--LOGIN_BG-->
   <style>
     * { box-sizing: border-box; }
     html, body, #app { height: 100%; margin: 0; padding: 0; }
@@ -55,10 +54,13 @@
     .main { flex:1; padding:18px; overflow:auto; }
     .page-title { font-size:18px; font-weight:600; margin:0 0 16px; color:#1f2d3d; }
     /* ===== 登录页：全屏背景图 + 毛玻璃卡片 ===== */
-    :root { --login-bg: none; }
-    .login-wrap { position:relative; height:100vh; height:100dvh; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#0d1f33; }
+    :root { --login-bg: none; --login-bg-color: #0d1f33; }
+    /* 底色取当前背景的平均色：图片字节到达前也不会出现「黑一下」 */
+    .login-wrap { position:relative; height:100vh; height:100dvh; display:flex; align-items:center; justify-content:center; overflow:hidden; background-color:var(--login-bg-color, #0d1f33); }
+    /* LQIP：超小模糊占位图，先于大图绘制，避免黑屏/闪白 */
+    .login-bg-lqip { position:absolute; inset:-3%; background-image:var(--login-bg-lqip, none); background-size:cover; background-position:center; background-repeat:no-repeat; filter:blur(18px); transform:scale(1.05); transition:opacity .45s ease; }
     /* 背景由 CSS 变量承载：服务端渲染时直接注入当前值，避免前端异步切换造成闪跳 */
-    .login-bg-layer { position:absolute; inset:0; background-image:var(--login-bg, none); background-repeat:no-repeat; background-position:center center; background-size:cover; }
+    .login-bg-layer { position:absolute; inset:0; background-image:var(--login-bg, none); background-repeat:no-repeat; background-position:center center; background-size:cover; transition:opacity .45s ease; }
     /* 极轻的四周暗角 + 底部渐变：只压边角、保留中心画面清晰度 */
     .login-wrap::after { content:''; position:absolute; inset:0; z-index:1; pointer-events:none;
       background:
@@ -171,6 +173,7 @@
     .stat-card .label { font-size:12px; }
   }
   </style>
+  <!--LOGIN_BG-->
 </head>
 <body>
   <div id="app"></div>
