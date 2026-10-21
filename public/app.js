@@ -1262,7 +1262,7 @@ const materialCatalogCfg = {
 const SettingsView = {
   setup() {
     const active = ref('annualPlans');
-    const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', loginBgMode: 'cover', welcome: { greeting: '', logoUrl: '' } });
+    const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', loginBgMode: 'cover', loginBgRotate: 0, welcome: { greeting: '', logoUrl: '' } });
     const savedName = ref('');
     async function loadSite() {
       try {
@@ -1270,6 +1270,7 @@ const SettingsView = {
         Object.assign(site, s);
         if (!site.welcome) site.welcome = { greeting: '', logoUrl: '' };
         if (!site.loginBgMode) site.loginBgMode = 'cover';
+        if (![0, 90, 180, 270].includes(Number(site.loginBgRotate))) site.loginBgRotate = 0;
         savedName.value = s.companyName || '';
         // 旧上传图若缺占位元数据，用浏览器补算并回填，消除首帧黑闪
         if (isLoginBgCustom(site.loginBg) && !site.loginBgMeta) {
@@ -1296,9 +1297,9 @@ const SettingsView = {
     }
     // ---------- 登录界面：背景图（预设 + 本地上传 + 铺展方式） ----------
     const LOGIN_BG_PRESETS = [
-      { key: 'ink-color', label: '千里江山', desc: '彩色水墨', url: '/login-bg/ink-color.jpg' },
-      { key: 'ink-gray', label: '水墨烟山', desc: '青灰淡墨', url: '/login-bg/ink-gray.jpg' },
-      { key: 'network', label: '网络节点', desc: '黑白科技', url: '/login-bg/network.jpg' }
+      { key: 'valley', label: '草原雪山', desc: '高原草甸 · 远山雪线', url: '/login-bg/valley.jpg' },
+      { key: 'ice', label: '冰川落日', desc: '冰原浮冰 · 暖阳天际', url: '/login-bg/ice.jpg' },
+      { key: 'ridge', label: '层峦叠嶂', desc: '青蓝山峦 · 晨雾光影', url: '/login-bg/ridge.jpg' }
     ];
     // 铺展方式（对齐 Windows 壁纸的几种模式）
     const LOGIN_BG_MODES = [
@@ -1308,12 +1309,16 @@ const SettingsView = {
       { key: 'tile', label: '平铺', desc: '按原尺寸重复铺排' },
       { key: 'center', label: '居中', desc: '原尺寸居中，不缩放' }
     ];
+    // 旋转角度：手机/相机照片常带方向问题，可转正
+    const LOGIN_BG_ROTATES = [
+      { key: 0, label: '0°' }, { key: 90, label: '90°' }, { key: 180, label: '180°' }, { key: 270, label: '270°' }
+    ];
     const bgSaving = ref(false);
     const bgUploading = ref(false);
     const bgDeleting = ref(false);
-    // 设置页实时预览：跟随所选背景与铺展方式
+    // 设置页实时预览：跟随所选背景与铺展方式（旋转由 CSS 类控制）
     const previewStyle = computed(() => {
-      const url = site.loginBg || '/login-bg/ink-color.jpg';
+      const url = site.loginBg || '/login-bg/valley.jpg';
       const s = { backgroundImage: `url('${url}')`, backgroundColor: '#e9edf2' };
       switch (site.loginBgMode) {
         case 'contain': s.backgroundSize = 'contain'; s.backgroundRepeat = 'no-repeat'; s.backgroundPosition = 'center'; break;
@@ -1324,10 +1329,15 @@ const SettingsView = {
       }
       return s;
     });
+    const previewRotClass = computed(() => 'rot-' + (Number(site.loginBgRotate) || 0));
+    function rotateBy(delta) {
+      const cur = Number(site.loginBgRotate) || 0;
+      site.loginBgRotate = ((cur + delta) % 360 + 360) % 360;
+    }
     async function saveLoginBg() {
       bgSaving.value = true;
       try {
-        await api.put('/api/settings', { loginBg: site.loginBg, loginBgMode: site.loginBgMode });
+        await api.put('/api/settings', { loginBg: site.loginBg, loginBgMode: site.loginBgMode, loginBgRotate: Number(site.loginBgRotate) || 0 });
         ElementPlus.ElMessage.success('登录页背景已保存');
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
       finally { bgSaving.value = false; }
@@ -1388,6 +1398,7 @@ const SettingsView = {
         const r = await api.del('/api/settings/login-bg');
         site.loginBg = r.loginBg;
         site.loginBgMode = r.loginBgMode || 'cover';
+        site.loginBgRotate = 0;
         ElementPlus.ElMessage.success('已删除自定义背景，恢复默认预设');
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
       finally { bgDeleting.value = false; }
@@ -1428,7 +1439,7 @@ const SettingsView = {
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
     onMounted(() => { loadSite(); loadUnits(); });
-    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, materialCatalogCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, bgSaving, bgUploading, bgDeleting, previewStyle, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
+    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, materialCatalogCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
   },
   template: `
   <div>
@@ -1497,8 +1508,9 @@ const SettingsView = {
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:18px;align-items:flex-start">
             <div style="flex:0 1 auto;max-width:100%;min-width:0">
               <div style="font-size:13px;color:#4e5969;margin-bottom:6px">实时预览</div>
-              <div :style="previewStyle"
-                   style="width:360px;max-width:100%;height:203px;border:1px solid #e7e9ec;border-radius:4px;overflow:hidden"></div>
+              <div class="login-preview">
+                <div class="login-preview-inner" :class="previewRotClass" :style="previewStyle"></div>
+              </div>
             </div>
             <div style="flex:1 1 300px;min-width:260px">
               <div style="font-size:13px;color:#4e5969;margin-bottom:6px">铺展方式（同 Windows 壁纸）</div>
@@ -1507,6 +1519,14 @@ const SettingsView = {
               </el-radio-group>
               <div style="margin-top:8px;font-size:12px;color:#909399;line-height:1.7">
                 {{ (LOGIN_BG_MODES.find(m => m.key === site.loginBgMode) || {}).desc || '' }}
+              </div>
+              <div style="margin-top:14px;font-size:13px;color:#4e5969;margin-bottom:6px">旋转（照片方向不对时转正）</div>
+              <el-radio-group v-model="site.loginBgRotate" size="small" style="display:flex;flex-wrap:wrap;gap:8px">
+                <el-radio-button v-for="r in LOGIN_BG_ROTATES" :key="r.key" :value="r.key" :label="r.key">{{ r.label }}</el-radio-button>
+              </el-radio-group>
+              <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+                <el-button size="small" @click="rotateBy(-90)">逆时针 90°</el-button>
+                <el-button size="small" @click="rotateBy(90)">顺时针 90°</el-button>
               </div>
             </div>
           </div>
@@ -3042,8 +3062,10 @@ const App = {
   template: `
   <div v-if="!token">
     <div class="login-wrap">
-      <div class="login-bg-lqip"></div>
-      <div class="login-bg-layer"></div>
+      <div class="login-bg-rotate">
+        <div class="login-bg-lqip"></div>
+        <div class="login-bg-layer"></div>
+      </div>
       <div class="login-card">
         <div class="brand">
           <h2>{{ loginBrand.systemName || '电网生产ERP' }}</h2>

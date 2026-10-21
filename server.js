@@ -19,6 +19,16 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 const PORT = process.env.PORT || 5173;
 
+// 登录页默认背景（内置预设：草原雪山 / 冰川落日 / 层峦叠嶂）
+const DEFAULT_LOGIN_BG = '/login-bg/valley.jpg';
+const LOGIN_BG_PRESETS = ['/login-bg/valley.jpg', '/login-bg/ice.jpg', '/login-bg/ridge.jpg'];
+// 旧版预设路径 → 新预设（升级时迁移，避免指向已删除的图）
+const LEGACY_LOGIN_BG_MAP = {
+  '/login-bg/ink-color.jpg': '/login-bg/valley.jpg',
+  '/login-bg/ink-gray.jpg': '/login-bg/ice.jpg',
+  '/login-bg/network.jpg': '/login-bg/ridge.jpg'
+};
+
 // ===== 母账号（超级所有者）+ 团队子空间 架构 =====
 // 母账号（唯一）：role==='超级用户'，自有业务空间 SPACE_DEFAULT（不属于任何团队），最高控制权
 // 团队（独立业务空间）：DB.bizTeams，团队 id 即其业务记录的 spaceId；母↔团队、团队A↔团队B 互相隔离
@@ -114,9 +124,11 @@ function seedDB() {
       // 企业欢迎页（访客登录前可见）
       welcome: { greeting: '欢迎来到我们的企业工作台', logoUrl: '' },
       // 登录页背景：预设图路径或本地上传后的接口路径（可在「全局设置 → 登录界面」更换）
-      loginBg: '/login-bg/ink-color.jpg',
+      loginBg: DEFAULT_LOGIN_BG,
       // 背景铺展方式：cover(填充) / contain(适应) / stretch(拉伸) / tile(平铺) / center(居中)
       loginBgMode: 'cover',
+      // 背景旋转角度：0 / 90 / 180 / 270（竖图/方向错误的照片可转正）
+      loginBgRotate: 0,
       // 自定义上传背景的占位元数据（LQIP 缩略图 + 平均色），用于首帧避免黑闪
       loginBgMeta: null,
       // 建管 / 实施单位：留空，由用户自行设置
@@ -238,14 +250,22 @@ function migrateDB() {
   }
   // 设置：补登录页背景（旧实例无该字段时给默认预设，不覆盖用户已选）
   if (DB.settings && !DB.settings.loginBg) {
-    DB.settings.loginBg = '/login-bg/ink-color.jpg';
+    DB.settings.loginBg = DEFAULT_LOGIN_BG;
   }
-  // 设置：补背景铺展方式与占位元数据
+  // 设置：旧版预设路径 → 新预设（避免升级后指向已删除的图）
+  if (DB.settings && LEGACY_LOGIN_BG_MAP[DB.settings.loginBg]) {
+    DB.settings.loginBg = LEGACY_LOGIN_BG_MAP[DB.settings.loginBg];
+    DB.settings.loginBgMeta = null;
+  }
+  // 设置：补背景铺展方式与旋转角度
   if (DB.settings && !DB.settings.loginBgMode) {
     DB.settings.loginBgMode = 'cover';
   }
   if (DB.settings && DB.settings.loginBgMode && !['cover', 'contain', 'stretch', 'tile', 'center'].includes(DB.settings.loginBgMode)) {
     DB.settings.loginBgMode = 'cover';
+  }
+  if (DB.settings && ![0, 90, 180, 270].includes(Number(DB.settings.loginBgRotate))) {
+    DB.settings.loginBgRotate = 0;
   }
   if (DB.settings && DB.settings.loginBgMeta === undefined) {
     DB.settings.loginBgMeta = null;
@@ -559,7 +579,7 @@ app.get('/api/public-config', (req, res) => {
   res.json({
     systemName: DB.settings.systemName || '',
     companyName: DB.settings.companyName || '',
-    loginBg: DB.settings.loginBg || '/login-bg/ink-color.jpg'
+    loginBg: DB.settings.loginBg || DEFAULT_LOGIN_BG
   });
 });
 // 本地上传的登录页背景（无需登录；仅允许读取 data/uploads/login-bg 目录，防目录穿越）
@@ -2010,6 +2030,8 @@ app.post('/api/settings/login-bg', upload.single('file'), (req, res) => {
     const diskName = 'bg_' + Date.now() + '_' + name.replace(/[\\/:*?"<>|]/g, '_');
     fs.writeFileSync(path.join(upDir, diskName), req.file.buffer);
     DB.settings.loginBg = '/api/login-bg/' + diskName;
+    // 新图重置旋转角，避免沿用上一张图的旋转
+    DB.settings.loginBgRotate = 0;
     // 前端通过 canvas 生成的 LQIP / 平均色（用于首帧占位，避免黑闪）
     const lqip = String((req.body && req.body.lqip) || '');
     const avg = String((req.body && req.body.avg) || '');
@@ -2045,11 +2067,12 @@ app.delete('/api/settings/login-bg', (req, res) => {
       const upDir = path.join(__dirname, 'data', 'uploads', 'login-bg');
       try { fs.unlinkSync(path.join(upDir, path.basename(cur))); } catch (e) {}
     }
-    DB.settings.loginBg = '/login-bg/ink-color.jpg';
+    DB.settings.loginBg = DEFAULT_LOGIN_BG;
     DB.settings.loginBgMode = 'cover';
+    DB.settings.loginBgRotate = 0;
     DB.settings.loginBgMeta = null;
     saveDB();
-    res.json({ ok: true, loginBg: DB.settings.loginBg, loginBgMode: DB.settings.loginBgMode });
+    res.json({ ok: true, loginBg: DB.settings.loginBg, loginBgMode: DB.settings.loginBgMode, loginBgRotate: 0 });
   } catch (e) { res.status(500).json({ error: '删除失败：' + e.message }); }
 });
 
@@ -2080,18 +2103,27 @@ function getLoginBgMeta(url) {
 }
 function renderIndexHtml() {
   if (INDEX_TPL === null) INDEX_TPL = fs.readFileSync(INDEX_PATH, 'utf8');
-  const raw = String((DB.settings && DB.settings.loginBg) || '/login-bg/ink-color.jpg');
+  const raw = String((DB.settings && DB.settings.loginBg) || DEFAULT_LOGIN_BG);
   // 仅允许站内相对路径或 http(s) 地址，剥离引号/尖括号，防注入
   const safe = raw.replace(/[\\"'<>]/g, '').replace(/\s+/g, '');
   const mode = (DB.settings && LOGIN_BG_MODE_CSS[DB.settings.loginBgMode]) ? DB.settings.loginBgMode : 'cover';
   const meta = getLoginBgMeta(safe) || {};
   const avg = /^#[0-9a-fA-F]{3,8}$/.test(String(meta.avg || '')) ? meta.avg : '#e9edf2';
   const lqip = /^data:image\//.test(String(meta.lqip || '')) ? meta.lqip : '';
+  // 旋转：90/270 需交换宽高并用 translate 居中，保证旋转后仍铺满视口
+  const rotate = [0, 90, 180, 270].includes(Number(DB.settings && DB.settings.loginBgRotate)) ? Number(DB.settings.loginBgRotate) : 0;
+  let rotateCss = '';
+  if (rotate === 90 || rotate === 270) {
+    rotateCss = `.login-bg-rotate{width:100vh;width:100dvh;height:100vw;height:100dvw;inset:auto;top:50%;left:50%;transform:translate(-50%,-50%) rotate(${rotate}deg);}`;
+  } else if (rotate === 180) {
+    rotateCss = `.login-bg-rotate{transform:rotate(180deg);}`;
+  }
   // preload 让浏览器以高优先级先取图；LQIP 与平均色保证首帧不是黑屏
   const head = [
     `<link rel="preload" as="image" href="${safe}" fetchpriority="high">`,
     `<style>:root{--login-bg:url('${safe}');--login-bg-color:${avg};${lqip ? `--login-bg-lqip:url('${lqip}');` : ''}}`,
-    `.login-bg-layer{${LOGIN_BG_MODE_CSS[mode] || LOGIN_BG_MODE_CSS.cover}}</style>`
+    `.login-bg-layer{${LOGIN_BG_MODE_CSS[mode] || LOGIN_BG_MODE_CSS.cover}}`,
+    `${rotateCss}</style>`
   ].join('');
   return INDEX_TPL.includes('<!--LOGIN_BG-->')
     ? INDEX_TPL.replace('<!--LOGIN_BG-->', head)

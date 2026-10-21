@@ -57,6 +57,8 @@
     :root { --login-bg: none; --login-bg-color: #0d1f33; }
     /* 底色取当前背景的平均色：图片字节到达前也不会出现「黑一下」 */
     .login-wrap { position:relative; height:100vh; height:100dvh; display:flex; align-items:center; justify-content:center; overflow:hidden; background-color:var(--login-bg-color, #0d1f33); }
+    /* 旋转容器：包裹 LQIP 与大图层，旋转时整体变换（角度由服务端按设置注入） */
+    .login-bg-rotate { position:absolute; inset:0; }
     /* LQIP：超小模糊占位图，先于大图绘制，避免黑屏/闪白 */
     .login-bg-lqip { position:absolute; inset:-3%; background-image:var(--login-bg-lqip, none); background-size:cover; background-position:center; background-repeat:no-repeat; filter:blur(18px); transform:scale(1.05); transition:opacity .45s ease; }
     /* 背景由 CSS 变量承载：服务端渲染时直接注入当前值，避免前端异步切换造成闪跳 */
@@ -79,6 +81,15 @@
       padding:0 16px calc(14px + env(safe-area-inset-bottom, 0px)); text-align:center;
       color:rgba(255,255,255,.72); font-size:12px; letter-spacing:1px; }
     .login-page-footer .company { font-size:13px; margin-bottom:4px; }
+    /* ===== 设置页：登录背景预览框（支持铺展方式 + 旋转） ===== */
+    .login-preview { position:relative; width:360px; max-width:100%; aspect-ratio:16/9; border:1px solid #e7e9ec; border-radius:4px; overflow:hidden; background:#e9edf2; }
+    .login-preview-inner { position:absolute; inset:0; }
+    .login-preview-inner.rot-90, .login-preview-inner.rot-270 {
+      inset:auto; width:56.25%; height:177.78%; top:50%; left:50%;
+      transform:translate(-50%,-50%) rotate(90deg);
+    }
+    .login-preview-inner.rot-180 { transform:rotate(180deg); }
+    .login-preview-inner.rot-270 { transform:translate(-50%,-50%) rotate(270deg); }
     .stat-card { background:#fff; border:1px solid #e7e9ec; border-radius:4px; padding:20px; }
     .stat-card .num { font-size:30px; font-weight:700; color:#3370ff; }
     .stat-card .label { color:#666; font-size:13px; margin-top:6px; }
