@@ -6,8 +6,9 @@
 # 镜像只含代码，db.json 等数据全在宿主机，更新容器不会丢失。
 services:
   grid-erp:
-    # :main 随 GitHub main 分支最新推送自动更新；如需固定版本可改 :v2.0.0
-    image: ghcr.io/wangsvven/ziliaozizhi-local-erp:main
+    # 已固定为 v2.0.1（稳定发布版本）。日后发布新版本时，需在此改标签（如 :v2.0.2）
+    # 并重新 pull，或改回 :main 以追 GitHub main 分支最新。
+    image: ghcr.io/wangsvven/ziliaozizhi-local-erp:v2.0.1
     container_name: grid-erp
     ports:
       - "5173:5173"
