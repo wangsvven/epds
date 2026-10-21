@@ -61,16 +61,5 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # 仓库是开源的，尽量把镜像包置为公开（多端点探测；仓库关联包 user 端点会 404）
-      - name: Make package public (best-effort)
-        if: ${{ github.event_name == 'push' }}
-        continue-on-error: true
-        run: |
-          PKG=ziliaozizhi-local-erp
-          OWNER=wangsvven
-          REPO=wangsvven/ziliaozizhi-local-erp
-          echo "=== A) user scope ==="; gh api -X PUT "users/$OWNER/packages/container/$PKG/visibility" -f visibility=public 2>&1 | head -2
-          echo "=== B) repo scope ==="; gh api -X PUT "repos/$REPO/packages/container/$PKG/visibility" -f visibility=public 2>&1 | head -2
-          echo "=== C) graphql ==="; gh api graphql -f query="mutation{updatePackageVisibility(input:{packageName:\"$PKG\",packageType:CONTAINER,visibility:PUBLIC,packageOwnerType:USER}){clientMutationId}}" 2>&1 | head -2
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 注：GHCR 镜像包（仓库关联包）的公开开关无法经 Actions API 设置，
+      # 需仓库 owner 在 GitHub Web UI（Packages → 设置 → Change visibility → Public）一次性开启。
