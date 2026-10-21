@@ -113,6 +113,8 @@ function seedDB() {
       allowSelfPurchase: true,
       // 企业欢迎页（访客登录前可见）
       welcome: { greeting: '欢迎来到我们的企业工作台', logoUrl: '' },
+      // 登录页背景：预设图路径或本地上传后的接口路径（可在「全局设置 → 登录界面」更换）
+      loginBg: '/login-bg/ink-color.jpg',
       // 建管 / 实施单位：留空，由用户自行设置
       unitBuildCity: '',
       unitBuildCounty: '',
@@ -229,6 +231,10 @@ function migrateDB() {
   // 设置：补 welcome
   if (DB.settings && !DB.settings.welcome) {
     DB.settings.welcome = { greeting: '欢迎来到我们的企业工作台', logoUrl: '' };
+  }
+  // 设置：补登录页背景（旧实例无该字段时给默认预设，不覆盖用户已选）
+  if (DB.settings && !DB.settings.loginBg) {
+    DB.settings.loginBg = '/login-bg/ink-color.jpg';
   }
   // 单位维护：集合 + 作业建管/实施单位（周计划弹窗自动带出）
   if (!Array.isArray(DB.units)) DB.units = [];
@@ -533,6 +539,23 @@ app.post('/api/login', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, name: DB.settings.systemName }));
+
+// ---------- 登录页公开配置（无需登录：登录页需在鉴权前取背景图 / 系统名） ----------
+app.get('/api/public-config', (req, res) => {
+  res.json({
+    systemName: DB.settings.systemName || '',
+    companyName: DB.settings.companyName || '',
+    loginBg: DB.settings.loginBg || '/login-bg/ink-color.jpg'
+  });
+});
+// 本地上传的登录页背景（无需登录；仅允许读取 data/uploads/login-bg 目录，防目录穿越）
+app.get('/api/login-bg/:name', (req, res) => {
+  const name = path.basename(String(req.params.name || ''));
+  if (!name) return res.status(400).json({ error: '参数错误' });
+  const file = path.join(__dirname, 'data', 'uploads', 'login-bg', name);
+  if (!fs.existsSync(file)) return res.status(404).json({ error: '背景不存在' });
+  res.sendFile(file);
+});
 
 app.use('/api', authMiddleware);
 
@@ -1953,6 +1976,28 @@ app.put('/api/settings', (req, res) => {
   DB.settings = { ...DB.settings, ...req.body };
   saveDB();
   res.json(DB.settings);
+});
+
+// ---------- 登录页背景：本地上传（管理员）→ data/uploads/login-bg/ ----------
+app.post('/api/settings/login-bg', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    const name = req.file.originalname || '';
+    if (!/\.(jpg|jpeg|png|webp|gif)$/i.test(name)) return res.status(400).json({ error: '仅支持 JPG / PNG / WebP / GIF 图片' });
+    if (req.file.size > 10 * 1024 * 1024) return res.status(400).json({ error: '图片不超过 10MB' });
+    const upDir = path.join(__dirname, 'data', 'uploads', 'login-bg');
+    if (!fs.existsSync(upDir)) fs.mkdirSync(upDir, { recursive: true });
+    // 清理上一次上传的背景文件（预设图在 public/ 内，不受影响）
+    const old = DB.settings.loginBg;
+    if (old && old.startsWith('/api/login-bg/')) {
+      try { fs.unlinkSync(path.join(upDir, path.basename(old))); } catch (e) {}
+    }
+    const diskName = 'bg_' + Date.now() + '_' + name.replace(/[\\/:*?"<>|]/g, '_');
+    fs.writeFileSync(path.join(upDir, diskName), req.file.buffer);
+    DB.settings.loginBg = '/api/login-bg/' + diskName;
+    saveDB();
+    res.json({ ok: true, loginBg: DB.settings.loginBg });
+  } catch (e) { res.status(500).json({ error: '上传失败：' + e.message }); }
 });
 
 // ---------- 静态前端 ----------

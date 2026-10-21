@@ -16,7 +16,18 @@ const api = {
   get(u) { return this.req('GET', u); },
   post(u, b) { return this.req('POST', u, b); },
   put(u, b) { return this.req('PUT', u, b); },
-  del(u) { return this.req('DELETE', u); }
+  del(u) { return this.req('DELETE', u); },
+  // 文件上传（multipart/form-data）
+  async upload(u, fd) {
+    const token = localStorage.getItem('erp_token');
+    const headers = {};
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const res = await fetch(u, { method: 'POST', headers, body: fd });
+    if (res.status === 401) { localStorage.removeItem('erp_token'); location.reload(); throw new Error('unauth'); }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || '上传失败');
+    return data;
+  }
 };
 
 function tagType(val) {
@@ -1251,7 +1262,7 @@ const materialCatalogCfg = {
 const SettingsView = {
   setup() {
     const active = ref('annualPlans');
-    const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, welcome: { greeting: '', logoUrl: '' } });
+    const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', welcome: { greeting: '', logoUrl: '' } });
     const savedName = ref('');
     async function loadSite() {
       try {
@@ -1275,6 +1286,38 @@ const SettingsView = {
         ElementPlus.ElMessage.success('欢迎页已保存');
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
+    // ---------- 登录界面：背景图（预设 + 本地上传） ----------
+    const LOGIN_BG_PRESETS = [
+      { key: 'ink-color', label: '千里江山', desc: '彩色水墨', url: '/login-bg/ink-color.jpg' },
+      { key: 'ink-gray', label: '水墨烟山', desc: '青灰淡墨', url: '/login-bg/ink-gray.jpg' },
+      { key: 'network', label: '网络节点', desc: '黑白科技', url: '/login-bg/network.jpg' }
+    ];
+    const bgSaving = ref(false);
+    const bgUploading = ref(false);
+    async function saveLoginBg() {
+      bgSaving.value = true;
+      try {
+        await api.put('/api/settings', { loginBg: site.loginBg });
+        ElementPlus.ElMessage.success('登录页背景已保存');
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { bgSaving.value = false; }
+    }
+    async function uploadLoginBg(opt) {
+      const file = opt && opt.file;
+      if (!file) return;
+      if (!/\.(jpg|jpeg|png|webp|gif)$/i.test(file.name)) { ElementPlus.ElMessage.error('仅支持 JPG / PNG / WebP / GIF 图片'); return; }
+      if (file.size > 10 * 1024 * 1024) { ElementPlus.ElMessage.error('图片不超过 10MB'); return; }
+      bgUploading.value = true;
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await api.upload('/api/settings/login-bg', fd);
+        site.loginBg = r.loginBg;
+        ElementPlus.ElMessage.success('背景已上传并应用');
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { bgUploading.value = false; }
+    }
+    function isLoginBgPreset(url) { return LOGIN_BG_PRESETS.some(p => p.url === url); }
     // ---------- 单位维护（分包/兄弟/监理/抄送 + 作业建管/实施单位） ----------
     const UNIT_TYPES = ['分包单位', '兄弟单位', '监理单位', '抄送单位'];
     const units = ref([]);
@@ -1309,7 +1352,7 @@ const SettingsView = {
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
     onMounted(() => { loadSite(); loadUnits(); });
-    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, materialCatalogCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit };
+    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, materialCatalogCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, bgSaving, bgUploading, saveLoginBg, uploadLoginBg, isLoginBgPreset };
   },
   template: `
   <div>
@@ -1362,6 +1405,57 @@ const SettingsView = {
         </el-dialog>
       </el-tab-pane>
       <el-tab-pane label="班组管理" name="teams"><CrudView :config="teamCfg" :key="teamCfg.endpoint" /></el-tab-pane>
+      <el-tab-pane label="登录界面" name="loginBg">
+        <el-card>
+          <template #header>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <b>登录页背景</b>
+              <el-button size="small" @click="loadSite">重新读取</el-button>
+            </div>
+          </template>
+          <div style="color:#666;font-size:13px;line-height:1.8;margin-bottom:14px">
+            选择预设背景或上传本机图片，作为访客登录页的全屏背景。建议使用 1920×1080 及以上的横图，JPG / PNG / WebP / GIF，不超过 10MB。
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:18px">
+            <div v-for="p in LOGIN_BG_PRESETS" :key="p.key"
+                 style="width:186px;cursor:pointer"
+                 @click="site.loginBg = p.url">
+              <div :style="{
+                     backgroundImage:'url(' + p.url + ')',
+                     border: site.loginBg === p.url ? '2px solid #3370ff' : '1px solid #e7e9ec',
+                     borderRadius:'4px', height:'104px', backgroundSize:'cover', backgroundPosition:'center'
+                   }"></div>
+              <div style="margin-top:6px;font-size:13px;color:#1f2d3d;display:flex;justify-content:space-between;align-items:center">
+                <span>{{ p.label }}</span>
+                <el-tag v-if="site.loginBg === p.url" type="primary" size="small">使用中</el-tag>
+              </div>
+              <div style="font-size:12px;color:#999">{{ p.desc }}</div>
+            </div>
+            <div style="width:186px">
+              <div style="border:1px dashed #d4d8de;border-radius:4px;height:104px;display:flex;align-items:center;justify-content:center;background:#fafbfc">
+                <el-upload
+                  :show-file-list="false"
+                  accept=".jpg,.jpeg,.png,.webp,.gif,image/*"
+                  :http-request="uploadLoginBg">
+                  <el-button size="small" type="primary" plain :loading="bgUploading">上传本机图片</el-button>
+                </el-upload>
+              </div>
+              <div style="margin-top:6px;font-size:12px;color:#999;line-height:1.6">
+                自定义上传；上传后自动应用
+              </div>
+            </div>
+          </div>
+          <el-alert type="info" :closable="false" style="margin-bottom:16px">
+            <template #title>当前背景</template>
+            <div style="font-size:13px;line-height:1.9">
+              地址：<span style="font-family:monospace;word-break:break-all">{{ site.loginBg || '（未设置）' }}</span>
+              <span v-if="isLoginBgPreset(site.loginBg)" style="margin-left:8px;color:#3370ff">· 预设图</span>
+              <span v-else style="margin-left:8px;color:#00b42a">· 自定义上传</span>
+            </div>
+          </el-alert>
+          <el-button type="primary" :loading="bgSaving" @click="saveLoginBg">保存背景设置</el-button>
+        </el-card>
+      </el-tab-pane>
       <el-tab-pane label="网站设置" name="site">
         <el-card style="margin-bottom:16px">
           <template #header><b>网站标题（最多 128 个字符）</b></template>
@@ -2756,6 +2850,9 @@ const App = {
     const route = ref('home');
     const loginForm = reactive({ username: '', password: '' });
     const loginLoading = ref(false);
+    // 登录页背景 / 品牌：由公开接口提供（登录页在鉴权前就要取到）
+    const loginBg = ref('/login-bg/ink-color.jpg');
+    const loginBrand = reactive({ systemName: '', companyName: '' });
 
     const allMenu = [
       { key: 'home', label: '用户中心', comp: 'Dashboard' },
@@ -2813,6 +2910,12 @@ const App = {
 
     onMounted(() => {
       if (token.value) fetchMe();
+      // 登录页公开配置（无需登录）：背景图 + 系统名 / 企业名
+      api.get('/api/public-config').then(c => {
+        loginBg.value = c.loginBg || '/login-bg/ink-color.jpg';
+        loginBrand.systemName = c.systemName || '';
+        loginBrand.companyName = c.companyName || '';
+      }).catch(() => {});
       // 项目详情跳转：进入材料台账 / 计划管理（跨模块导航）
       function navMaterials() { route.value = 'materials'; }
       function navPlans() { route.value = 'plans'; }
@@ -2829,20 +2932,27 @@ const App = {
     // 网站设置保存后实时刷新顶部标题/企业名称
     window.addEventListener('brand-changed', fetchMe);
 
-    return { token, me, tenant, sysName, collapsed, route, loginForm, loginLoading, menu, current, login, logout, go, switchTeam, viewVersion };
+    return { token, me, tenant, sysName, collapsed, route, loginForm, loginLoading, loginBg, loginBrand, menu, current, login, logout, go, switchTeam, viewVersion };
   },
   template: `
   <div v-if="!token">
     <div class="login-wrap">
+      <div class="login-bg-layer" :style="{ backgroundImage: 'url(' + loginBg + ')' }"></div>
       <div class="login-card">
-        <h2>电网生产ERP</h2>
-        <div class="sub">本地自托管版 · 请登录</div>
+        <div class="brand">
+          <h2>{{ loginBrand.systemName || '电网生产ERP' }}</h2>
+          <div class="sub">本地自托管版 · 请登录</div>
+        </div>
         <el-form @submit.prevent="login">
-          <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" /></el-form-item>
-          <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password /></el-form-item>
+          <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" :prefix-icon="'User'" /></el-form-item>
+          <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password :prefix-icon="'Lock'" /></el-form-item>
           <el-button type="primary" size="large" style="width:100%" :loading="loginLoading" @click="login">登 录</el-button>
         </el-form>
-        <div style="margin-top:14px;color:#aaa;font-size:12px;text-align:center">默认账号 admin / admin123</div>
+        <div class="login-tip">默认账号 <b>admin</b> / <b>admin123</b></div>
+      </div>
+      <div class="login-page-footer">
+        <div class="company" v-if="loginBrand.companyName">{{ loginBrand.companyName }}</div>
+        <div v-else>{{ loginBrand.systemName || '' }}</div>
       </div>
     </div>
   </div>

@@ -53,10 +53,26 @@
     .aside .menu-item.active { background:#3370ff; color:#fff; }
     .main { flex:1; padding:18px; overflow:auto; }
     .page-title { font-size:18px; font-weight:600; margin:0 0 16px; color:#1f2d3d; }
-    .login-wrap { height:100%; display:flex; align-items:center; justify-content:center; background:#0d1f33; }
-    .login-card { width:380px; background:#fff; border-radius:4px; padding:34px 30px; box-shadow:0 4px 16px rgba(0,0,0,.2); }
-    .login-card h2 { text-align:center; margin:0 0 6px; color:#3370ff; }
-    .login-card .sub { text-align:center; color:#888; font-size:13px; margin-bottom:22px; }
+    /* ===== 登录页：全屏背景图 + 毛玻璃卡片 ===== */
+    .login-wrap { position:relative; height:100vh; height:100dvh; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#0d1f33; }
+    .login-bg-layer { position:absolute; inset:0; background-repeat:no-repeat; background-position:center center; background-size:cover; }
+    .login-bg-layer.is-mobile { background-position:center 30%; }
+    /* 顶部暗色遮罩：压住背景，突出卡片与文字 */
+    .login-wrap::after { content:''; position:absolute; inset:0; z-index:1;
+      background:linear-gradient(160deg, rgba(13,31,51,.46) 0%, rgba(13,31,51,.20) 46%, rgba(13,31,51,.38) 100%); }
+    .login-card { position:relative; z-index:2; width:400px; max-width:calc(100vw - 32px);
+      background:rgba(255,255,255,.88); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
+      border:1px solid rgba(255,255,255,.6); border-radius:12px; padding:38px 36px 30px;
+      box-shadow:0 18px 48px rgba(0,20,40,.28); }
+    .login-card .brand { text-align:center; margin-bottom:24px; }
+    .login-card .brand h2 { margin:0 0 8px; color:#1d3b6e; font-size:24px; letter-spacing:3px; font-weight:600; }
+    .login-card .brand .sub { color:#6b7a90; font-size:13px; letter-spacing:1px; }
+    .login-card .login-tip { margin-top:18px; text-align:center; color:#98a4b4; font-size:12px; }
+    .login-card .login-tip b { color:#7d8b9d; font-weight:500; }
+    .login-page-footer { position:absolute; left:0; right:0; bottom:0; z-index:2;
+      padding:0 16px calc(14px + env(safe-area-inset-bottom, 0px)); text-align:center;
+      color:rgba(255,255,255,.72); font-size:12px; letter-spacing:1px; }
+    .login-page-footer .company { font-size:13px; margin-bottom:4px; }
     .stat-card { background:#fff; border:1px solid #e7e9ec; border-radius:4px; padding:20px; }
     .stat-card .num { font-size:30px; font-weight:700; color:#3370ff; }
     .stat-card .label { color:#666; font-size:13px; margin-top:6px; }
@@ -138,7 +154,10 @@
   }
   /* 登录页自适应 */
   @media (max-width: 480px) {
-    .login-card { width:calc(100vw - 32px); max-width:380px; padding:26px 20px; }
+    .login-card { width:calc(100vw - 32px); max-width:380px; padding:28px 22px 24px; }
+    .login-card .brand { margin-bottom:18px; }
+    .login-card .brand h2 { font-size:20px; letter-spacing:2px; }
+    .login-card .brand .sub { font-size:12px; }
   }
   /* 小屏（iPhone SE / mini 等）再收紧 */
   @media (max-width: 375px) {
