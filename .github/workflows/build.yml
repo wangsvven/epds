@@ -65,7 +65,13 @@ jobs:
       - name: Ensure package is public
         if: ${{ github.event_name == 'push' }}
         run: |
+          set -x
           PKG=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]' | cut -d/ -f2)
-          gh api -X PUT "users/${{ github.repository_owner }}/packages/container/$PKG/visibility" -f visibility=public || true
+          OWNER="${{ github.repository_owner }}"
+          echo "PKG=$PKG OWNER=$OWNER"
+          echo "--- PUT visibility=public (user scope) ---"
+          gh api -X PUT "users/$OWNER/packages/container/$PKG/visibility" -f visibility=public; echo "exit_user=$?"
+          echo "--- verify visibility ---"
+          gh api "users/$OWNER/packages/container/$PKG" --jq '.visibility' 2>&1 || echo "verify_failed"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
