@@ -13,7 +13,7 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 
 // 材料 Excel 导入：内存暂存，单文件上限 20MB
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 }, defParamCharset: 'utf8' });
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
@@ -21,7 +21,6 @@ const PORT = process.env.PORT || 5173;
 
 // 登录页默认背景（内置预设：草原雪山 / 冰川落日 / 层峦叠嶂）
 const DEFAULT_LOGIN_BG = '/login-bg/valley.jpg';
-const LOGIN_BG_PRESETS = ['/login-bg/valley.jpg', '/login-bg/ice.jpg', '/login-bg/ridge.jpg'];
 // 旧版预设路径 → 新预设（升级时迁移，避免指向已删除的图）
 const LEGACY_LOGIN_BG_MAP = {
   '/login-bg/ink-color.jpg': '/login-bg/valley.jpg',
@@ -29,57 +28,71 @@ const LEGACY_LOGIN_BG_MAP = {
   '/login-bg/network.jpg': '/login-bg/ridge.jpg'
 };
 
-// ===== 母账号（超级所有者）+ 团队子空间 架构 =====
-// 母账号（唯一）：role==='超级用户'，自有业务空间 SPACE_DEFAULT（不属于任何团队），最高控制权
-// 团队（独立业务空间）：DB.bizTeams，团队 id 即其业务记录的 spaceId；母↔团队、团队A↔团队B 互相隔离
-// 账号-团队归属：DB.teamMembers（一个账号可加入多个团队，各团队权限独立）
-// 团队内角色：团队管理员（管成员/分权限，无重置权）/ 团队成员（按 permissions 操作）
-const SPACE_DEFAULT = 'sp_default';
-const ROLE_PARENT = '超级用户';        // 母账号
-const ROLE_TEAM_ADMIN = '团队管理员';   // 团队管理员
-const TEAM_PERMS = ['查看', '录入', '导出', '审批'];
-// 按 SpaceID 行级隔离：所有业务私有集合都挂 spaceId；普通删除用逻辑删除 deleted；团队一键清空用物理删除
-const BIZ_COLLECTIONS = ['projects', 'plans', 'workPlans', 'borrowWorks', 'completionDocuments', 'materials', 'materialRequisitions', 'materialImports', 'materialOutbound', 'workers', 'contacts'];
-// 当前请求的隔离空间（由鉴权中间件解析写入 req.spaceId）：母账号自有空间 / 当前团队 id
-function reqSpaceId(req) { return req ? req.spaceId : null; }
-function isAdmin(req) { return !!(req && req.user && req.user.role === ROLE_PARENT); }
-// 当前登录用户可见的业务记录（未删除 + 归属本空间）
-function spaceFilter(req) { const sid = reqSpaceId(req); return rec => rec && !rec.deleted && rec.spaceId === sid; }
-// 会话(token) → 当前团队 id（内存态；重启/缺失时回退到该账号首个归属团队）
-const ACTIVE_TEAM = {};
-function teamsOfUser(username) { return (DB.teamMembers || []).filter(m => m.username === username).map(m => m.teamId); }
-function membershipOf(username, teamId) { return (DB.teamMembers || []).find(m => m.username === username && m.teamId === teamId) || null; }
-function isTeamAdminOf(username, teamId) { const m = membershipOf(username, teamId); return !!m && m.role === ROLE_TEAM_ADMIN; }
-// 删除某空间（团队）在磁盘上的业务附件：文档上传 + 各项目资料文件
-function purgeSpaceFiles(spaceId) {
-  let removed = 0;
-  (DB.documents.files || []).forEach(f => {
-    if (f.spaceId === spaceId && f.path && f.path.startsWith('uploads/')) {
-      try { fs.unlinkSync(path.join(__dirname, 'data', f.path)); removed++; } catch (e) {}
-    }
-  });
-  (DB.projects || []).forEach(p => {
-    if (p.spaceId !== spaceId) return;
-    (p.files || []).forEach(f => {
-      if (f.path && f.path.startsWith('uploads/')) {
-        try { fs.unlinkSync(path.join(__dirname, 'data', f.path)); removed++; } catch (e) {}
-      }
-    });
-    // 清理空的项目附件目录
-    try { fs.rmdirSync(path.join(__dirname, 'data', 'uploads', 'projects', p.id)); } catch (e) {}
-  });
-  return removed;
+// ===== 数据模型 =====
+// 业务私有集合统一采用逻辑删除（deleted 标记）
+// 工作票自动化配置的四类数据源
+const WT_COLLECTIONS = ['wtRules', 'wtTechMeasures', 'wtSafetyMeasures', 'wtHospitals'];
+const ROLE_ADMIN = '超级用户';
+function isAdmin(req) { return !!(req && req.user && req.user.role === ROLE_ADMIN); }
+
+// ---------- 用户组与写权限 ----------
+// 仅超级用户可维护账号；用户组决定「哪些模块可写」，未列出的模块一律只读。
+const USER_GROUPS = ['超级用户', '资料员', '材料员', '班组长'];
+const MODULE_NAMES = { projects: '项目列表', materials: '材料台账', plans: '计划管理', borrow: '借工管理', completion: '竣工资料', documents: '文档中心', users: '用户管理', settings: '全局设置' };
+const ROLE_WRITE = {
+  '超级用户': '*',
+  '资料员': '*',
+  '材料员': ['materials'],
+  '班组长': ['planQuantities']
+};
+// 旧用户组 → 现有四组的迁移映射
+const LEGACY_GROUP_MAP = { '管理员': '资料员' };
+function normalizeUserGroup(g) {
+  if (USER_GROUPS.includes(g)) return g;
+  return LEGACY_GROUP_MAP[g] || '班组长';
 }
+// 班组长可填写的「工程实际施工量」字段（计划管理 · 当日计划工作量）
+const PLAN_QTY_FIELDS = ['wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04'];
+function userGroupOf(u) { return normalizeUserGroup((u && (u.userGroup || u.role)) || '班组长'); }
+function writeModulesOf(u) {
+  const w = ROLE_WRITE[userGroupOf(u)];
+  return w === '*' ? ['*'] : (Array.isArray(w) ? w.slice() : []);
+}
+function canWriteModule(u, mod) {
+  const w = writeModulesOf(u);
+  return w.includes('*') || w.includes(mod);
+}
+function moduleOfPath(fp) {
+  if (/^\/api\/projects(\/|$)/.test(fp)) return 'projects';
+  if (/^\/api\/plans(\/|$)/.test(fp) || /^\/api\/workPlans(\/|$)/.test(fp)) return 'plans';
+  if (/^\/api\/materials(\/|$)/.test(fp) || /^\/api\/materialRequisitions(\/|$)/.test(fp) || /^\/api\/materialImports(\/|$)/.test(fp) || /^\/api\/materialOutbound(\/|$)/.test(fp)) return 'materials';
+  if (/^\/api\/borrowWorks(\/|$)/.test(fp)) return 'borrow';
+  if (/^\/api\/completionDocuments(\/|$)/.test(fp)) return 'completion';
+  if (/^\/api\/documents(\/|$)/.test(fp) || /^\/api\/workticket(\/|$)/.test(fp)) return 'documents';
+  if (/^\/api\/users(\/|$)/.test(fp) || /^\/api\/workers(\/|$)/.test(fp) || /^\/api\/contacts(\/|$)/.test(fp)) return 'users';
+  if (/^\/api\/settings(\/|$)/.test(fp) || /^\/api\/annualPlans(\/|$)/.test(fp) || /^\/api\/substations(\/|$)/.test(fp) || /^\/api\/teams(\/|$)/.test(fp) || /^\/api\/materialCatalog(\/|$)/.test(fp) || /^\/api\/units(\/|$)/.test(fp)) return 'settings';
+  return null;
+}
+function passwordStrong(p) {
+  let n = 0;
+  if (/[a-z]/.test(p)) n++;
+  if (/[A-Z]/.test(p)) n++;
+  if (/\d/.test(p)) n++;
+  if (/[^A-Za-z0-9]/.test(p)) n++;
+  return n >= 3;
+}
+// 业务记录可见性：仅过滤已逻辑删除的行
+function aliveFilter() { return rec => !!rec && !rec.deleted; }
 
 // ---------- 本地 JSON 存储 ----------
 
 function seedDB() {
   const now = new Date().toISOString();
-  // 全新实例：仅创建唯一母账号与空数据结构，不含任何演示/模板业务数据
+  // 全新实例：仅创建唯一超级用户与空数据结构，不含任何演示/模板业务数据
   const seeded = {
     // 企业信息：全新实例为空，由用户在「全局设置 → 网站设置」自行填写
     tenant: { name: '', shortName: '' },
-    // 仅保留唯一超级用户（母账号）；姓名/邮箱/电话等由用户自行维护
+    // 仅保留唯一超级用户；姓名/邮箱/电话等由用户自行维护
     users: [
       { id: 'u1', username: 'admin', loginName: 'admin', email: '', name: '管理员', role: '超级用户', userGroup: '超级用户', password: 'admin123', phone: '', createdAt: now }
     ],
@@ -103,6 +116,11 @@ function seedDB() {
     workers: [],
     // 外部通讯录（用户管理第三个标签页）：初始为空
     contacts: [],
+    // 工作票自动化配置数据源：初始为空，由管理员/资料员维护
+    wtRules: [],            // 作业内容匹配规则
+    wtTechMeasures: [],     // 施工技术措施
+    wtSafetyMeasures: [],   // 施工安全措施
+    wtHospitals: [],        // 医院联系方式
     // ---------- 全局设置（按真实系统 5 子项，截图 2026-10-12） ----------
     // 年度计划名称：名称自带年份，仅 名称+排序
     // ===== 全局设置字典：全部为空，由用户自行维护 =====
@@ -135,26 +153,18 @@ function seedDB() {
       unitBuildCity: '',
       unitBuildCounty: '',
       unitExecCity: '',
-      unitExecCounty: ''
+      unitExecCounty: '',
+      // 默认应急医院（资料库分组「默认应急医院」）
+      emergencyHospital: { name: '', phone: '' },
+      // 首次使用初始化向导是否已完成（企业名称等基础设置）
+      initialized: false
     },
     // 版本标记：全新实例即 V2 模型，避免 migrateDB 用旧演示模型覆盖空集合
     projectsV2: true,
     materialsV2: true,
     requisitionsV2: true,
-    // 母账号自有业务空间（不属于任何团队）；团队空间见 bizTeams
-    spaces: [
-      { id: SPACE_DEFAULT, ownerUsername: 'admin', role: '超级用户', createdAt: nowISO(), status: 'active' }
-    ],
-    bizTeams: [],    // 团队（独立业务空间）：{ id, name, status, createdBy, createdAt, lastResetAt }
-    teamMembers: [], // 账号-团队归属：{ id, teamId, username, role, permissions[], joinedAt }
-    auditLogs: [], // 系统级操作日志（重置等高危操作留痕，重置不可清除）
     tokens: {} // token -> username  (运行时内存)
   };
-  // 业务数据归属母账号自有空间（行级隔离）
-  BIZ_COLLECTIONS.forEach(k => {
-    if (Array.isArray(seeded[k])) seeded[k].forEach(r => { r.spaceId = SPACE_DEFAULT; if (r.deleted === undefined) r.deleted = false; });
-  });
-  seeded.users.forEach(u => { if (!u.spaceId) u.spaceId = SPACE_DEFAULT; });
   return seeded;
 }
 
@@ -175,6 +185,18 @@ function loadDB() {
 }
 
 let DB = loadDB();
+
+// 修复历史上传文件名乱码：浏览器按 UTF-8 发送 filename，旧版 multer 以 latin1 解码
+function repairUploadName(s) {
+  if (!s || typeof s !== 'string') return s;
+  if (!/[\u00c0-\u00ff]/.test(s)) return s;
+  try {
+    const t = Buffer.from(s, 'latin1').toString('utf8');
+    if (t === s || t.includes('\ufffd')) return s;
+    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(t)) return t;
+  } catch (e) {}
+  return s;
+}
 
 // ---------- 旧数据模型迁移 ----------
 function migrateDB() {
@@ -270,6 +292,21 @@ function migrateDB() {
   if (DB.settings && DB.settings.loginBgMeta === undefined) {
     DB.settings.loginBgMeta = null;
   }
+  // 设置：默认应急医院（资料库「默认应急医院」分组，单条配置）
+  if (DB.settings && !DB.settings.emergencyHospital) {
+    DB.settings.emergencyHospital = { name: '', phone: '' };
+  }
+  // 资料库：医院联系方式补「作业地址匹配词」字段（旧记录无该字段）
+  if (Array.isArray(DB.wtHospitals)) {
+    DB.wtHospitals.forEach(h => {
+      if (h.area === undefined) h.area = '';
+      if (h.deleted === undefined) h.deleted = false;
+    });
+  }
+  // 设置：补初始化标记（旧实例默认视为已初始化，不弹首次向导；新实例为 false）
+  if (DB.settings && DB.settings.initialized === undefined) {
+    DB.settings.initialized = false;
+  }
   // 单位维护：集合 + 作业建管/实施单位（周计划弹窗自动带出）
   if (!Array.isArray(DB.units)) DB.units = [];
   if (DB.settings && DB.settings.unitBuildCity === undefined) {
@@ -344,58 +381,83 @@ function migrateDB() {
       });
     });
     // 存量材料状态按最新规则自愈（到货情况优先于「已生成领料单」）
-    DB.materials.forEach(m => { const s = materialStatus(m, SPACE_DEFAULT); if (m.status !== s) m.status = s; });
+    DB.materials.forEach(m => { const s = materialStatus(m); if (m.status !== s) m.status = s; });
   }
-  // ---------- 母账号 + 团队子空间 迁移 ----------
+  // ---------- 数据模型迁移 ----------
   // 0) 级联删除补漏：所属项目已被逻辑删除的材料 → 一并逻辑删除（防止删项目前的存量数据残留）
   if (Array.isArray(DB.materials) && Array.isArray(DB.projects)) {
     const deadProjectNames = new Set(DB.projects.filter(p => p.deleted).map(p => p.name));
     DB.materials.forEach(m => { if (!m.deleted && m.project && deadProjectNames.has(m.project)) m.deleted = true; });
   }
-  // 1) 保证集合存在：母账号自有空间 spaces / 团队 bizTeams / 归属 teamMembers / 审计 auditLogs
-  if (!Array.isArray(DB.spaces)) DB.spaces = [];
-  if (!DB.spaces.some(s => s.id === SPACE_DEFAULT)) DB.spaces.push({ id: SPACE_DEFAULT, ownerUsername: 'admin', role: '超级用户', createdAt: nowISO(), status: 'active' });
-  if (!Array.isArray(DB.bizTeams)) DB.bizTeams = [];
-  if (!Array.isArray(DB.teamMembers)) DB.teamMembers = [];
-  if (!Array.isArray(DB.auditLogs)) DB.auditLogs = [];
-  // 2) 旧「每账号独立空间 sp_<username>」升级为团队：每个历史独立空间 → 团队 tm_<username>，账号任该团队管理员，业务记录 spaceId 迁移过去
-  if (Array.isArray(DB.users)) {
-    DB.users.forEach(u => {
-      if (u.role === ROLE_PARENT) { u.spaceId = SPACE_DEFAULT; return; }
-      const oldSid = u.spaceId;
-      if (!oldSid || oldSid === SPACE_DEFAULT) return; // 无历史独立空间：保持无团队，后续由母账号分配
-      const teamId = 'tm_' + u.username;
-      if (!DB.bizTeams.some(t => t.id === teamId)) {
-        DB.bizTeams.push({ id: teamId, name: (u.name || u.username) + '的团队', status: 'active', createdBy: 'admin', createdAt: nowISO() });
-      }
-      if (!DB.teamMembers.some(m => m.teamId === teamId && m.username === u.username)) {
-        DB.teamMembers.push({ id: genId('tmb'), teamId, username: u.username, role: ROLE_TEAM_ADMIN, permissions: TEAM_PERMS.slice(), joinedAt: nowISO() });
-      }
-      BIZ_COLLECTIONS.forEach(k => { if (Array.isArray(DB[k])) DB[k].forEach(r => { if (r.spaceId === oldSid) r.spaceId = teamId; }); });
-      if (DB.documents && Array.isArray(DB.documents.files)) DB.documents.files.forEach(f => { if (f.spaceId === oldSid) f.spaceId = teamId; });
-      u.spaceId = teamId; // 兼容字段：主团队
-    });
-  }
-  // 用户模型对齐原版截图字段：补 loginName/email/userGroup；role 归一为「用户组」（超级用户/普通用户），团队角色另存 teamMembers
+  // 1) 清理历史多租户残留集合（业务空间 / 团队 / 成员归属 / 审计日志）
+  delete DB.spaces; delete DB.bizTeams; delete DB.teamMembers; delete DB.auditLogs;
+  // 2) 用户模型对齐原版截图字段：补 loginName/email/userGroup；旧用户组迁移到四组（超级用户/资料员/材料员/班组长）
   if (Array.isArray(DB.users)) {
     DB.users.forEach(u => {
       if (!u.loginName) u.loginName = u.username;
       if (u.email === undefined) u.email = '';
-      const isP = u.role === ROLE_PARENT || u.username === 'admin';
-      u.role = isP ? '超级用户' : '普通用户';
-      if (!u.userGroup) u.userGroup = u.role;
+      const isAdm = u.role === ROLE_ADMIN || u.username === 'admin';
+      if (!u.userGroup || !USER_GROUPS.includes(u.userGroup)) {
+        u.userGroup = isAdm ? '超级用户' : normalizeUserGroup(u.userGroup || u.role);
+      }
+      u.role = u.userGroup;
     });
   }
-  // 3) 存量业务记录补 spaceId（旧库无空间字段 → 归母账号自有空间，即演示数据）
-  BIZ_COLLECTIONS.forEach(k => {
-    if (!Array.isArray(DB[k])) return;
-    DB[k].forEach(r => { if (!r.spaceId) { r.spaceId = SPACE_DEFAULT; r.deleted = false; } });
-  });
-  // 4) 材料明细存量自愈（按母账号自有空间口径）
-  if (Array.isArray(DB.materials)) DB.materials.forEach(m => { if (m.spaceId === SPACE_DEFAULT) m.status = materialStatus(m, SPACE_DEFAULT); });
-  // 5) 文档中心用户上传文件归属（fixed 系统文件保持全局、无 spaceId）
+  // 3) 工作票自动化配置集合兜底
+  WT_COLLECTIONS.forEach(k => { if (!Array.isArray(DB[k])) DB[k] = []; });
+  // 4) 修复历史上传文件名乱码（仅修展示名，磁盘 path 保持不变）
   if (DB.documents && Array.isArray(DB.documents.files)) {
-    DB.documents.files.forEach(f => { if (!f.fixed && !f.spaceId) { f.spaceId = SPACE_DEFAULT; f.deleted = false; } });
+    DB.documents.files.forEach(f => { const n = repairUploadName(f.name); if (n !== f.name) f.name = n; });
+  }
+  if (DB.documents && DB.documents.surveyTemplate && DB.documents.surveyTemplate.name) {
+    const n = repairUploadName(DB.documents.surveyTemplate.name);
+    if (n !== DB.documents.surveyTemplate.name) DB.documents.surveyTemplate.name = n;
+  }
+  if (Array.isArray(DB.projects)) {
+    DB.projects.forEach(p => (p.files || []).forEach(f => { const n = repairUploadName(f.name); if (n !== f.name) f.name = n; }));
+  }
+  if (Array.isArray(DB.materialImports)) {
+    DB.materialImports.forEach(x => { const n = repairUploadName(x.fileName); if (n !== x.fileName) x.fileName = n; });
+  }
+  // 5) 导入批次 ↔ 材料关联补齐：新导入直接写 importId / materialIds；历史批次按批次号内嵌的毫秒时间戳回填
+  //    （导入时批次与材料在同一秒内创建，故以「同一秒」为主匹配，退化时放宽到 ±2s）
+  if (Array.isArray(DB.materialImports) && Array.isArray(DB.materials)) {
+    DB.materialImports.forEach(b => {
+      if (Array.isArray(b.materialIds) && b.materialIds.length) return;
+      const epoch = Number(String(b.batch || '').replace(/^IMP/, ''));
+      if (!isFinite(epoch) || epoch <= 0) return;
+      const sec = Math.floor(epoch / 1000);
+      const sameSec = m => {
+        if (m.importId) return false;
+        const t = Date.parse(m.createdAt || '');
+        return isFinite(t) && Math.floor(t / 1000) === sec;
+      };
+      let hit = DB.materials.filter(sameSec);
+      if (!hit.length) {
+        hit = DB.materials.filter(m => {
+          if (m.importId) return false;
+          const t = Date.parse(m.createdAt || '');
+          return isFinite(t) && Math.abs(t - epoch) <= 2000;
+        });
+      }
+      if (!hit.length) return;
+      hit.forEach(m => { m.importId = b.id; });
+      b.materialIds = hit.map(m => m.id);
+    });
+  }
+  // 6) 一致性修复（一次性）：批次已删除、但该批次材料仍存活（旧接口只删批次不删材料）→ 连带逻辑删除
+  if (!DB.batchCascadeV1 && Array.isArray(DB.materialImports) && Array.isArray(DB.materials)) {
+    DB.materialImports.filter(b => b.deleted).forEach(b => {
+      const ids = new Set((Array.isArray(b.materialIds) && b.materialIds.length)
+        ? b.materialIds
+        : DB.materials.filter(m => m.importId === b.id).map(m => m.id));
+      DB.materials.forEach(m => {
+        if (m.deleted || !ids.has(m.id)) return;
+        m.deleted = true; m.deletedAt = nowISO(); m.deletedBy = 'system:迁移修复（批次已删除）';
+      });
+      if (!b.deletedAt) b.deletedAt = nowISO();
+    });
+    DB.batchCascadeV1 = true;
   }
   saveDB();
 }
@@ -403,7 +465,6 @@ migrateDB();
 
 // 企业危险点库首次为空时，自动从「规范文件 危险点.xlsx」灌入，使其与文档中心的规范文件关联
 // 风险大类（与作业计划「风险因素」下拉的 9 个分类一一对应）；按关键词把规范文件明细归入对应大类
-const RISK_CATEGORIES = ['有限空间', '机械伤害', '起重伤害', '触电', '高处坠落', '倒塔/坍塌', '跨越风险', '物体打击', '动火作业'];
 const RISK_CATEGORY_RULES = [
   ['有限空间', ['有限空间']],
   ['高处坠落', ['坠落', '登杆']],
@@ -513,11 +574,8 @@ const app = express();
 app.use(express.json());
 const TOKENS = DB.tokens || (DB.tokens = {});
 
-// 业务数据路径前缀：母账号审计查看团队时，仅禁止写这些业务接口（管理/字典/设置类不受限）
-const BIZ_PATH_PREFIX = ['/api/projects', '/api/materials', '/api/materialRequisitions', '/api/requisitions', '/api/materialOutbound', '/api/materialImports', '/api/plans', '/api/workPlans', '/api/borrowWorks', '/api/completionDocuments', '/api/workers', '/api/contacts', '/api/documents'];
 // app.use('/api') 挂载后 req.path 已去掉 /api 前缀，故一律用原始完整路径判断
 function fullPath(req) { return (req.originalUrl || req.path || '').split('?')[0]; }
-function isBizWrite(req) { const p = fullPath(req); return req.method !== 'GET' && BIZ_PATH_PREFIX.some(x => p === x || p.startsWith(x + '/')); }
 
 function authMiddleware(req, res, next) {
   { const fp = fullPath(req); if (fp === '/api/login' || fp === '/api/health') return next(); }
@@ -530,29 +588,20 @@ function authMiddleware(req, res, next) {
   if ((user.status || 'active') === 'disabled') return res.status(403).json({ error: '账号已停用' });
   req.user = user;
   req.token = token;
-  // ---- 解析当前隔离空间上下文 ----
-  if (user.role === ROLE_PARENT) {
-    // 母账号：默认自有空间；可切换到某团队做审计查看（只读）
-    const t = ACTIVE_TEAM[token];
-    if (t && DB.bizTeams.some(x => x.id === t)) { req.spaceId = t; req.parentViewingTeam = true; }
-    else { if (t) delete ACTIVE_TEAM[token]; req.spaceId = SPACE_DEFAULT; req.parentViewingTeam = false; }
-  } else {
-    // 团队成员/管理员：当前团队（缺失回退首个归属团队），校验归属与团队状态
-    let t = ACTIVE_TEAM[token];
-    if (!t || !membershipOf(user.username, t)) {
-      const first = teamsOfUser(user.username)[0];
-      if (first) { ACTIVE_TEAM[token] = first; t = first; } else { delete ACTIVE_TEAM[token]; t = null; }
+  // 写操作权限：未授权模块返回 403（本人改姓名/电话/密码、班组长填施工量除外）
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    const fp = fullPath(req);
+    if (fp !== '/api/login' && fp !== '/api/health') {
+      const isSelfProfile = method === 'PUT' && fp === '/api/users/' + user.id;
+      const isLeaderQty = method === 'PUT' && userGroupOf(user) === '班组长' && /^\/api\/workPlans\/[^/]+\/quantities$/.test(fp);
+      if (!isSelfProfile && !isLeaderQty) {
+        const mod = moduleOfPath(fp);
+        if (mod && !canWriteModule(user, mod)) {
+          return res.status(403).json({ error: '当前用户组「' + userGroupOf(user) + '」无权修改' + (MODULE_NAMES[mod] || '该模块') + '，仅可查看' });
+        }
+      }
     }
-    const team = t ? DB.bizTeams.find(x => x.id === t) : null;
-    const membership = t ? membershipOf(user.username, t) : null;
-    if (!team || team.status === 'disabled' || !membership) {
-      return res.status(403).json({ error: teamsOfUser(user.username).length ? '无权访问该团队或团队已停用' : '您尚未加入任何团队，请联系母账号分配' });
-    }
-    req.spaceId = t; req.teamMember = membership; req.parentViewingTeam = false;
-  }
-  // 母账号审计查看团队时，禁止修改业务数据（仅只读）；管理/字典/设置类接口豁免
-  if (req.parentViewingTeam && isBizWrite(req)) {
-    return res.status(403).json({ error: '母账号对团队空间仅审计查看，不可修改业务数据' });
   }
   next();
 }
@@ -565,14 +614,13 @@ app.post('/api/login', (req, res) => {
   if (!user) return res.status(401).json({ error: '用户名或密码错误' });
   const token = crypto.randomBytes(24).toString('hex');
   TOKENS[token] = user.username;
-  // 初始化当前团队上下文：母账号=自有空间；成员=首个归属团队
-  if (user.role === ROLE_PARENT) delete ACTIVE_TEAM[token];
-  else { const first = teamsOfUser(user.username)[0]; if (first) ACTIVE_TEAM[token] = first; else delete ACTIVE_TEAM[token]; }
   saveDB();
   res.json({ token, user: { id: user.id, name: user.name, role: user.role, username: user.username } });
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, name: DB.settings.systemName }));
+// favicon：避免浏览器默认请求 /favicon.ico 触发 404 控制台错误
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // ---------- 登录页公开配置（无需登录：登录页需在鉴权前取背景图 / 系统名） ----------
 app.get('/api/public-config', (req, res) => {
@@ -594,325 +642,105 @@ app.get('/api/login-bg/:name', (req, res) => {
 
 app.use('/api', authMiddleware);
 
-// 切换当前团队（会话级）：母账号可进入任意团队做审计查看；成员仅能切到已加入且未停用的团队
-app.post('/api/active-team', (req, res) => {
-  const teamId = String((req.body || {}).teamId || '').trim();
-  const u = req.user;
-  if (!teamId) { delete ACTIVE_TEAM[req.token]; saveDB(); return res.json({ ok: true, activeTeamId: null }); }
-  const team = DB.bizTeams.find(x => x.id === teamId);
-  if (!team) return res.status(404).json({ error: '团队不存在' });
-  if (u.role !== ROLE_PARENT) {
-    if (!membershipOf(u.username, teamId)) return res.status(403).json({ error: '您不属于该团队' });
-    if (team.status === 'disabled') return res.status(403).json({ error: '团队已停用' });
-  }
-  ACTIVE_TEAM[req.token] = teamId;
-  saveDB();
-  res.json({ ok: true, activeTeamId: teamId });
-});
-
 app.get('/api/me', (req, res) => {
   const u = req.user;
-  const isParent = u.role === ROLE_PARENT;
-  const teams = isParent
-    ? DB.bizTeams.filter(t => t.status !== 'deleted').map(t => ({ teamId: t.id, name: t.name, role: ROLE_TEAM_ADMIN, permissions: TEAM_PERMS.slice() }))
-    : DB.teamMembers.filter(m => m.username === u.username)
-        .map(m => { const t = DB.bizTeams.find(x => x.id === m.teamId); return t && t.status !== 'deleted' ? { teamId: t.id, name: t.name, role: m.role, permissions: m.permissions || [] } : null; })
-        .filter(Boolean);
-  const displayRole = isParent ? '母账号' : (req.teamMember ? req.teamMember.role : (u.userGroup || u.role || '普通用户'));
   res.json({
     user: {
-      id: u.id, name: u.name, role: displayRole, rawRole: u.role, username: u.username,
-      spaceId: req.spaceId, isAdmin: isParent, isParent, parentViewingTeam: !!req.parentViewingTeam
+      id: u.id, name: u.name, role: userGroupOf(u), rawRole: u.role, username: u.username,
+      isAdmin: isAdmin(req),
+      permissions: { group: userGroupOf(u), writeModules: writeModulesOf(u) }
     },
-    teams,
-    activeTeamId: req.spaceId,
-    isTeamAdmin: !isParent && DB.teamMembers.some(m => m.username === u.username && m.role === ROLE_TEAM_ADMIN),
-    activePermissions: isParent ? TEAM_PERMS.slice() : (req.teamMember ? (req.teamMember.permissions || []) : []),
     tenant: DB.tenant, settings: DB.settings
   });
 });
 
-// ---------- 账号 + 团队（母账号 + 团队子空间） ----------
-// 团队统计：成员数 / 管理员 / 业务记录数 / 文件数
-function teamStats(teamId) {
-  const members = (DB.teamMembers || []).filter(m => m.teamId === teamId);
-  const recordCount = BIZ_COLLECTIONS.reduce((n, c) => n + (DB[c] || []).filter(r => r.spaceId === teamId && !r.deleted).length, 0);
-  const fileCount = (DB.documents.files || []).filter(f => f.spaceId === teamId && !f.deleted).length;
-  const admins = members.filter(m => m.role === ROLE_TEAM_ADMIN).map(m => {
-    const u = DB.users.find(x => x.username === m.username);
-    return { username: m.username, name: u ? u.name : m.username };
-  });
-  return { memberCount: members.length, admins, recordCount, fileCount };
-}
-// 物理清空某空间（团队）：移除全部业务记录 + 删除磁盘附件；返回 { records, files }
-function physicallyClearSpace(spaceId) {
-  const files = purgeSpaceFiles(spaceId); // 先按记录删磁盘附件（文档 + 项目文件 + 空目录）
-  let records = 0;
-  BIZ_COLLECTIONS.forEach(c => {
-    if (!Array.isArray(DB[c])) return;
-    const before = DB[c].length;
-    DB[c] = DB[c].filter(r => r.spaceId !== spaceId);
-    records += before - DB[c].length;
-  });
-  if (DB.documents && Array.isArray(DB.documents.files)) {
-    const before = DB.documents.files.length;
-    DB.documents.files = DB.documents.files.filter(f => f.spaceId !== spaceId);
-    records += before - DB.documents.files.length;
-  }
-  return { records, files };
-}
-// 母账号可见全部账号；团队管理员可见其管理团队成员 + 自己；普通成员仅自己
-function visibleUsers(req) {
-  if (isAdmin(req)) return DB.users.slice();
-  const u = req.user;
-  const adminTeamIds = (DB.teamMembers || []).filter(m => m.username === u.username && m.role === ROLE_TEAM_ADMIN).map(m => m.teamId);
-  if (adminTeamIds.length) {
-    const names = new Set([u.username]);
-    (DB.teamMembers || []).filter(m => adminTeamIds.includes(m.teamId)).forEach(m => names.add(m.username));
-    return DB.users.filter(x => names.has(x.username));
-  }
-  return DB.users.filter(x => x.username === u.username);
-}
-function userTeamBadges(username) {
-  return (DB.teamMembers || []).filter(m => m.username === username).map(m => {
-    const t = DB.bizTeams.find(x => x.id === m.teamId);
-    return { teamId: m.teamId, teamName: t ? t.name : m.teamId, role: m.role };
-  });
-}
-
+// ---------- 账号（登录账号列表） ----------
 app.get('/api/users', (req, res) => {
-  res.json(visibleUsers(req).map(u => ({
+  res.json(DB.users.map(u => ({
     id: u.id, username: u.username, loginName: u.loginName || u.username, email: u.email || '',
-    name: u.name, role: u.role, userGroup: u.userGroup || (u.role === ROLE_PARENT ? '超级用户' : '普通用户'), phone: u.phone || '',
+    name: u.name, role: u.role, userGroup: userGroupOf(u), phone: u.phone || '',
     createdAt: u.createdAt, status: (u.status || 'active') === 'disabled' ? '停用' : '启用',
-    isSelf: u.username === req.user.username, teams: userTeamBadges(u.username)
+    isSelf: u.username === req.user.username
   })));
 });
 
 app.post('/api/users', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: '仅超级用户可新增账号' });
   const b = req.body || {};
-  const isParent = isAdmin(req);
-  let adminTeamId = null;
-  if (!isParent) {
-    adminTeamId = req.spaceId;
-    if (!isTeamAdminOf(req.user.username, adminTeamId)) return res.status(403).json({ error: '仅母账号或团队管理员可新增账号' });
-  }
   const loginName = String(b.loginName || b.username || '').trim();
   const email = String(b.email || '').trim();
   const name = String(b.name || '').trim();
   const password = String(b.password || '').trim();
-  const userGroup = b.userGroup === '超级用户' ? '超级用户' : '普通用户';
+  const userGroup = USER_GROUPS.includes(b.userGroup) ? b.userGroup : '班组长';
   if (!loginName) return res.status(400).json({ error: '请填写登录名' });
   if (!email) return res.status(400).json({ error: '请填写邮箱' });
   if (!password) return res.status(400).json({ error: '请填写密码' });
   if (password.length < 8 || password.length > 32) return res.status(400).json({ error: '密码需为 8-32 位' });
+  if (!passwordStrong(password)) return res.status(400).json({ error: '密码需包含大写/小写/数字/符号中的至少三类' });
   if (DB.users.some(u => u.username === loginName)) return res.status(400).json({ error: '该登录名已存在' });
   if (DB.users.some(u => u.email === email)) return res.status(400).json({ error: '该邮箱已被使用' });
-  if (!isParent && userGroup === '超级用户') return res.status(403).json({ error: '仅母账号可创建超级用户' });
   const user = {
     id: genId('u'), username: loginName, loginName, email, name,
     phone: String(b.phone || ''), password, role: userGroup, userGroup,
-    createdAt: nowISO(), status: 'active', spaceId: null
+    createdAt: nowISO(), status: 'active'
   };
   DB.users.push(user);
-  // 可选归属团队（登录账号列表默认不填；团队分配在「团队管理」完成）
-  let teamId = isParent ? String(b.teamId || '').trim() : (String(b.teamId || '').trim() || adminTeamId);
-  if (teamId && !DB.bizTeams.some(t => t.id === teamId)) teamId = '';
-  if (teamId && !isParent && !isTeamAdminOf(req.user.username, teamId)) teamId = '';
-  if (teamId && !DB.teamMembers.some(m => m.teamId === teamId && m.username === loginName)) {
-    const teamRole = (isParent && b.teamRole === ROLE_TEAM_ADMIN) ? ROLE_TEAM_ADMIN : '团队成员';
-    const perms = Array.isArray(b.permissions) && b.permissions.length ? b.permissions.filter(p => TEAM_PERMS.includes(p))
-      : (teamRole === ROLE_TEAM_ADMIN ? TEAM_PERMS.slice() : ['查看', '录入']);
-    DB.teamMembers.push({ id: genId('tmb'), teamId, username: loginName, role: teamRole, permissions: perms, joinedAt: nowISO() });
-    user.spaceId = teamId;
-  }
   saveDB();
-  res.json({ id: user.id, username: loginName, loginName, email, name, phone: user.phone, role: user.role, userGroup, status: 'active', teams: userTeamBadges(loginName) });
+  res.json({ id: user.id, username: loginName, loginName, email, name, phone: user.phone, role: user.role, userGroup, status: 'active' });
 });
 
 app.put('/api/users/:id', (req, res) => {
   const u = DB.users.find(x => x.id === req.params.id);
   if (!u) return res.status(404).json({ error: '未找到用户' });
   const b = req.body || {};
-  const isParent = isAdmin(req);
-  if (u.role === ROLE_PARENT && !isParent) return res.status(403).json({ error: '无权修改母账号' });
-  if (!isParent) {
-    const adminTeamIds = (DB.teamMembers || []).filter(m => m.username === req.user.username && m.role === ROLE_TEAM_ADMIN).map(m => m.teamId);
-    const targetTeams = (DB.teamMembers || []).filter(m => m.username === u.username).map(m => m.teamId);
-    if (!targetTeams.some(t => adminTeamIds.includes(t))) return res.status(403).json({ error: '仅可编辑本团队成员' });
-  }
+  const adm = isAdmin(req);
+  if (!adm && u.username !== req.user.username) return res.status(403).json({ error: '无权修改其他账号' });
   if (b.name !== undefined) u.name = String(b.name);
   if (b.phone !== undefined) u.phone = String(b.phone || '');
   if (b.email !== undefined) u.email = String(b.email || '').trim();
-  if (b.password) u.password = String(b.password);
-  if (b.status && (isParent || u.username !== req.user.username)) u.status = b.status === 'disabled' ? 'disabled' : 'active';
-  if (isParent && b.userGroup && u.username !== 'admin') { u.userGroup = b.userGroup === '超级用户' ? '超级用户' : '普通用户'; u.role = u.userGroup; }
+  if (b.password) {
+    const pwd = String(b.password);
+    if (pwd.length < 8 || pwd.length > 32) return res.status(400).json({ error: '密码需为 8-32 位' });
+    if (!passwordStrong(pwd)) return res.status(400).json({ error: '密码需包含大写/小写/数字/符号中的至少三类' });
+    u.password = pwd;
+  }
+  if (b.status && (adm || u.username !== req.user.username)) u.status = b.status === 'disabled' ? 'disabled' : 'active';
+  if (adm && b.userGroup && u.username !== 'admin' && USER_GROUPS.includes(b.userGroup)) { u.userGroup = b.userGroup; u.role = u.userGroup; }
   saveDB();
-  res.json({ id: u.id, username: u.username, loginName: u.loginName || u.username, email: u.email || '', name: u.name, role: u.role, userGroup: u.userGroup, phone: u.phone, status: u.status, teams: userTeamBadges(u.username) });
+  res.json({ id: u.id, username: u.username, loginName: u.loginName || u.username, email: u.email || '', name: u.name, role: u.role, userGroup: u.userGroup, phone: u.phone, status: u.status });
 });
 
 app.delete('/api/users/:id', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: '仅母账号可删除账号' });
+  if (!isAdmin(req)) return res.status(403).json({ error: '仅超级用户可删除账号' });
   const idx = DB.users.findIndex(x => x.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: '未找到用户' });
-  if (DB.users[idx].username === 'admin') return res.status(400).json({ error: '内置母账号不可删除' });
-  const username = DB.users[idx].username;
+  if (DB.users[idx].username === 'admin') return res.status(400).json({ error: '内置超级用户不可删除' });
   DB.users.splice(idx, 1);
-  DB.teamMembers = (DB.teamMembers || []).filter(m => m.username !== username); // 移除其全部团队归属（业务数据归团队，不随账号删除）
   saveDB();
   res.json({ ok: true });
-});
-
-// ---------- 团队（独立业务空间）：增删改 / 一键清空 / 成员管理（重置权仅母账号） ----------
-app.get('/api/biz-teams', (req, res) => {
-  let arr;
-  if (isAdmin(req)) arr = DB.bizTeams.filter(t => t.status !== 'deleted');
-  else {
-    const ids = teamsOfUser(req.user.username);
-    arr = DB.bizTeams.filter(t => ids.includes(t.id) && t.status !== 'deleted');
-  }
-  res.json(arr.map(t => ({ ...t, ...teamStats(t.id) })));
-});
-
-app.post('/api/biz-teams', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: '仅母账号可创建团队' });
-  const name = String((req.body || {}).name || '').trim();
-  if (!name) return res.status(400).json({ error: '团队名称不能为空' });
-  const team = { id: genId('tm'), name, status: 'active', createdBy: req.user.username, createdAt: nowISO(), lastResetAt: '' };
-  DB.bizTeams.push(team);
-  // 可选：初始管理员（账号需已存在）
-  (Array.isArray(req.body.admins) ? req.body.admins : []).forEach(username => {
-    const un = String(username || '').trim();
-    if (!un || !DB.users.some(u => u.username === un)) return;
-    if (DB.teamMembers.some(m => m.teamId === team.id && m.username === un)) return;
-    DB.teamMembers.push({ id: genId('tmb'), teamId: team.id, username: un, role: ROLE_TEAM_ADMIN, permissions: TEAM_PERMS.slice(), joinedAt: nowISO() });
-    const usr = DB.users.find(u => u.username === un); if (usr && !usr.spaceId) usr.spaceId = team.id;
-  });
-  saveDB();
-  res.json({ ...team, ...teamStats(team.id) });
-});
-
-app.put('/api/biz-teams/:id', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: '仅母账号可编辑团队' });
-  const team = DB.bizTeams.find(t => t.id === req.params.id);
-  if (!team) return res.status(404).json({ error: '未找到团队' });
-  const b = req.body || {};
-  if (b.name) team.name = String(b.name).trim();
-  if (b.status === 'disabled' || b.status === 'active') team.status = b.status;
-  saveDB();
-  res.json({ ...team, ...teamStats(team.id) });
-});
-
-app.delete('/api/biz-teams/:id', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: '仅母账号可解散团队' });
-  const team = DB.bizTeams.find(t => t.id === req.params.id);
-  if (!team) return res.status(404).json({ error: '未找到团队' });
-  const { records, files } = physicallyClearSpace(team.id); // 物理删除该团队全部业务数据 + 附件
-  DB.bizTeams = DB.bizTeams.filter(t => t.id !== team.id);
-  DB.teamMembers = (DB.teamMembers || []).filter(m => m.teamId !== team.id);
-  DB.auditLogs.unshift({ id: genId('al'), at: fmtNow(), actor: req.user.name, actorUsername: req.user.username, action: '解散团队', targetSpace: team.id, targetOwner: team.name, reason: '解散团队并清空数据', deletedCount: records, fileCount: files });
-  saveDB();
-  res.json({ ok: true, deletedCount: records, fileCount: files });
-});
-
-app.post('/api/biz-teams/:id/reset', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: '仅母账号可一键清空团队空间' });
-  const team = DB.bizTeams.find(t => t.id === req.params.id);
-  if (!team) return res.status(404).json({ error: '未找到团队' });
-  const reason = String((req.body || {}).reason || '').trim();
-  if (!reason) return res.status(400).json({ error: '请填写清空原因' });
-  // 物理删除业务数据 + 附件；保留团队本身、成员关系、全局字典模板、系统日志
-  const { records, files } = physicallyClearSpace(team.id);
-  team.lastResetAt = nowISO();
-  DB.auditLogs.unshift({ id: genId('al'), at: fmtNow(), actor: req.user.name, actorUsername: req.user.username, action: '一键清空团队空间', targetSpace: team.id, targetOwner: team.name, reason, deletedCount: records, fileCount: files });
-  saveDB();
-  res.json({ ok: true, teamId: team.id, deletedCount: records, fileCount: files });
-});
-
-app.get('/api/biz-teams/:id/members', (req, res) => {
-  const teamId = req.params.id;
-  const team = DB.bizTeams.find(t => t.id === teamId);
-  if (!team) return res.status(404).json({ error: '未找到团队' });
-  if (!isAdmin(req) && !membershipOf(req.user.username, teamId)) return res.status(403).json({ error: '无权查看该团队成员' });
-  const members = (DB.teamMembers || []).filter(m => m.teamId === teamId).map(m => {
-    const u = DB.users.find(x => x.username === m.username);
-    return { id: m.id, username: m.username, name: u ? u.name : m.username, role: m.role, permissions: m.permissions || [], joinedAt: m.joinedAt, accountStatus: u ? ((u.status || 'active') === 'disabled' ? '停用' : '启用') : '已删除' };
-  });
-  res.json(members);
-});
-
-app.post('/api/biz-teams/:id/members', (req, res) => {
-  const teamId = req.params.id;
-  const team = DB.bizTeams.find(t => t.id === teamId);
-  if (!team) return res.status(404).json({ error: '未找到团队' });
-  const isParent = isAdmin(req);
-  if (!isParent && !isTeamAdminOf(req.user.username, teamId)) return res.status(403).json({ error: '仅母账号或该团队管理员可添加成员' });
-  const username = String((req.body || {}).username || '').trim();
-  if (!DB.users.some(u => u.username === username)) return res.status(400).json({ error: '账号不存在' });
-  if (DB.teamMembers.some(m => m.teamId === teamId && m.username === username)) return res.status(400).json({ error: '该账号已在团队中' });
-  const role = (isParent && req.body.role === ROLE_TEAM_ADMIN) ? ROLE_TEAM_ADMIN : '团队成员'; // 团队管理员只能加普通成员
-  const perms = Array.isArray(req.body.permissions) && req.body.permissions.length ? req.body.permissions.filter(p => TEAM_PERMS.includes(p))
-    : (role === ROLE_TEAM_ADMIN ? TEAM_PERMS.slice() : ['查看', '录入']);
-  const rec = { id: genId('tmb'), teamId, username, role, permissions: perms, joinedAt: nowISO() };
-  DB.teamMembers.push(rec);
-  const usr = DB.users.find(u => u.username === username); if (usr && !usr.spaceId) usr.spaceId = teamId;
-  saveDB();
-  res.json(rec);
-});
-
-app.put('/api/team-members/:id', (req, res) => {
-  const m = (DB.teamMembers || []).find(x => x.id === req.params.id);
-  if (!m) return res.status(404).json({ error: '未找到成员' });
-  const isParent = isAdmin(req);
-  if (!isParent && !isTeamAdminOf(req.user.username, m.teamId)) return res.status(403).json({ error: '仅母账号或该团队管理员可修改成员' });
-  const b = req.body || {};
-  // 团队管理员角色仅母账号可任命/改动（团队管理员无权重塑管理员）
-  if (!isParent && (b.role === ROLE_TEAM_ADMIN || m.role === ROLE_TEAM_ADMIN)) return res.status(403).json({ error: '团队管理员角色仅母账号可设置' });
-  if (isParent && b.role) m.role = b.role === ROLE_TEAM_ADMIN ? ROLE_TEAM_ADMIN : '团队成员';
-  if (Array.isArray(b.permissions)) m.permissions = b.permissions.filter(p => TEAM_PERMS.includes(p));
-  saveDB();
-  res.json(m);
-});
-
-app.delete('/api/team-members/:id', (req, res) => {
-  const m = (DB.teamMembers || []).find(x => x.id === req.params.id);
-  if (!m) return res.status(404).json({ error: '未找到成员' });
-  const isParent = isAdmin(req);
-  if (!isParent && !isTeamAdminOf(req.user.username, m.teamId)) return res.status(403).json({ error: '仅母账号或该团队管理员可移除成员' });
-  if (!isParent && m.role === ROLE_TEAM_ADMIN) return res.status(403).json({ error: '不能移除团队管理员' });
-  DB.teamMembers = DB.teamMembers.filter(x => x.id !== req.params.id);
-  saveDB();
-  res.json({ ok: true });
-});
-
-// 审计日志（仅母账号）
-app.get('/api/audit-logs', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: '仅母账号可查看审计日志' });
-  const logs = (DB.auditLogs || []).slice().sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
-  res.json(logs);
 });
 
 // ---------- 通用 CRUD 工厂 ----------
-// opts.space：true=业务集合，写入时注入 spaceId、列表/读取按 spaceId 隔离；false=全局集合（字典/设置等）
+// opts.biz：true=业务集合（列表/读取仅返回未逻辑删除的行）；false=全局字典（字典/设置等）
 // opts.soft：true=删除走逻辑删除（置 deleted）；false=物理删除（默认对全局字典）
 function crud(collection, prefix, opts) {
   opts = opts || {};
-  const space = opts.space !== false;
+  const biz = opts.biz !== false;
   const soft = opts.soft !== false ? true : false;
   const base = '/api/' + prefix;
   app.get(base, (req, res) => {
-    const data = space ? DB[collection].filter(spaceFilter(req)) : DB[collection];
+    const data = biz ? DB[collection].filter(aliveFilter()) : DB[collection];
     res.json(data);
   });
   app.get(base + '/:id', (req, res) => {
     const item = DB[collection].find(x => x.id === req.params.id);
     if (!item) return res.status(404).json({ error: '未找到' });
-    if (space && (item.deleted || item.spaceId !== reqSpaceId(req))) return res.status(404).json({ error: '未找到' });
+    if (biz && item.deleted) return res.status(404).json({ error: '未找到' });
     res.json(item);
   });
   app.post(base, (req, res) => {
     const item = { id: genId(prefix.slice(0, 2)), createdAt: nowISO(), ...req.body };
-    if (space) { item.spaceId = reqSpaceId(req); item.deleted = false; }
+    if (biz) { item.deleted = false; }
     DB[collection].push(item);
     saveDB();
     res.json(item);
@@ -921,9 +749,9 @@ function crud(collection, prefix, opts) {
     const idx = DB[collection].findIndex(x => x.id === req.params.id);
     if (idx < 0) return res.status(404).json({ error: '未找到' });
     const cur = DB[collection][idx];
-    if (space && (cur.deleted || cur.spaceId !== reqSpaceId(req))) return res.status(404).json({ error: '未找到' });
+    if (biz && cur.deleted) return res.status(404).json({ error: '未找到' });
     const merged = { ...cur, ...req.body, id: req.params.id };
-    if (space) { merged.spaceId = cur.spaceId; merged.deleted = cur.deleted; }
+    if (biz) { merged.deleted = cur.deleted; }
     DB[collection][idx] = merged;
     saveDB();
     res.json(merged);
@@ -932,7 +760,7 @@ function crud(collection, prefix, opts) {
     const idx = DB[collection].findIndex(x => x.id === req.params.id);
     if (idx < 0) return res.status(404).json({ error: '未找到' });
     const cur = DB[collection][idx];
-    if (space && (cur.deleted || cur.spaceId !== reqSpaceId(req))) return res.status(404).json({ error: '未找到' });
+    if (biz && cur.deleted) return res.status(404).json({ error: '未找到' });
     if (soft) { cur.deleted = true; } else { DB[collection].splice(idx, 1); }
     saveDB();
     res.json({ ok: true });
@@ -944,7 +772,6 @@ function crud(collection, prefix, opts) {
 const WORKER_ID_RE = /^\d{17}[\dXx]$/;
 const WORKER_PHONE_RE = /^1\d{10}$/;
 const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工', '其他技工（不计入高处作业人员）'];
-const WORKER_CERT_OPTIONS = ['高压电工', '低压电工', '高处', '电力电缆作业', '电气试验', '司索工', '吊车司机', '挖机操作工'];
 
 function parseCNDate(s) {
   const m = String(s).trim().match(/^(\d{4})[年/.\/-](\d{1,2})[月/.\/-](\d{1,2})日?$/);
@@ -1031,7 +858,7 @@ app.post('/api/workers/import', upload.single('file'), (req, res) => {
       name: p.name, idNumber: p.idNumber, phone: p.phone,
       identity: p.identity, team: p.team, certTypes: p.certTypes,
       validStart: p.validStart, validEnd: p.validEnd, status: '已准入',
-      spaceId: reqSpaceId(req), deleted: false
+      deleted: false
     }));
     DB.workers.push(...added);
     saveDB();
@@ -1041,7 +868,7 @@ app.post('/api/workers/import', upload.single('file'), (req, res) => {
 
 app.get('/api/workers/export', (req, res) => {
   const header = ['姓名', '身份证号', '电话号码', '身份', '班组', '证件类型', '准入有效期', '状态'];
-  const rows = DB.workers.filter(spaceFilter(req)).map(w => [
+  const rows = DB.workers.filter(aliveFilter()).map(w => [
     w.name || '', w.idNumber || '', w.phone || '', w.identity || '', w.team || '',
     (w.certTypes || []).join('、'),
     w.validStart ? (w.validStart + (w.validEnd ? ' - ' + w.validEnd : '')) : '',
@@ -1055,29 +882,124 @@ app.get('/api/workers/export', (req, res) => {
   res.send(buf);
 });
 
+// ---------- 外部通讯录：导入/导出（同样须在通用 CRUD 之前注册） ----------
+// 字段：部门 dept / 姓名 name / 职务 post / 手机 phone / 移动短号 shortNo
+// 兼容旧字段：unit → 部门、remark → 备注
+const CONTACT_HEADER_MAP = {
+  '部门': 'dept', '单位': 'dept', '姓名': 'name', '职务': 'post',
+  '手机': 'phone', '电话': 'phone', '手机号': 'phone',
+  '移动短号': 'shortNo', '短号': 'shortNo', '备注': 'remark'
+};
+function contactDept(c) { return c.dept || c.unit || ''; }
+
+app.get('/api/contacts/export', (req, res) => {
+  const header = ['部门', '姓名', '职务', '手机', '移动短号'];
+  const rows = DB.contacts.filter(aliveFilter()).map(c => [
+    contactDept(c), c.name || '', c.post || '', c.phone || '', c.shortNo || ''
+  ]);
+  const wb = xlsx.utils.book_new();
+  // sheet 名固定为「员工」，导出文件可直接再次导入
+  xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([header, ...rows]), '员工');
+  const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="contacts.xlsx"');
+  res.send(buf);
+});
+
+app.post('/api/contacts/import', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    let rows;
+    if (/\.csv$/i.test(req.file.originalname || '')) {
+      rows = parseCSVBuffer(req.file.buffer);
+    } else {
+      const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
+      // 优先取名为「员工」的 sheet，否则取第一个
+      const sheetName = wb.SheetNames.find(n => String(n).trim() === '员工') || wb.SheetNames[0];
+      const ws = sheetName ? wb.Sheets[sheetName] : null;
+      if (!ws) return res.status(400).json({ error: '文件中没有可读取的工作表' });
+      rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+    }
+    if (!rows.length) return res.status(400).json({ error: '文件内容为空' });
+
+    // 识别表头行：首个含已知表头文字的行；识别不到则按位置解析（部门/姓名/职务/手机/移动短号）
+    let headerIdx = -1, idxMap = null;
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+      const cells = (rows[i] || []).map(c => String(c || '').trim());
+      const hit = cells.filter(c => CONTACT_HEADER_MAP[c]);
+      if (hit.length >= 2) {
+        headerIdx = i; idxMap = {};
+        cells.forEach((c, ci) => { const f = CONTACT_HEADER_MAP[c]; if (f && idxMap[f] === undefined) idxMap[f] = ci; });
+        break;
+      }
+    }
+    const fields = ['dept', 'name', 'post', 'phone', 'shortNo'];
+    if (!idxMap) { idxMap = {}; fields.forEach((f, i) => { idxMap[f] = i; }); }
+
+    const errors = [];
+    const parsed = [];
+    rows.forEach((r, i) => {
+      if (i <= headerIdx) return;
+      const get = f => String((idxMap[f] !== undefined && r[idxMap[f]] !== undefined) ? r[idxMap[f]] : '').trim();
+      const dept = get('dept'), name = get('name'), post = get('post'), phone = get('phone'), shortNo = get('shortNo');
+      if (!dept && !name && !post && !phone && !shortNo) return; // 空行
+      if (!name) { errors.push(`第${i + 1}行：姓名为空`); return; }
+      parsed.push({ dept, name, post, phone, shortNo });
+    });
+    if (errors.length) {
+      return res.status(400).json({ error: `存在错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处` : ''}` });
+    }
+    if (!parsed.length) return res.status(400).json({ error: '未解析到有效联系人（姓名列不能为空）' });
+
+    // 覆盖式导入：整表替换为本次导入的通讯录
+    const replaced = DB.contacts.filter(c => !c.deleted).length;
+    DB.contacts = [];
+    const added = parsed.map(p => ({
+      id: genId('c'), createdAt: nowISO(),
+      dept: p.dept, name: p.name, post: p.post, phone: p.phone, shortNo: p.shortNo,
+      deleted: false
+    }));
+    DB.contacts.push(...added);
+    saveDB();
+    res.json({ ok: true, imported: added.length, replaced });
+  } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
+});
+
 // ---------- 项目详情：资料管理（设计图纸/奥维地图/现场照片/规范图纸） ----------
 // 需在通用 CRUD 之前注册：DELETE /:id 覆盖工厂版本以清理上传文件
 // 项目删除：级联逻辑删除项目下全部关联业务数据（材料/计划/借工/竣工资料/领料单/出库单/资料文件）
 // 须注册在通用 CRUD 工厂之前以覆盖默认删除
+// ---------- 删除前置：依赖引用检查（项目） ----------
+// 规则：只要还有其它业务数据引用/关联该项目（含其子项目名称），一律拒绝删除，由用户先清理引用数据
+// 返回 [{ label, count }]；为空数组表示无引用、可安全删除
+function projectRefsOf(p) {
+  const names = [p.name].concat((p.subProjects || []).map(s => (s && s.name) || '')).filter(Boolean);
+  const inNames = v => names.includes(String(v || ''));
+  const refs = [];
+  const add = (label, rows) => { if (rows.length) refs.push({ label, count: rows.length }); };
+  add('材料清单', (DB.materials || []).filter(m => !m.deleted && inNames(m.project)));
+  add('作业计划', (DB.workPlans || []).filter(w => !w.deleted && (inNames(w.project) || inNames(w.subProject))));
+  add('月度计划', (DB.plans || []).filter(x => !x.deleted && (inNames(x.project) || inNames(x.subProject))));
+  add('材料出库单', (DB.materialOutbound || []).filter(o => !o.deleted && inNames(o.project)));
+  add('领料单', (DB.materialRequisitions || []).filter(r => {
+    if (r.deleted) return false;
+    if (Array.isArray(r.projects) && r.projects.some(n => inNames(n))) return true;
+    return (r.items || []).some(it => inNames(it.project));
+  }));
+  add('借工记录', (DB.borrowWorks || []).filter(b => !b.deleted && (b.projectId === p.id || inNames(b.project))));
+  add('竣工资料', (DB.completionDocuments || []).filter(c => !c.deleted && (c.projectId === p.id || inNames(c.project))));
+  return refs;
+}
 app.delete('/api/projects/:id', (req, res) => {
   const p = DB.projects.find(x => x.id === req.params.id);
   if (!p || p.deleted) return res.status(404).json({ error: '未找到项目' });
-  if (p.spaceId !== reqSpaceId(req)) return res.status(403).json({ error: '无权删除其他空间的项目' });
+  // 依赖引用校验：有引用则直接拒绝，不做级联删除
+  const refs = projectRefsOf(p);
+  if (refs.length) {
+    return res.status(409).json({ error: '该项目已被其他数据引用，无法删除', refs });
+  }
   p.deleted = true;
-  // 按项目名称关联的集合（materials / workPlans / materialOutbound）
-  (DB.materials || []).forEach(m => { if (!m.deleted && m.spaceId === p.spaceId && m.project === p.name) m.deleted = true; });
-  (DB.workPlans || []).forEach(w => { if (!w.deleted && w.spaceId === p.spaceId && w.project === p.name) w.deleted = true; });
-  (DB.materialOutbound || []).forEach(o => { if (!o.deleted && o.spaceId === p.spaceId && o.project === p.name) o.deleted = true; });
-  // 按项目 ID 关联的集合（borrowWorks / completionDocuments）
-  (DB.borrowWorks || []).forEach(b => { if (!b.deleted && b.spaceId === p.spaceId && b.projectId === p.id) b.deleted = true; });
-  (DB.completionDocuments || []).forEach(c => { if (!c.deleted && c.spaceId === p.spaceId && c.projectId === p.id) c.deleted = true; });
-  // 领料单可跨项目（projects 为名称数组）：仅移除本项目；清单清空后整单逻辑删除
-  (DB.materialRequisitions || []).forEach(r => {
-    if (r.deleted || r.spaceId !== p.spaceId || !Array.isArray(r.projects) || !r.projects.includes(p.name)) return;
-    r.projects = r.projects.filter(x => x !== p.name);
-    if (!r.projects.length) r.deleted = true;
-  });
-  // 项目资料文件标记逻辑删除（磁盘文件保留）
+  // 项目自带资料文件随项目逻辑删除（磁盘文件保留）
   (p.files || []).forEach(f => { f.deleted = true; });
   saveDB();
   res.json({ ok: true });
@@ -1092,7 +1014,6 @@ const PROJECT_FILE_TYPES = {
 function findProject(id, req) {
   const p = DB.projects.find(x => x.id === id);
   if (!p || p.deleted) return null;
-  if (req && p.spaceId !== reqSpaceId(req)) return null; // 跨空间不可访问
   return p;
 }
 function projectFileSafeName(name) {
@@ -1157,7 +1078,7 @@ app.get('/api/projects/:id/files/pack', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(p.name + '-' + PROJECT_FILE_TYPES[type].label + '.zip') + '"');
   res.send(zip);
 });
-// 项目删除走通用 CRUD 工厂（按 spaceId 逻辑删除，见下方 crud 注册）；此处不再单独物理删除
+// 项目删除走通用 CRUD 工厂（逻辑删除，见下方 crud 注册）；此处不再单独物理删除
 // 竣工：移入已竣工
 app.put('/api/projects/:id/complete', (req, res) => {
   const p = findProject(req.params.id, req);
@@ -1204,7 +1125,7 @@ function buildStoreZip(entries) {
 
 // 领料单删除：仅已作废的领料单可删除（须注册在通用 CRUD 工厂之前以覆盖默认删除）
 app.delete('/api/materialRequisitions/:id', (req, res) => {
-  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
   if (rec.status !== '已作废') return res.status(400).json({ error: '仅已作废的领料单可删除，请先作废' });
   rec.deleted = true; // 逻辑删除（保留记录，符合逻辑删除策略）
@@ -1214,10 +1135,10 @@ app.delete('/api/materialRequisitions/:id', (req, res) => {
 
 // ---------- 出库管理（按工程出库 / 归还 / 作废补回） ----------
 // 库存口径：可用库存 = 累计入库 − 净出库（净出库 = 有效单累计领取 − 累计归还；作废单自动补回）
-function outboundStats(project, spaceId) {
+function outboundStats(project) {
   const stats = {};
   DB.materialOutbound.forEach(o => {
-    if (o.deleted || (spaceId && o.spaceId !== spaceId) || o.project !== project || o.status !== '有效') return;
+    if (o.deleted || o.project !== project || o.status !== '有效') return;
     (o.items || []).forEach(it => {
       if (!it.materialId) return;
       const s = stats[it.materialId] || (stats[it.materialId] = { taken: 0, returned: 0 });
@@ -1230,10 +1151,9 @@ function outboundStats(project, spaceId) {
 app.get('/api/materialOutbound/stock', (req, res) => {
   const project = String(req.query.project || '');
   if (!project) return res.json([]);
-  const sid = reqSpaceId(req);
-  const stats = outboundStats(project, sid);
+  const stats = outboundStats(project);
   const rows = [];
-  DB.materials.filter(spaceFilter(req)).forEach(m => {
+  DB.materials.filter(aliveFilter()).forEach(m => {
     if (m.project !== project) return;
     const inQty = roundQty(m.qtyArrived);
     if (inQty <= 0) return;
@@ -1241,15 +1161,14 @@ app.get('/api/materialOutbound/stock', (req, res) => {
     const net = roundQty(st.taken - st.returned);
     const available = roundQty(Math.max(0, inQty - net));
     if (available <= 0) return; // 已全部出库的材料不再出现在可出库列表
-    const hasRecords = DB.materialOutbound.some(o => !o.deleted && (!sid || o.spaceId === sid) && o.project === project && (o.items || []).some(it => it.materialId === m.id));
+    const hasRecords = DB.materialOutbound.some(o => !o.deleted && o.project === project && (o.items || []).some(it => it.materialId === m.id));
     rows.push({ id: m.id, description: m.description, code: m.code, unit: m.unit, inQty, taken: st.taken, returned: st.returned, net, available, hasRecords });
   });
   res.json(rows);
 });
 app.get('/api/materialOutbound/orders', (req, res) => {
   const project = String(req.query.project || '');
-  const sid = reqSpaceId(req);
-  const list = DB.materialOutbound.filter(o => !o.deleted && (!sid || o.spaceId === sid) && (!project || o.project === project))
+  const list = DB.materialOutbound.filter(o => !o.deleted && (!project || o.project === project))
     .slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
   res.json(list);
 });
@@ -1261,11 +1180,10 @@ app.post('/api/materialOutbound/create', (req, res) => {
   if (!receiver) return res.status(400).json({ error: '请选择领取人' });
   const items = Array.isArray(b.items) ? b.items : [];
   if (!items.length) return res.status(400).json({ error: '请勾选需要出库的材料' });
-  const sid = reqSpaceId(req);
-  const stats = outboundStats(project, sid);
+  const stats = outboundStats(project);
   const finalItems = [];
   for (const e of items) {
-    const m = DB.materials.find(x => x.id === e.materialId && !x.deleted && (!sid || x.spaceId === sid));
+    const m = DB.materials.find(x => x.id === e.materialId && !x.deleted);
     if (!m || m.project !== project) return res.status(400).json({ error: '物料不存在或不属于所选工程' });
     const qty = roundQty(Number(e.qty));
     if (!(qty > 0)) return res.status(400).json({ error: '物料「' + m.description + '」出库数量必须大于 0' });
@@ -1276,19 +1194,19 @@ app.post('/api/materialOutbound/create', (req, res) => {
   }
   // 单号：OUT-YYYYMMDD-NNNNNN（按当日已有单据数递增）
   const dateTag = fmtNow().slice(0, 10).replace(/-/g, '');
-  const seq = DB.materialOutbound.filter(o => !o.deleted && (!sid || o.spaceId === sid) && String(o.outNo || '').startsWith('OUT-' + dateTag + '-')).length + 1;
+  const seq = DB.materialOutbound.filter(o => !o.deleted && String(o.outNo || '').startsWith('OUT-' + dateTag + '-')).length + 1;
   const rec = {
     id: genId('ob'), outNo: 'OUT-' + dateTag + '-' + String(seq).padStart(6, '0'),
     project, receiver, status: '有效', createdAt: fmtNow(),
     items: finalItems, returns: [], compensated: 0,
-    spaceId: sid, deleted: false
+    deleted: false
   };
   DB.materialOutbound.unshift(rec);
   saveDB();
   res.json({ ok: true, data: rec });
 });
 app.put('/api/materialOutbound/:id/return', (req, res) => {
-  const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到出库单' });
   if (rec.status !== '有效') return res.status(400).json({ error: '该出库单已作废，不能登记归还' });
   const rows = Array.isArray((req.body || {}).rows) ? req.body.rows : [];
@@ -1310,7 +1228,7 @@ app.put('/api/materialOutbound/:id/return', (req, res) => {
   res.json({ ok: true, data: rec });
 });
 app.put('/api/materialOutbound/:id/void', (req, res) => {
-  const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到出库单' });
   if (rec.status !== '有效') return res.status(400).json({ error: '该出库单已作废，不能重复作废' });
   const reason = String((req.body || {}).reason || '').trim();
@@ -1323,7 +1241,7 @@ app.put('/api/materialOutbound/:id/void', (req, res) => {
 });
 // 出库单删除：仅已作废的出库单可删除（同领料单口径；须注册在通用 CRUD 工厂之前以覆盖默认删除）
 app.delete('/api/materialOutbound/:id', (req, res) => {
-  const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到出库单' });
   if (rec.status !== '已作废') return res.status(400).json({ error: '仅已作废的出库单可删除，请先作废' });
   rec.deleted = true; // 逻辑删除（保留记录，符合逻辑删除策略）
@@ -1416,34 +1334,79 @@ app.get('/api/workPlans/export', (req, res) => {
   res.send(buf);
 });
 
+// 班组长专用：仅填写「当日计划工作量」7 项（工程实际施工量）
+app.put('/api/workPlans/:id/quantities', (req, res) => {
+  const p = (DB.workPlans || []).find(x => x.id === req.params.id && !x.deleted);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  const b = req.body || {};
+  PLAN_QTY_FIELDS.forEach(k => { if (b[k] !== undefined) p[k] = String(b[k] == null ? '' : b[k]).trim(); });
+  p.quantitiesUpdatedAt = nowISO();
+  p.quantitiesUpdatedBy = req.user.name || req.user.username;
+  saveDB();
+  res.json(p);
+});
+
+// 删除导入批次（仅超级用户）：批次记录逻辑删除，且该批次导入的材料一并逻辑删除（材料明细同步消失）
+// 说明：领料单/出库单的物料信息均为快照（code/description/unit/project），历史单据不受影响
+app.delete('/api/materialImports/:id', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: '仅超级用户可以删除导入批次' });
+  const b = DB.materialImports.find(x => x.id === req.params.id && !x.deleted);
+  if (!b) return res.status(404).json({ error: '未找到该导入批次' });
+  const ids = new Set((Array.isArray(b.materialIds) && b.materialIds.length)
+    ? b.materialIds
+    : DB.materials.filter(m => m.importId === b.id).map(m => m.id));
+  if (!ids.size) return res.status(400).json({ error: '该批次未记录关联材料（历史导入数据），无法整批删除' });
+  // 嵌套校验：批次内材料若已被领料单/出库单引用，整批拒绝（避免绕过单条材料的删除校验）
+  const blockedRows = DB.materials.filter(m => !m.deleted && ids.has(m.id) && materialRefsOf(m).length);
+  if (blockedRows.length) {
+    const agg = {};
+    blockedRows.forEach(m => materialRefsOf(m).forEach(r => { agg[r.label] = (agg[r.label] || 0) + r.count; }));
+    return res.status(409).json({
+      error: '该批次中有 ' + blockedRows.length + ' 条材料已被其他数据引用，无法删除',
+      refs: Object.keys(agg).map(label => ({ label, count: agg[label] })),
+      blockedMaterials: blockedRows.length
+    });
+  }
+  let deletedMaterials = 0;
+  DB.materials.forEach(m => {
+    if (m.deleted || !ids.has(m.id)) return;
+    m.deleted = true; m.deletedAt = nowISO(); m.deletedBy = (req.user && (req.user.name || req.user.username)) || '';
+    deletedMaterials++;
+  });
+  b.deleted = true;
+  b.deletedAt = nowISO();
+  b.deletedBy = (req.user && (req.user.name || req.user.username)) || '';
+  saveDB();
+  res.json({ ok: true, deletedMaterials, fileName: b.fileName });
+});
+
 // 简单集合（直接 CRUD）
-// 业务私有集合：按 spaceId 行级隔离 + 逻辑删除（projects 自定义删除见下方文件端点前；此处提供标准 CRUD）
+// 业务集合：逻辑删除（projects 自定义删除见文件端点；此处提供标准 CRUD）
 ['projects', 'plans', 'borrowWorks', 'completionDocuments', 'materialRequisitions', 'materialImports', 'materialOutbound', 'workers', 'contacts', 'workPlans'].forEach(c => {
-  crud(c, c, { space: true, soft: true });
+  crud(c, c, { biz: true, soft: true });
 });
-// 全局字典/系统资源：无空间隔离、物理删除（年度计划/供电所/班组/材料目录/单位维护）
+// 全局字典/系统资源：物理删除（年度计划/供电所/班组/材料目录/单位维护）
 ['annualPlans', 'substations', 'materialCatalog', 'teams', 'units'].forEach(c => {
-  crud(c, c, { space: false, soft: false });
+  crud(c, c, { biz: false, soft: false });
 });
-// 用户账号（users）走自定义端点（创建时原子创建绑定空间），不在此注册
+// 用户账号（users）走自定义端点，不在此注册
 
 // ---------- 材料明细（工程材料清单） ----------
 // 来源类型为固定枚举（与原系统一致），新增/编辑/导入均强制校验
 const SOURCE_TYPES = ['ERP采购申请', '甲供材料', '库存调拨', '乙供/自购', '运检项目'];
 
-app.get('/api/materials', (req, res) => res.json(DB.materials.filter(spaceFilter(req)).map(withGen)));
+app.get('/api/materials', (req, res) => res.json(DB.materials.filter(aliveFilter()).map(withGen)));
 app.get('/api/materials/:id', (req, res) => {
   const it = DB.materials.find(x => x.id === req.params.id);
-  if (!it || it.deleted || it.spaceId !== reqSpaceId(req)) return res.status(404).json({ error: '未找到' });
+  if (!it || it.deleted) return res.status(404).json({ error: '未找到' });
   res.json(withGen(it));
 });
 // 已生成领料单数量 = 历史累计生成量（同空间未作废领料单中该物料的领料数量合计，含已入库的）
 // 待入库/部分到库/已入库 均计入；已作废 → 不计入（作废已冲销）
-function qtyGeneratedOf(m, spaceId) {
-  const sid = spaceId || m.spaceId;
+function qtyGeneratedOf(m) {
   let g = 0;
   DB.materialRequisitions.forEach(r => {
-    if (r.deleted || r.status === '已作废' || (sid && r.spaceId !== sid)) return;
+    if (r.deleted || r.status === '已作废') return;
     (r.items || []).forEach(it => {
       if (it.materialId === m.id) g += Number(it.qty) || 0;
     });
@@ -1451,11 +1414,10 @@ function qtyGeneratedOf(m, spaceId) {
   return roundQty(g);
 }
 // 在途未入库余量 = 同空间待入库/部分到库领料单中该物料尚未入库的数量合计（用于计算可继续领料）
-function qtyOutstandingOf(m, spaceId) {
-  const sid = spaceId || m.spaceId;
+function qtyOutstandingOf(m) {
   let o = 0;
   DB.materialRequisitions.forEach(r => {
-    if (r.deleted || (sid && r.spaceId !== sid)) return;
+    if (r.deleted) return;
     if (r.status !== '待入库' && r.status !== '部分到库') return;
     (r.items || []).forEach(it => {
       if (it.materialId !== m.id) return;
@@ -1466,14 +1428,14 @@ function qtyOutstandingOf(m, spaceId) {
   return roundQty(o);
 }
 function withGen(m) {
-  const gen = qtyGeneratedOf(m, m.spaceId);
-  const canGen = roundQty(Math.max(0, m.qtyNotArrived - qtyOutstandingOf(m, m.spaceId)));
-  return { ...m, qtyGenerated: gen, qtyCanGen: canGen, status: materialStatus(m, m.spaceId) };
+  const gen = qtyGeneratedOf(m);
+  const canGen = roundQty(Math.max(0, m.qtyNotArrived - qtyOutstandingOf(m)));
+  return { ...m, qtyGenerated: gen, qtyCanGen: canGen, status: materialStatus(m) };
 }
-function materialStatus(m, spaceId) {
+function materialStatus(m) {
   if (Number(m.qtyRequired) > 0 && m.qtyArrived >= m.qtyRequired) return '全部到库';
   if (m.qtyArrived > 0) return '部分到库'; // 已有入库数量时到货情况优先（可继续领料仍按未到余量-已生成计算）
-  if (qtyGeneratedOf(m, spaceId || m.spaceId) > 0) return '已生成领料单'; // 未入库但有领料单在途（剩余量仍可继续领料）
+  if (qtyGeneratedOf(m) > 0) return '已生成领料单'; // 未入库但有领料单在途（剩余量仍可继续领料）
   return '未到库';
 }
 function roundQty(n) { return Math.round((Number(n) || 0) * 10000) / 10000; }
@@ -1516,7 +1478,7 @@ app.post('/api/materials', (req, res) => {
   };
   item.qtyNotArrived = roundQty(Math.max(0, item.qtyRequired - item.qtyArrived));
   item.status = materialStatus(item);
-  item.spaceId = reqSpaceId(req); item.deleted = false;
+  item.deleted = false;
   DB.materials.push(item);
   saveDB();
   res.json(item);
@@ -1525,7 +1487,7 @@ app.put('/api/materials/:id', (req, res) => {
   const idx = DB.materials.findIndex(x => x.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: '未找到' });
   const old = DB.materials[idx];
-  if (old.deleted || old.spaceId !== reqSpaceId(req)) return res.status(404).json({ error: '未找到' });
+  if (old.deleted) return res.status(404).json({ error: '未找到' });
   const b = req.body || {};
   const err = validateMaterialBody(b, { forEdit: true, oldItem: old });
   if (err) return res.status(400).json({ error: err });
@@ -1551,12 +1513,33 @@ app.put('/api/materials/:id', (req, res) => {
   saveDB();
   res.json(cur);
 });
+// 材料依赖引用检查：被领料单 / 出库单引用时不允许删除
+// 口径：只算未删除且未作废的单据（作废单已冲销，物料明细仍保存编码/描述/单位快照，删材料不会影响单据展示）
+function materialRefsOf(m) {
+  const refs = [];
+  const hit = (docs) => (docs || []).filter(d => {
+    if (d.deleted || d.status === '已作废') return false;
+    return (d.items || []).some(it => it && it.materialId === m.id);
+  });
+  const reqs = hit(DB.materialRequisitions);
+  if (reqs.length) refs.push({ label: '材料领料单', count: reqs.length });
+  const outs = hit(DB.materialOutbound);
+  if (outs.length) refs.push({ label: '材料出库单', count: outs.length });
+  return refs;
+}
 app.delete('/api/materials/:id', (req, res) => {
   const idx = DB.materials.findIndex(x => x.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: '未找到' });
   const cur = DB.materials[idx];
-  if (cur.deleted || cur.spaceId !== reqSpaceId(req)) return res.status(404).json({ error: '未找到' });
+  if (cur.deleted) return res.status(404).json({ error: '未找到' });
+  // 依赖引用校验：有引用则直接拒绝（不做级联删除）
+  const refs = materialRefsOf(cur);
+  if (refs.length) {
+    return res.status(409).json({ error: '该物料已被其他数据引用，无法删除', refs });
+  }
   cur.deleted = true; // 逻辑删除（业务私有数据，重置/删除走逻辑标记）
+  cur.deletedAt = nowISO();
+  cur.deletedBy = (req.user && (req.user.name || req.user.username)) || '';
   saveDB();
   res.json({ ok: true });
 });
@@ -1599,28 +1582,30 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
       return res.status(400).json({ error: '导入失败，共 ' + errors.length + ' 处不一致：' + errors.slice(0, 5).join('；') + (errors.length > 5 ? '（仅显示前 5 处）' : '') });
     }
     if (!parsed.length) return res.status(400).json({ error: '模板中没有可导入的数据行' });
+    const batchId = genId('im'); // 先定批次 id，材料上直接写入 importId，保证可整批删除
     const added = parsed.map(r => {
       const item = {
-        id: genId('m'), createdAt: nowISO(),
+        id: genId('m'), createdAt: nowISO(), importId: batchId,
         project: r.project, description: r.description,
         qtyRequired: r.qty, qtyArrived: 0, qtyNotArrived: r.qty,
         unit: r.unit, code: r.code, orderNo: r.orderNo, source: r.source,
         sourceNote: '', inWeeklyPlan: true, modifyReason: '', modifiedAt: ''
       };
       item.status = materialStatus(item);
-      item.spaceId = reqSpaceId(req); item.deleted = false;
+      item.deleted = false;
       DB.materials.push(item);
       return item;
     });
     // 记录导入批次（供「导入批次」页签展示）：项目归属 / 行数（总/匹配/跳过）/ 调整数 / 备注
     const projects = [...new Set(parsed.map(r => r.project))];
     const batch = {
-      id: genId('im'), batch: 'IMP' + Date.now(), fileName: name,
+      id: batchId, batch: 'IMP' + Date.now(), fileName: name,
       project: projects.length === 1 ? projects[0] : projects.join('、'),
       rowsTotal: parsed.length + skippedEmpty, rowsMatched: parsed.length, rowsSkipped: skippedEmpty,
       adjusted: 0, adjustments: [],
-      rows: added.length, importedBy: req.user.name, importedAt: fmtNow(), status: '成功', remark: '-',
-      spaceId: reqSpaceId(req), deleted: false
+      rows: added.length, materialIds: added.map(x => x.id),
+      importedBy: req.user.name, importedAt: fmtNow(), status: '成功', remark: '-',
+      deleted: false
     };
     DB.materialImports.push(batch);
     saveDB();
@@ -1639,7 +1624,6 @@ function reqNoNow() {
 // 请求体：{ items: [{ id, qty }] }（兼容旧 { ids: [...] } = 按可继续领料全量生成）
 app.post('/api/requisitions/create', (req, res) => {
   const body = req.body || {};
-  const sid = reqSpaceId(req);
   const list = Array.isArray(body.items) && body.items.length
     ? body.items.map(x => ({ id: x.id, qty: x.qty }))
     : (Array.isArray(body.ids) ? body.ids.map(id => ({ id })) : []);
@@ -1648,7 +1632,7 @@ app.post('/api/requisitions/create', (req, res) => {
   const skipped = [];
   const touched = [];
   for (const entry of list) {
-    const m = DB.materials.find(x => x.id === entry.id && !x.deleted && (!sid || x.spaceId === sid));
+    const m = DB.materials.find(x => x.id === entry.id && !x.deleted);
     if (!m) continue;
     const canGen = withGen(m).qtyCanGen;
     // 已全部到库 / 可继续领料为 0 的材料不允许再生成领料单
@@ -1668,7 +1652,7 @@ app.post('/api/requisitions/create', (req, res) => {
     id: genId('rq'), reqNo: reqNoNow(),
     projects: [...new Set(items.map(i => i.project))],
     items, createdAt: fmtNow(), status: '待入库', confirmRows: null,
-    spaceId: sid, deleted: false
+    deleted: false
   };
   DB.materialRequisitions.unshift(rec);
   // 同步材料状态（已生成数量按领料单动态汇总，部分生成时剩余量仍可继续领料）
@@ -1679,7 +1663,7 @@ app.post('/api/requisitions/create', (req, res) => {
 
 // 下载领料单 Excel（格式对齐原系统样例：LL-20261009-222544.xlsx）
 app.get('/api/materialRequisitions/:id/download', (req, res) => {
-  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
   const aoa = [];
   aoa.push(['国网富顺县供电公司过渡仓代保管物资领料单', '', '', '', '', '', '']);
@@ -1710,7 +1694,7 @@ app.get('/api/materialRequisitions/:id/download', (req, res) => {
 // 确认入库 / 补入库：无异常 → 本次入库=剩余未入库数量；有异常 → 按行传入实际本次入库数量与异常原因
 // 待入库首录入库；「部分到库」（存在异常缺库）的领料单可再次补入库，confirmRows 按物料累计入库数量
 app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
-  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
   if (rec.status !== '待入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单已' + rec.status + '，不能重复入库' });
   const rows = Array.isArray((req.body || {}).rows) ? req.body.rows : [];
@@ -1730,7 +1714,7 @@ app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
     // 仍有未入库数量即视为异常，须有异常原因（本次填写或沿用上次）
     const abnormal = cum < it.qty - 1e-9;
     if (abnormal && !reason && !(prev && prev.reason)) return res.status(400).json({ error: '物料「' + it.description + '」仍有未入库数量，必须填写异常原因' });
-    const m = DB.materials.find(x => x.id === it.materialId && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+    const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
     if (m && qty > 0) {
       m.qtyArrived = roundQty(m.qtyArrived + qty);
       m.qtyNotArrived = roundQty(Math.max(0, m.qtyRequired - m.qtyArrived));
@@ -1759,7 +1743,7 @@ app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
 
 // 作废（待入库/已入库/部分到库均可作废；已入库的会冲销其已入库数量，材料状态按扣减后重新汇总）
 app.put('/api/materialRequisitions/:id/void', (req, res) => {
-  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
   if (rec.status !== '待入库' && rec.status !== '已入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单已' + rec.status + '，不能作废' });
   const reason = String((req.body || {}).reason || '').trim();
@@ -1767,7 +1751,7 @@ app.put('/api/materialRequisitions/:id/void', (req, res) => {
   rec.status = '已作废';
   // 按领料单明细恢复材料状态（待入库作废时 confirmRows 为空，也要解除「已生成领料单」锁定）
   (rec.items || []).forEach(it => {
-    const m = DB.materials.find(x => x.id === it.materialId && !x.deleted && (!reqSpaceId(req) || x.spaceId === reqSpaceId(req)));
+    const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
     if (!m) return;
     const cr = (rec.confirmRows || []).find(c => c.materialId === it.materialId);
     const deduct = cr ? (Number(cr.thisQty) || 0) : 0;
@@ -1793,9 +1777,7 @@ function fmtNow() {
 }
 
 app.get('/api/documents', (req, res) => {
-  const sid = reqSpaceId(req);
-  // 隔离：仅返回当前空间的用户文件 + 全局固定文件（固定模板、演示记录等）
-  const docs = { ...DB.documents, files: (DB.documents.files || []).filter(f => !f.deleted && (f.fixed || !f.spaceId || f.spaceId === sid)) };
+  const docs = { ...DB.documents, files: (DB.documents.files || []).filter(f => !f.deleted) };
   res.json(docs);
 });
 
@@ -1825,8 +1807,7 @@ app.post('/api/documents/files', upload.single('file'), (req, res) => {
     fs.writeFileSync(path.join(__dirname, 'data', rel), req.file.buffer);
     const file = {
       id, category: req.body.category || '未分类', name: req.file.originalname,
-      size: req.file.size, uploader: req.user.name, uploadedAt: fmtNow(), path: rel,
-      spaceId: reqSpaceId(req)
+      size: req.file.size, uploader: req.user.name, uploadedAt: fmtNow(), path: rel
     };
     DB.documents.files.push(file);
     saveDB();
@@ -1862,7 +1843,6 @@ app.put('/api/documents/files/:id', (req, res) => {
   const idx = DB.documents.files.findIndex(f => f.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: '未找到' });
   if (DB.documents.files[idx].fixed) return res.status(400).json({ error: '固定系统文件不可移动' });
-  if (!DB.documents.files[idx].fixed && DB.documents.files[idx].spaceId && DB.documents.files[idx].spaceId !== reqSpaceId(req)) return res.status(403).json({ error: '无权操作其他空间的文件' });
   DB.documents.files[idx] = { ...DB.documents.files[idx], ...req.body, id: req.params.id };
   saveDB();
   res.json(DB.documents.files[idx]);
@@ -1872,7 +1852,6 @@ app.delete('/api/documents/files/:id', (req, res) => {
   const idx = DB.documents.files.findIndex(f => f.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: '未找到' });
   if (DB.documents.files[idx].fixed) return res.status(400).json({ error: '固定系统文件不可删除' });
-  if (DB.documents.files[idx].spaceId && DB.documents.files[idx].spaceId !== reqSpaceId(req)) return res.status(403).json({ error: '无权操作其他空间的文件' });
   const f = DB.documents.files[idx];
   if (f.path && f.path.startsWith('uploads/')) {
     try { fs.unlinkSync(path.join(__dirname, 'data', f.path)); } catch (e) {}
@@ -2005,12 +1984,470 @@ app.post('/api/documents/hazard/import', upload.single('file'), (req, res) => {
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 
+// ---------- 工作票自动化配置：配置状态 ----------
+// 6 项配置的就绪情况；安全信息与危险点库为全局口径（危险点库当前为全局库）
+const WT_CONFIG_VERSION = 2;
+function fmtStamp(d) {
+  const p2 = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '/' + p2(d.getMonth() + 1) + '/' + p2(d.getDate()) + ' ' +
+         p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+}
+app.get('/api/workticket/config-status', (req, res) => {
+  const cnt = key => (DB[key] || []).filter(r => !r.deleted).length;
+  const haz = (DB.documents && DB.documents.hazardLibrary) || [];
+  const survey = DB.documents && DB.documents.surveyTemplate && DB.documents.surveyTemplate.name
+    ? DB.documents.surveyTemplate : null;
+
+  const raw = [
+    { key: 'rules',     title: '作业内容匹配规则', count: cnt('wtRules') },
+    { key: 'tech',      title: '施工技术措施',     count: cnt('wtTechMeasures') },
+    { key: 'safety',    title: '施工安全措施',     count: cnt('wtSafetyMeasures') },
+    { key: 'hospitals', title: '医院联系方式',     count: cnt('wtHospitals') },
+    { key: 'hazards',   title: '企业危险点库',     count: haz.length },
+    { key: 'survey',    title: '现场勘察记录模板', count: survey ? 1 : 0 }
+  ];
+  // 每项的就绪口径与副标题文案
+  const items = raw.map(it => {
+    let ready = false, desc = '';
+    if (it.key === 'hazards') { ready = it.count > 0; desc = ready ? ('已建立 ' + it.count + ' 条危险点') : '尚未建立危险点库'; }
+    else if (it.key === 'survey') { ready = it.count > 0; desc = ready ? '已上传并通过内容检查' : '尚未上传勘察记录模板'; }
+    else { ready = it.count > 0; desc = ready ? ('已配置 ' + it.count + ' 条') : '尚未配置'; }
+    return { key: it.key, title: it.title, count: it.count, ready, desc };
+  });
+  const ready = items.every(i => i.ready);
+  // 版本指纹：随 6 项配置内容变化；时间取各来源最近一次更新时间
+  const snap = { v: WT_CONFIG_VERSION, c: items.map(i => i.key + ':' + i.count) };
+  const sha256 = crypto.createHash('sha256').update(JSON.stringify(snap)).digest('hex');
+  let latest = 0;
+  WT_COLLECTIONS.forEach(k => (DB[k] || []).forEach(r => {
+    const t = Date.parse(r.updatedAt || r.createdAt || 0);
+    if (!isNaN(t) && t > latest) latest = t;
+  }));
+  const stamp = latest ? new Date(latest) : new Date();
+
+  // 危险点库按 2 列布局顺序返回：左列 rules/safety/hazards，右列 tech/hospitals/survey
+  const order = ['rules', 'safety', 'hazards', 'tech', 'hospitals', 'survey'];
+  const ordered = order.map(k => items.find(i => i.key === k));
+  res.json({
+    version: WT_CONFIG_VERSION,
+    versionLabel: 'v' + WT_CONFIG_VERSION,
+    updatedAt: fmtStamp(stamp),
+    sha256,
+    ready,
+    items: ordered,
+    hazardCount: haz.length
+  });
+});
+
+// ---------- 资料库：作业内容匹配规则等（工作票自动化配置数据）----------
+// 固定活动类别（匹配类别下拉选项，来自 CT 标准口径）
+const WT_FIXED_CATEGORIES = ['开挖坑洞', '组立电杆', '制作拉线', '箱变', '环网柜', '开挖电缆沟',
+  '电缆 / 敷设电缆', '电缆试验', '真空开关', '刀闸', '避雷器', '高压/低压导线', '变压器', '组装金具', '拆除、撤除'];
+
+const wtAlive = key => (DB[key] || []).filter(r => !r.deleted);
+function wtRulesOf(req) {
+  return wtAlive('wtRules').slice().sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0));
+}
+// 资料库分组（含各分组条目数）与下拉选项
+app.get('/api/workticket/library', (req, res) => {
+  const opt = key => wtAlive(key).map(r => ({ id: r.id, name: (r.title || r.name || r.content || '').slice(0, 80) })).filter(o => o.name);
+  res.json({
+    groups: [
+      { key: 'rules', title: '作业内容匹配规则', count: wtAlive('wtRules').length, showCount: true },
+      { key: 'tech', title: '施工技术措施原文', count: wtAlive('wtTechMeasures').length, showCount: true },
+      { key: 'safety', title: '施工安全措施原文', count: wtAlive('wtSafetyMeasures').length, showCount: true },
+      { key: 'hospitals', title: '医院联系方式', count: wtAlive('wtHospitals').length, showCount: true },
+      { key: 'emergency', title: '默认应急医院', count: 0, showCount: false }
+    ],
+    categories: WT_FIXED_CATEGORIES,
+    techOptions: opt('wtTechMeasures'),
+    safetyOptions: opt('wtSafetyMeasures'),
+    emergency: DB.settings.emergencyHospital || { name: '', phone: '' }
+  });
+});
+
+app.get('/api/workticket/rules', (req, res) => res.json(wtRulesOf(req)));
+
+function wtRulePayload(b) {
+  const workType = String(b.workType || '').trim();
+  const keywordsRaw = String(b.keywords || '').trim();
+  if (!workType) return { error: '请填写作业类型名称' };
+  if (!keywordsRaw) return { error: '请填写自定义匹配词' };
+  if (workType.length > 120) return { error: '作业类型名称不超过 120 字' };
+  if (keywordsRaw.length > 2000) return { error: '自定义匹配词不超过 2000 字' };
+  // 匹配词统一成数组（逗号/顿号/换行分隔都为合法输入），同时保留原始文本便于回填
+  const keywords = keywordsRaw.split(/[,，、;；\n\r]+/).map(x => x.trim()).filter(Boolean);
+  if (!keywords.length) return { error: '请填写自定义匹配词' };
+  return {
+    workType,
+    category: String(b.category || '').trim(),
+    keywordsRaw,
+    keywords,
+    techId: String(b.techId || '').trim(),
+    techName: String(b.techName || '').trim(),
+    safetyId: String(b.safetyId || '').trim(),
+    safetyName: String(b.safetyName || '').trim()
+  };
+}
+
+app.post('/api/workticket/rules', (req, res) => {
+  const p = wtRulePayload(req.body || {});
+  if (p.error) return res.status(400).json({ error: p.error });
+  const maxSort = wtAlive('wtRules').reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+  const row = { id: genId('wr'), deleted: false, sort: maxSort + 1, createdAt: nowISO(), updatedAt: nowISO(), ...p };
+  DB.wtRules.push(row);
+  saveDB();
+  res.json(row);
+});
+
+app.put('/api/workticket/rules/:id', (req, res) => {
+  const idx = (DB.wtRules || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  const p = wtRulePayload({ ...DB.wtRules[idx], ...(req.body || {}) });
+  if (p.error) return res.status(400).json({ error: p.error });
+  DB.wtRules[idx] = { ...DB.wtRules[idx], ...p, updatedAt: nowISO() };
+  saveDB();
+  res.json(DB.wtRules[idx]);
+});
+
+app.delete('/api/workticket/rules/:id', (req, res) => {
+  const idx = (DB.wtRules || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  DB.wtRules.splice(idx, 1);
+  saveDB();
+  res.json({ ok: true });
+});
+
+// 导入预览 / 导入：首表 A 列作业类型、B 列自定义匹配词、C 列施工技术措施、D 列安全措施
+function parseRuleRows(buf, originalname) {
+  let rows;
+  if (/\.csv$/i.test(originalname || '')) rows = parseCSVBuffer(buf);
+  else {
+    const wb = xlsx.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+  }
+  const out = [], errors = [];
+  rows.forEach((r, i) => {
+    if (i === 0) return; // 表头
+    const workType = String(r[0] || '').trim();
+    const keywordsRaw = String(r[1] || '').trim();
+    const techName = String(r[2] || '').trim();
+    const safetyName = String(r[3] || '').trim();
+    if (!workType && !keywordsRaw && !techName && !safetyName) return;
+    if (!workType) { errors.push('第' + (i + 1) + '行：作业类型为空'); return; }
+    if (!keywordsRaw) { errors.push('第' + (i + 1) + '行：自定义匹配词为空'); return; }
+    out.push({ workType, keywordsRaw, techName, safetyName });
+  });
+  return { rows: out, errors };
+}
+app.post('/api/workticket/rules/import-preview', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    const r = parseRuleRows(req.file.buffer, req.file.originalname);
+    res.json({ total: r.rows.length, rows: r.rows, errors: r.errors });
+  } catch (e) { res.status(500).json({ error: '解析失败：' + e.message }); }
+});
+app.post('/api/workticket/rules/import', (req, res) => {
+  const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: '没有可导入的数据' });
+  let sort = wtAlive('wtRules').reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+  const added = [];
+  rows.forEach(r => {
+    const p = wtRulePayload({ workType: r.workType, keywords: r.keywordsRaw || r.keywords, techName: r.techName, safetyName: r.safetyName });
+    if (p.error) return;
+    const row = { id: genId('wr'), deleted: false, sort: ++sort, createdAt: nowISO(), updatedAt: nowISO(), ...p };
+    DB.wtRules.push(row); added.push(row);
+  });
+  saveDB();
+  res.json({ added: added.length });
+});
+
+// ---------- 资料库：施工技术措施原文 / 施工安全措施原文（同结构，kind = tech | safety） ----------
+const WT_MEASURE_COLLECTIONS = { tech: 'wtTechMeasures', safety: 'wtSafetyMeasures' };
+const wtMeasureColl = kind => WT_MEASURE_COLLECTIONS[String(kind || '')] || null;
+
+function wtMeasurePayload(b) {
+  const title = String(b.title || '').trim();
+  const content = String(b.content || '').trim();
+  if (!title) return { error: '请填写条文标题 / 关键字' };
+  if (!content) return { error: '请填写措施原文' };
+  if (title.length > 200) return { error: '条文标题 / 关键字不超过 200 字' };
+  if (content.length > 20000) return { error: '措施原文不超过 20000 字' };
+  return { title, content };
+}
+// 序号：显式填写（>=1）则采用；留空/非法则排到末尾
+function wtPickSort(b, list) {
+  const v = Number(b && b.sort);
+  // 允许 1.1 / 2.3 这类分级序号（原系统截图即为此格式），保留两位小数
+  if (Number.isFinite(v) && v > 0) return Math.round(v * 100) / 100;
+  return Math.floor(list.reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0)) + 1;
+}
+const wtBySort = list => list.slice().sort((a, b) => ((Number(a.sort) || 0) - (Number(b.sort) || 0)) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+
+app.get('/api/workticket/measures/:kind', (req, res) => {
+  const key = wtMeasureColl(req.params.kind);
+  if (!key) return res.status(404).json({ error: '未知的措施类型' });
+  res.json(wtBySort(wtAlive(key)));
+});
+
+app.post('/api/workticket/measures/:kind', (req, res) => {
+  const key = wtMeasureColl(req.params.kind);
+  if (!key) return res.status(404).json({ error: '未知的措施类型' });
+  const b = req.body || {};
+  const p = wtMeasurePayload(b);
+  if (p.error) return res.status(400).json({ error: p.error });
+  const row = { id: genId('wt'), deleted: false, sort: wtPickSort(b, wtAlive(key)), createdAt: nowISO(), updatedAt: nowISO(), ...p };
+  DB[key].push(row);
+  saveDB();
+  res.json(row);
+});
+
+app.put('/api/workticket/measures/:kind/:id', (req, res) => {
+  const key = wtMeasureColl(req.params.kind);
+  if (!key) return res.status(404).json({ error: '未知的措施类型' });
+  const idx = (DB[key] || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  const b = req.body || {};
+  const p = wtMeasurePayload({ ...DB[key][idx], ...b });
+  if (p.error) return res.status(400).json({ error: p.error });
+  const sort = b.sort === undefined || String(b.sort).trim() === '' ? DB[key][idx].sort : wtPickSort(b, wtAlive(key).filter(r => r.id !== req.params.id));
+  DB[key][idx] = { ...DB[key][idx], ...p, sort, updatedAt: nowISO() };
+  saveDB();
+  res.json(DB[key][idx]);
+});
+
+app.delete('/api/workticket/measures/:kind/:id', (req, res) => {
+  const key = wtMeasureColl(req.params.kind);
+  if (!key) return res.status(404).json({ error: '未知的措施类型' });
+  const idx = (DB[key] || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  DB[key].splice(idx, 1);
+  saveDB();
+  res.json({ ok: true });
+});
+
+// 导入：A 列序号（可空）、B 列条文标题 / 关键字、C 列措施原文
+function parseMeasureRows(buf, originalname) {
+  let rows;
+  if (/\.csv$/i.test(originalname || '')) rows = parseCSVBuffer(buf);
+  else {
+    const wb = xlsx.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+  }
+  const out = [], errors = [];
+  rows.forEach((r, i) => {
+    if (i === 0) return; // 表头
+    const wide = r.length >= 3;
+    const sortRaw = wide ? rowCell(r, 0) : '';
+    const title = wide ? rowCell(r, 1) : rowCell(r, 0);
+    const content = wide ? rowCell(r, 2) : rowCell(r, 1);
+    if (!title && !content && !sortRaw) return;
+    if (!title) { errors.push('第' + (i + 1) + '行：条文标题 / 关键字为空'); return; }
+    if (!content) { errors.push('第' + (i + 1) + '行：措施原文为空'); return; }
+    if (title.length > 200) { errors.push('第' + (i + 1) + '行：条文标题 / 关键字超过 200 字'); return; }
+    if (content.length > 20000) { errors.push('第' + (i + 1) + '行：措施原文超过 20000 字'); return; }
+    out.push({ sort: wide ? sortRaw : '', title, content });
+  });
+  return { rows: out, errors };
+}
+function rowCell(r, i) { return String(r[i] === undefined || r[i] === null ? '' : r[i]).trim(); }
+
+app.post('/api/workticket/measures/:kind/import-preview', upload.single('file'), (req, res) => {
+  if (!wtMeasureColl(req.params.kind)) return res.status(404).json({ error: '未知的措施类型' });
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    const r = parseMeasureRows(req.file.buffer, req.file.originalname);
+    res.json({ total: r.rows.length, rows: r.rows, errors: r.errors });
+  } catch (e) { res.status(500).json({ error: '解析失败：' + e.message }); }
+});
+app.post('/api/workticket/measures/:kind/import', (req, res) => {
+  const key = wtMeasureColl(req.params.kind);
+  if (!key) return res.status(404).json({ error: '未知的措施类型' });
+  const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: '没有可导入的数据' });
+  let sort = wtAlive(key).reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+  let added = 0;
+  rows.forEach(r => {
+    const p = wtMeasurePayload({ title: r.title, content: r.content });
+    if (p.error) return;
+    const n = Number(r.sort);
+    const s = Number.isFinite(n) && n > 0 ? Math.floor(n) : ++sort;
+    DB[key].push({ id: genId('wt'), deleted: false, sort: s, createdAt: nowISO(), updatedAt: nowISO(), ...p });
+    added++;
+  });
+  saveDB();
+  res.json({ added });
+});
+
+// ---------- 资料库：医院联系方式 ----------
+function wtHospitalPayload(b) {
+  const area = String(b.area || '').trim();
+  const name = String(b.name || '').trim();
+  const address = String(b.address || '').trim();
+  const phone = String(b.phone || '').trim();
+  if (!area) return { error: '请填写作业地址匹配词' };
+  if (!name) return { error: '请填写医院名称' };
+  if (!address) return { error: '请填写医院地址' };
+  if (!phone) return { error: '请填写联系电话' };
+  if (area.length > 200) return { error: '作业地址匹配词不超过 200 字' };
+  if (name.length > 100) return { error: '医院名称不超过 100 字' };
+  if (address.length > 300) return { error: '医院地址不超过 300 字' };
+  if (phone.length > 50) return { error: '联系电话不超过 50 字' };
+  return { area, name, address, phone };
+}
+
+app.get('/api/workticket/hospitals', (req, res) => res.json(wtBySort(wtAlive('wtHospitals'))));
+
+app.post('/api/workticket/hospitals', (req, res) => {
+  const b = req.body || {};
+  const p = wtHospitalPayload(b);
+  if (p.error) return res.status(400).json({ error: p.error });
+  const row = { id: genId('wt'), deleted: false, sort: wtPickSort(b, wtAlive('wtHospitals')), createdAt: nowISO(), updatedAt: nowISO(), ...p };
+  DB.wtHospitals.push(row);
+  saveDB();
+  res.json(row);
+});
+
+app.put('/api/workticket/hospitals/:id', (req, res) => {
+  const idx = (DB.wtHospitals || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  const b = req.body || {};
+  const p = wtHospitalPayload({ ...DB.wtHospitals[idx], ...b });
+  if (p.error) return res.status(400).json({ error: p.error });
+  DB.wtHospitals[idx] = { ...DB.wtHospitals[idx], ...p, updatedAt: nowISO() };
+  saveDB();
+  res.json(DB.wtHospitals[idx]);
+});
+
+app.delete('/api/workticket/hospitals/:id', (req, res) => {
+  const idx = (DB.wtHospitals || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  DB.wtHospitals.splice(idx, 1);
+  saveDB();
+  res.json({ ok: true });
+});
+
+// 导入：A 列作业地址匹配词、B 列医院、C 列地址、D 列电话
+function parseHospitalRows(buf, originalname) {
+  let rows;
+  if (/\.csv$/i.test(originalname || '')) rows = parseCSVBuffer(buf);
+  else {
+    const wb = xlsx.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+  }
+  const out = [], errors = [];
+  rows.forEach((r, i) => {
+    if (i === 0) return; // 表头
+    const area = rowCell(r, 0), name = rowCell(r, 1), address = rowCell(r, 2), phone = rowCell(r, 3);
+    if (!area && !name && !address && !phone) return;
+    const p = wtHospitalPayload({ area, name, address, phone });
+    if (p.error) { errors.push('第' + (i + 1) + '行：' + p.error); return; }
+    out.push(p);
+  });
+  return { rows: out, errors };
+}
+app.post('/api/workticket/hospitals/import-preview', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    const r = parseHospitalRows(req.file.buffer, req.file.originalname);
+    res.json({ total: r.rows.length, rows: r.rows, errors: r.errors });
+  } catch (e) { res.status(500).json({ error: '解析失败：' + e.message }); }
+});
+app.post('/api/workticket/hospitals/import', (req, res) => {
+  const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: '没有可导入的数据' });
+  let sort = wtAlive('wtHospitals').reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+  let added = 0;
+  rows.forEach(r => {
+    const p = wtHospitalPayload(r);
+    if (p.error) return;
+    DB.wtHospitals.push({ id: genId('wt'), deleted: false, sort: ++sort, createdAt: nowISO(), updatedAt: nowISO(), ...p });
+    added++;
+  });
+  saveDB();
+  res.json({ added });
+});
+
+// ---------- 资料库：默认应急医院（单条配置，随保存即时生效） ----------
+app.put('/api/workticket/emergency-hospital', (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  const phone = String(b.phone || '').trim();
+  if (name.length > 100) return res.status(400).json({ error: '医院名称不超过 100 字' });
+  if (phone.length > 50) return res.status(400).json({ error: '联系电话不超过 50 字' });
+  DB.settings.emergencyHospital = { name, phone, updatedAt: nowISO() };
+  saveDB();
+  res.json(DB.settings.emergencyHospital);
+});
+
+// 一键载入六项 CT 标准：需要 assets/ct-standard.json（规则/技术/安全/医院四组 + 可选危险点与勘察模板）
+app.post('/api/workticket/load-ct-standard', (req, res) => {
+  const f = path.join(__dirname, 'assets', 'ct-standard.json');
+  if (!fs.existsSync(f)) {
+    return res.status(400).json({ error: '尚未内置 CT 标准资料：缺少 assets/ct-standard.json' });
+  }
+  try {
+    const data = JSON.parse(fs.readFileSync(f, 'utf8'));
+    let n = 0;
+    const push = (key, arr, map) => {
+      if (!Array.isArray(arr)) return;
+      let sort = wtAlive(key).reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+      arr.forEach(src => {
+        const row = { id: genId('wt'), deleted: false, sort: ++sort, createdAt: nowISO(), updatedAt: nowISO(), ...map(src) };
+        DB[key].push(row); n++;
+      });
+    };
+    push('wtRules', data.rules, s => wtRulePayload({ workType: s.workType, keywords: s.keywords, category: s.category, techName: s.techName, safetyName: s.safetyName }));
+    push('wtTechMeasures', data.techMeasures, s => ({ title: String(s.title || '').trim(), content: String(s.content || '').trim() }));
+    push('wtSafetyMeasures', data.safetyMeasures, s => ({ title: String(s.title || '').trim(), content: String(s.content || '').trim() }));
+    push('wtHospitals', data.hospitals, s => ({ area: String(s.area || '').trim(), name: String(s.name || '').trim(), phone: String(s.phone || '').trim(), address: String(s.address || '').trim() }));
+    if (Array.isArray(data.hazards) && data.hazards.length && (!DB.documents.hazardLibrary || !DB.documents.hazardLibrary.length)) {
+      data.hazards.forEach((h, i) => {
+        if (!h || !h.hazard || !h.measure) return;
+        DB.documents.hazardLibrary.push({ id: genId('h'), hazard: String(h.hazard), measure: String(h.measure), category: categorize(String(h.hazard)), sort: i });
+      });
+    }
+    saveDB();
+    res.json({ ok: true, loaded: n });
+  } catch (e) { res.status(500).json({ error: '载入失败：' + e.message }); }
+});
+
+// 详细数据（供展开「企业危险点库」使用；只读列表）
+app.get('/api/workticket/hazards', (req, res) => {
+  const list = ((DB.documents && DB.documents.hazardLibrary) || [])
+    .slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+  res.json(list);
+});
+
 // ---------- 设置 ----------
 app.get('/api/settings', (req, res) => res.json(DB.settings));
 app.put('/api/settings', (req, res) => {
   DB.settings = { ...DB.settings, ...req.body };
   saveDB();
   res.json(DB.settings);
+});
+
+// 首次使用初始化向导：返回各基础设置的完成度
+app.get('/api/init-status', (req, res) => {
+  const myWorkers = (DB.workers || []).filter(aliveFilter());
+  const workers = myWorkers.length;
+  // 「班组与施工人员」完成条件：至少一位施工人员已归属班组
+  const workersWithTeam = myWorkers.filter(w => !!(w.team && String(w.team).trim())).length;
+  const contacts = (DB.contacts || []).filter(aliveFilter()).length;
+  const haz = (DB.documents && DB.documents.hazardLibrary) || [];
+  const survey = !!(DB.documents && DB.documents.surveyTemplate && DB.documents.surveyTemplate.name);
+  res.json({
+    initialized: !!(DB.settings && DB.settings.initialized),
+    companyName: (DB.settings && DB.settings.companyName) || '',
+    workers,
+    workersWithTeam,
+    contacts,
+    hazardLibrary: haz.length,
+    surveyTemplate: survey
+  });
 });
 
 // ---------- 登录页背景：本地上传（管理员）→ data/uploads/login-bg/ ----------
@@ -2083,6 +2520,7 @@ app.use('/assets', express.static(path.join(__dirname, 'assets')));
 // 同时注入 LQIP 占位图（超小模糊图）与平均色底，避免图片字节未下载完时出现「黑一下」
 const INDEX_PATH = path.join(__dirname, 'public', 'index.html');
 let INDEX_TPL = null;
+let INDEX_MTIME = 0;
 // 预设背景的 LQIP + 平均色（构建期生成，见 public/login-bg/meta.json）
 let PRESET_BG_META = {};
 try {
@@ -2102,7 +2540,13 @@ function getLoginBgMeta(url) {
   return PRESET_BG_META[base] || null;
 }
 function renderIndexHtml() {
-  if (INDEX_TPL === null) INDEX_TPL = fs.readFileSync(INDEX_PATH, 'utf8');
+  // 模板缓存：文件被改动（mtime 变化）时自动重新读取，避免改样式后必须重启进程
+  try {
+    const mtime = fs.statSync(INDEX_PATH).mtimeMs;
+    if (INDEX_TPL === null || mtime !== INDEX_MTIME) { INDEX_TPL = fs.readFileSync(INDEX_PATH, 'utf8'); INDEX_MTIME = mtime; }
+  } catch (e) {
+    if (INDEX_TPL === null) INDEX_TPL = fs.readFileSync(INDEX_PATH, 'utf8');
+  }
   const raw = String((DB.settings && DB.settings.loginBg) || DEFAULT_LOGIN_BG);
   // 仅允许站内相对路径或 http(s) 地址，剥离引号/尖括号，防注入
   const safe = raw.replace(/[\\"'<>]/g, '').replace(/\s+/g, '');

@@ -10,7 +10,12 @@ const api = {
     const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
     if (res.status === 401) { localStorage.removeItem('erp_token'); location.reload(); throw new Error('unauth'); }
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || '请求失败');
+    if (!res.ok) {
+      const err = new Error(data.error || '请求失败');
+      err.status = res.status;
+      err.data = data; // 保留后端附加信息（如删除校验的引用清单 refs）
+      throw err;
+    }
     return data;
   },
   get(u) { return this.req('GET', u); },
@@ -36,6 +41,9 @@ function tagType(val) {
   if (['部分到库'].includes(val)) return 'primary';
   return 'info';
 }
+
+/* ---------------- 当前用户权限（由 /api/me 填充；全局 mixin 暴露 canWrite） ---------------- */
+const Auth = reactive({ loaded: false, isAdmin: false, group: '班组长', writeModules: [] });
 
 /* ---------------- 通用 CRUD 视图（覆盖项目/计划/借工/竣工资料/用户/领料单/导入批次/出库） ---------------- */
 const CrudView = {
@@ -92,17 +100,23 @@ const CrudView = {
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
     function fieldOptions(key) { return refOptions[key] || []; }
+    function cfgModule() {
+      const e = props.config.endpoint;
+      if (e === 'borrowWorks') return 'borrow';
+      if (e === 'completionDocuments') return 'completion';
+      return 'settings';
+    }
 
     onMounted(() => { loadRefs(); load(); });
 
-    return { list, loading, dialogVisible, editing, form, openAdd, openEdit, submit, remove, fieldOptions, tagType };
+    return { list, loading, dialogVisible, editing, form, openAdd, openEdit, submit, remove, fieldOptions, tagType, cfgModule };
   },
   template: `
   <div>
     <div class="toolbar">
-      <el-button type="primary" @click="openAdd">+ 新增</el-button>
+      <el-button v-if="canWrite(cfgModule())" type="primary" @click="openAdd">+ 新增</el-button>
       <span class="spacer"></span>
-      <span style="color:#888;font-size:13px;">共 {{ list.length }} 条</span>
+      <span style="color:var(--text-3);font-size:13px;">共 {{ list.length }} 条</span>
     </div>
     <el-table :data="list" v-loading="loading" border stripe style="width:100%">
       <el-table-column v-for="col in config.columns" :key="col.key" :prop="col.key" :label="col.label" :width="col.width">
@@ -111,7 +125,7 @@ const CrudView = {
           <span v-else>{{ row[col.key] }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="150" fixed="right">
+      <el-table-column v-if="canWrite(cfgModule())" label="操作" width="150" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
@@ -141,19 +155,12 @@ const CrudView = {
 /* ---------------- 文档中心（对齐原系统截图 2026-10-12） ---------------- */
 const DocumentsView = {
   setup() {
-    const docs = reactive({ categories: [], files: [], hazardLibrary: [], surveyTemplate: {} });
+    const docs = reactive({ categories: [], files: [] });
+    const docTab = ref('resources');
     const activeCat = ref('规范文件');
-    const hazardOpen = ref(true);
-    const hazardSearch = ref('');
-    const hazardDialog = ref(false);
-    const hazardEditing = ref(false);
-    const hazardForm = reactive({ hazard: '', measure: '', category: '', sort: null });
-    const HAZARD_CATEGORIES = ['有限空间', '机械伤害', '起重伤害', '触电', '高处坠落', '倒塔/坍塌', '跨越风险', '物体打击', '动火作业'];
     const filePage = ref(1);
     const filePageSize = ref(20);
     const uploadInput = ref(null);
-    const importInput = ref(null);
-    const replaceInput = ref(null);
     const previewVisible = ref(false);
     const previewData = reactive({ kind: '', name: '', lines: [], sheets: [], message: '', url: '' });
     const previewPage = ref(1);
@@ -167,49 +174,70 @@ const DocumentsView = {
     async function load() {
       try {
         const d = await api.get('/api/documents');
-        docs.categories = d.categories; docs.files = d.files;
-        docs.hazardLibrary = d.hazardLibrary; docs.surveyTemplate = d.surveyTemplate;
+        docs.categories = d.categories || []; docs.files = d.files || [];
         if (!docs.categories.includes(activeCat.value)) activeCat.value = docs.categories[0] || '';
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     const catFiles = computed(() => docs.files.filter(f => f.category === activeCat.value));
-    const pagedFiles = computed(() => catFiles.value.slice((filePage.value - 1) * filePageSize.value, filePage.value * filePageSize.value));
-    const sortedHazards = computed(() =>
-      [...docs.hazardLibrary].sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0))
-    );
-    const filteredHazards = computed(() => {
-      const k = hazardSearch.value.trim();
-      if (!k) return sortedHazards.value;
-      return sortedHazards.value.filter(h => (h.hazard || '').includes(k) || (h.measure || '').includes(k));
-    });
+    function catCount(c) { return docs.files.filter(f => f.category === c).length; }
 
-    /* ---- 企业危险点库 ---- */
-    function openHazardAdd() {
-      Object.assign(hazardForm, { hazard: '', measure: '', category: '', sort: null });
-      hazardEditing.value = false; hazardDialog.value = true;
+    /* ---- 工作票自动化配置：配置状态 ---- */
+    const wt = reactive({ loading: false, ready: false, versionLabel: 'v2', updatedAt: '', sha256: '', items: [], hazardCount: 0 });
+    const wtHazardOpen = ref(false);
+    const wtHazards = ref([]);
+    // 企业危险点库：全量列表 + 搜索 + 分页 + 新增/编辑
+    const hazLoading = ref(false);
+    const hazSearch = ref('');
+    const hazKeyword = ref('');
+    const hazPage = ref(1);
+    const hazPageSize = ref(10);
+    const hazDlg = reactive({ visible: false, editing: false, busy: false, id: '', hazard: '', measure: '', sort: null });
+    const hazImportInput = ref(null);
+    const hazFiltered = computed(() => {
+      const k = hazKeyword.value.trim();
+      if (!k) return wtHazards.value;
+      return wtHazards.value.filter(h => (h.hazard || '').includes(k) || (h.measure || '').includes(k));
+    });
+    const hazPaged = computed(() => hazFiltered.value.slice((hazPage.value - 1) * hazPageSize.value, hazPage.value * hazPageSize.value));
+    async function loadHazards() {
+      hazLoading.value = true;
+      try { wtHazards.value = await api.get('/api/workticket/hazards'); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { hazLoading.value = false; }
     }
-    function openHazardEdit(row) {
-      Object.assign(hazardForm, { hazard: row.hazard, measure: row.measure, category: row.category || '', sort: row.sort, _id: row.id });
-      hazardEditing.value = true; hazardDialog.value = true;
+    function applyHazSearch() { hazKeyword.value = hazSearch.value; hazPage.value = 1; }
+    function reloadHazards() { hazSearch.value = ''; hazKeyword.value = ''; hazPage.value = 1; loadHazards(); }
+    function openHazAdd() {
+      Object.assign(hazDlg, { visible: true, editing: false, busy: false, id: '', hazard: '', measure: '', sort: null });
     }
-    async function submitHazard() {
-      const payload = { hazard: hazardForm.hazard, measure: hazardForm.measure, category: hazardForm.category, sort: hazardForm.sort };
+    function openHazEdit(row) {
+      Object.assign(hazDlg, { visible: true, editing: true, busy: false, id: row.id, hazard: row.hazard || '', measure: row.measure || '', sort: row.sort ?? null });
+    }
+    async function submitHaz() {
+      if (!hazDlg.hazard.trim()) { ElementPlus.ElMessage.warning('请填写危险点'); return; }
+      if (!hazDlg.measure.trim()) { ElementPlus.ElMessage.warning('请填写控制措施'); return; }
+      hazDlg.busy = true;
       try {
-        if (hazardEditing.value) await api.put('/api/documents/hazard/' + hazardForm._id, payload);
+        const payload = { hazard: hazDlg.hazard.trim(), measure: hazDlg.measure.trim(), sort: hazDlg.sort };
+        if (hazDlg.editing) await api.put('/api/documents/hazard/' + hazDlg.id, payload);
         else await api.post('/api/documents/hazard', payload);
         ElementPlus.ElMessage.success('已保存');
-        hazardDialog.value = false; load();
+        hazDlg.visible = false;
+        await loadHazards(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { hazDlg.busy = false; }
+    }
+    async function removeHaz(row) {
+      try { await ElementPlus.ElMessageBox.confirm('确认删除危险点「' + (row.hazard || '').slice(0, 20) + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
+      catch (e) { return; }
+      try {
+        await api.del('/api/documents/hazard/' + row.id);
+        ElementPlus.ElMessage.success('已删除');
+        await loadHazards(); await loadWt();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
-    async function removeHazard(row) {
-      try {
-        await ElementPlus.ElMessageBox.confirm(`确认删除危险点「${row.hazard}」？`, '提示', { type: 'warning' });
-        await api.del('/api/documents/hazard/' + row.id);
-        ElementPlus.ElMessage.success('已删除'); load();
-      } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
-    }
-    function triggerHazardImport() { if (importInput.value) importInput.value.click(); }
-    async function onHazardImport(ev) {
+    function triggerHazImport() { if (hazImportInput.value) hazImportInput.value.click(); }
+    async function onHazImport(ev) {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = '';
       if (!file) return;
@@ -220,29 +248,274 @@ const DocumentsView = {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '导入失败');
-        ElementPlus.ElMessage.success(`导入完成：新增 ${data.added} 条，跳过 ${data.skipped} 条`);
-        load();
+        ElementPlus.ElMessage.success('导入完成：新增 ' + data.added + ' 条，跳过 ' + data.skipped + ' 条');
+        await loadHazards(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function loadWt() {
+      wt.loading = true;
+      try {
+        const st = await api.get('/api/workticket/config-status');
+        Object.assign(wt, st);
+        if (wtHazardOpen.value) await loadHazards();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { wt.loading = false; }
+    }
+    /* ---- 资料库（作业内容匹配规则 / 技术措施 / 安全措施 / 医院联系方式 / 默认应急医院） ---- */
+    const lib = reactive({ groups: [], categories: [], techOptions: [], safetyOptions: [] });
+    /* 各分组可独立展开（互不影响） */
+    const libOpen = reactive({ rules: false, tech: false, safety: false, hospitals: false, emergency: false });
+    const rules = ref([]);
+    const ruleDlg = reactive({ visible: false, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', safetyId: '', safetyName: '' });
+    const ruleImportInput = ref(null);
+    const rulePreview = reactive({ visible: false, busy: false, rows: [], errors: [] });
+    /* 施工技术 / 安全措施原文（同结构，kind = tech | safety） */
+    const measures = reactive({ tech: [], safety: [] });
+    const meaDlg = reactive({ visible: false, editing: false, busy: false, kind: 'tech', id: '', sort: '', title: '', content: '' });
+    /* 措施原文全文查看（二级页面） */
+    const meaView = reactive({ visible: false, kind: 'tech', title: '', sort: '', content: '' });
+    function openMeaView(kind, row) {
+      Object.assign(meaView, {
+        visible: true, kind,
+        title: row.title || '',
+        sort: row.sort === undefined || row.sort === null ? '' : String(row.sort),
+        content: row.content || ''
+      });
+    }
+    const measureLabel = kind => (kind === 'safety' ? '施工安全措施原文' : '施工技术措施原文');
+    /* 医院联系方式 */
+    const hospitals = ref([]);
+    const hosDlg = reactive({ visible: false, editing: false, busy: false, id: '', area: '', name: '', address: '', phone: '' });
+    /* 默认应急医院（单条配置，失焦即保存） */
+    const emergency = reactive({ name: '', phone: '', saving: false, pending: false });
+    /* 通用导入预览（技术/安全措施原文、医院联系方式共用） */
+    const impPreview = reactive({ visible: false, busy: false, kind: '', rows: [], errors: [] });
+    const impInput = ref(null);
+
+    async function loadLib() {
+      try {
+        const d = await api.get('/api/workticket/library');
+        lib.groups = d.groups || []; lib.categories = d.categories || [];
+        lib.techOptions = d.techOptions || []; lib.safetyOptions = d.safetyOptions || [];
+        const em = d.emergency || {};
+        emergency.name = em.name || ''; emergency.phone = em.phone || '';
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function loadRules() {
+      try { rules.value = await api.get('/api/workticket/rules'); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function loadMeasures(kind) {
+      try { measures[kind] = await api.get('/api/workticket/measures/' + kind); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function loadHospitals() {
+      try { hospitals.value = await api.get('/api/workticket/hospitals'); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function toggleLib(key) {
+      libOpen[key] = !libOpen[key];
+      if (!libOpen[key]) return;
+      if (key === 'rules') await loadRules();
+      else if (key === 'tech' || key === 'safety') await loadMeasures(key);
+      else if (key === 'hospitals') await loadHospitals();
+    }
+    /* ---- 施工技术 / 安全措施原文 ---- */
+    function openMeaAdd(kind) {
+      Object.assign(meaDlg, { visible: true, editing: false, busy: false, kind, id: '', sort: '', title: '', content: '' });
+    }
+    function openMeaEdit(kind, row) {
+      Object.assign(meaDlg, {
+        visible: true, editing: true, busy: false, kind, id: row.id,
+        sort: row.sort === undefined || row.sort === null ? '' : String(row.sort),
+        title: row.title || '', content: row.content || ''
+      });
+    }
+    async function submitMea() {
+      if (!String(meaDlg.title || '').trim()) { ElementPlus.ElMessage.warning('请填写条文标题 / 关键字'); return; }
+      if (!String(meaDlg.content || '').trim()) { ElementPlus.ElMessage.warning('请填写措施原文'); return; }
+      meaDlg.busy = true;
+      try {
+        const payload = { sort: String(meaDlg.sort || '').trim(), title: meaDlg.title, content: meaDlg.content };
+        if (meaDlg.editing) await api.put('/api/workticket/measures/' + meaDlg.kind + '/' + meaDlg.id, payload);
+        else await api.post('/api/workticket/measures/' + meaDlg.kind, payload);
+        ElementPlus.ElMessage.success('已保存');
+        meaDlg.visible = false;
+        await loadMeasures(meaDlg.kind); await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { meaDlg.busy = false; }
+    }
+    async function removeMea(kind, row) {
+      try { await ElementPlus.ElMessageBox.confirm('确认删除「' + (row.title || '') + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
+      catch (e) { return; }
+      try {
+        await api.del('/api/workticket/measures/' + kind + '/' + row.id);
+        ElementPlus.ElMessage.success('已删除');
+        await loadMeasures(kind); await loadLib(); await loadWt();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
-    /* ---- 固定系统文件：替换现场勘察记录模板 ---- */
-    function triggerReplace() { if (replaceInput.value) replaceInput.value.click(); }
-    async function onReplace(ev) {
+    /* ---- 医院联系方式 ---- */
+    function openHosAdd() {
+      Object.assign(hosDlg, { visible: true, editing: false, busy: false, id: '', area: '', name: '', address: '', phone: '' });
+    }
+    function openHosEdit(row) {
+      Object.assign(hosDlg, {
+        visible: true, editing: true, busy: false, id: row.id,
+        area: row.area || '', name: row.name || '', address: row.address || '', phone: row.phone || ''
+      });
+    }
+    async function submitHos() {
+      if (!hosDlg.area.trim()) { ElementPlus.ElMessage.warning('请填写作业地址匹配词'); return; }
+      if (!hosDlg.name.trim()) { ElementPlus.ElMessage.warning('请填写医院名称'); return; }
+      if (!hosDlg.address.trim()) { ElementPlus.ElMessage.warning('请填写医院地址'); return; }
+      if (!hosDlg.phone.trim()) { ElementPlus.ElMessage.warning('请填写联系电话'); return; }
+      hosDlg.busy = true;
+      try {
+        const payload = { area: hosDlg.area, name: hosDlg.name, address: hosDlg.address, phone: hosDlg.phone };
+        if (hosDlg.editing) await api.put('/api/workticket/hospitals/' + hosDlg.id, payload);
+        else await api.post('/api/workticket/hospitals', payload);
+        ElementPlus.ElMessage.success('已保存');
+        hosDlg.visible = false;
+        await loadHospitals(); await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { hosDlg.busy = false; }
+    }
+    async function removeHos(row) {
+      try { await ElementPlus.ElMessageBox.confirm('确认删除「' + (row.name || '') + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
+      catch (e) { return; }
+      try {
+        await api.del('/api/workticket/hospitals/' + row.id);
+        ElementPlus.ElMessage.success('已删除');
+        await loadHospitals(); await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function saveEmergency() {
+      // 连续切换输入框时逐个排队，避免前一次保存未返回而丢失后一次输入
+      if (emergency.saving) { emergency.pending = true; return; }
+      emergency.saving = true;
+      let ok = false;
+      do {
+        emergency.pending = false;
+        try {
+          await api.put('/api/workticket/emergency-hospital', { name: emergency.name, phone: emergency.phone });
+          ok = true;
+        } catch (e) { ElementPlus.ElMessage.error(e.message); break; }
+      } while (emergency.pending);
+      emergency.saving = false;
+      if (ok) ElementPlus.ElMessage.success('已保存');
+    }
+
+    /* ---- 通用导入预览（措施原文 / 医院联系方式） ---- */
+    function triggerImp(kind) {
+      impPreview.kind = kind;
+      if (impInput.value) impInput.value.click();
+    }
+    function impUrl(kind, tail) {
+      return kind === 'hospitals' ? '/api/workticket/hospitals/' + tail : '/api/workticket/measures/' + kind + '/' + tail;
+    }
+    async function onImp(ev) {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = '';
       if (!file) return;
       const fd = new FormData(); fd.append('file', file);
       try {
-        const res = await fetch('/api/documents/template/replace', {
+        const res = await fetch(impUrl(impPreview.kind, 'import-preview'), {
           method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '替换失败');
-        ElementPlus.ElMessage.success('模板已替换');
-        load();
+        if (!res.ok) throw new Error(data.error || '解析失败');
+        impPreview.rows = data.rows || []; impPreview.errors = data.errors || [];
+        impPreview.visible = true;
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
+    async function confirmImp() {
+      if (!impPreview.rows.length) { ElementPlus.ElMessage.warning('没有可导入的数据'); return; }
+      impPreview.busy = true;
+      try {
+        const r = await api.post(impUrl(impPreview.kind, 'import'), { rows: impPreview.rows });
+        ElementPlus.ElMessage.success('已导入 ' + (r.added || 0) + ' 条');
+        impPreview.visible = false;
+        const kind = impPreview.kind;
+        if (kind === 'hospitals') await loadHospitals(); else await loadMeasures(kind);
+        await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { impPreview.busy = false; }
+    }
 
+    function openRuleAdd() {
+      Object.assign(ruleDlg, { visible: true, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', safetyId: '', safetyName: '' });
+    }
+    function openRuleEdit(row) {
+      Object.assign(ruleDlg, {
+        visible: true, editing: true, busy: false, id: row.id,
+        workType: row.workType || '', category: row.category || '',
+        keywords: row.keywordsRaw || (row.keywords || []).join('、'),
+        techId: row.techId || '', techName: row.techName || '',
+        safetyId: row.safetyId || '', safetyName: row.safetyName || ''
+      });
+    }
+    async function submitRule() {
+      if (!ruleDlg.workType.trim()) { ElementPlus.ElMessage.warning('请填写作业类型名称'); return; }
+      if (!ruleDlg.keywords.trim()) { ElementPlus.ElMessage.warning('请填写自定义匹配词'); return; }
+      ruleDlg.busy = true;
+      try {
+        const payload = {
+          workType: ruleDlg.workType.trim(), category: ruleDlg.category || '',
+          keywords: ruleDlg.keywords.trim(),
+          techId: ruleDlg.techId || '', techName: ruleDlg.techName || '',
+          safetyId: ruleDlg.safetyId || '', safetyName: ruleDlg.safetyName || ''
+        };
+        if (ruleDlg.editing) await api.put('/api/workticket/rules/' + ruleDlg.id, payload);
+        else await api.post('/api/workticket/rules', payload);
+        ElementPlus.ElMessage.success('已保存');
+        ruleDlg.visible = false;
+        await loadRules(); await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { ruleDlg.busy = false; }
+    }
+    async function removeRule(row) {
+      try { await ElementPlus.ElMessageBox.confirm('确认删除规则「' + (row.workType || '') + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
+      catch (e) { return; }
+      try {
+        await api.del('/api/workticket/rules/' + row.id);
+        ElementPlus.ElMessage.success('已删除');
+        await loadRules(); await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    function triggerRuleImport() { if (ruleImportInput.value) ruleImportInput.value.click(); }
+    async function onRuleImport(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!file) return;
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const res = await fetch('/api/workticket/rules/import-preview', {
+          method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '解析失败');
+        rulePreview.rows = data.rows || []; rulePreview.errors = data.errors || [];
+        rulePreview.visible = true;
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    async function confirmRuleImport() {
+      if (!rulePreview.rows.length) { ElementPlus.ElMessage.warning('没有可导入的数据'); return; }
+      rulePreview.busy = true;
+      try {
+        const r = await api.post('/api/workticket/rules/import', { rows: rulePreview.rows });
+        ElementPlus.ElMessage.success('已导入 ' + (r.added || 0) + ' 条');
+        rulePreview.visible = false;
+        await loadRules(); await loadLib(); await loadWt();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { rulePreview.busy = false; }
+    }
+    async function toggleWtHazards() {
+      wtHazardOpen.value = !wtHazardOpen.value;
+      if (wtHazardOpen.value) await loadHazards();
+    }
+    watch(docTab, v => { if (v === 'automation') loadWt(); });
+    const pagedFiles = computed(() => catFiles.value.slice((filePage.value - 1) * filePageSize.value, filePage.value * filePageSize.value));
     /* ---- 文件上传 / 下载 / 预览 / 删除 / 移动 ---- */
     function triggerUpload() { if (uploadInput.value) uploadInput.value.click(); }
     async function onUpload(ev) {
@@ -322,163 +595,497 @@ const DocumentsView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
-    onMounted(load);
+    onMounted(() => { load(); loadWt(); loadLib(); });
     return {
-      docs, activeCat, hazardOpen, hazardSearch, hazardDialog, hazardEditing, hazardForm,
-      filePage, filePageSize, catFiles, pagedFiles, filteredHazards,
-      uploadInput, importInput, replaceInput, previewVisible, previewData,
-      triggerReplace, onReplace,
+      docs, docTab, activeCat, catCount,
+      wt, wtHazardOpen, wtHazards, loadWt, toggleWtHazards,
+      lib, libOpen, rules, ruleDlg, ruleImportInput, rulePreview,
+      loadLib, loadRules, toggleLib, openRuleAdd, openRuleEdit, submitRule, removeRule,
+      measures, meaDlg, measureLabel, openMeaAdd, openMeaEdit, submitMea, removeMea, meaView, openMeaView,
+      hospitals, hosDlg, openHosAdd, openHosEdit, submitHos, removeHos,
+      emergency, saveEmergency,
+      impPreview, impInput, triggerImp, onImp, confirmImp,
+      triggerRuleImport, onRuleImport, confirmRuleImport,
+      hazLoading, hazSearch, hazPage, hazPageSize, hazFiltered, hazPaged, hazDlg, hazImportInput,
+      loadHazards, applyHazSearch, reloadHazards, openHazAdd, openHazEdit, submitHaz, removeHaz,
+      triggerHazImport, onHazImport,
+      filePage, filePageSize, catFiles, pagedFiles,
+      uploadInput, previewVisible, previewData,
       previewPage, previewSheet, previewHeader, previewRows, previewPaged, fmtCell,
-      load, openHazardAdd, openHazardEdit, submitHazard, removeHazard, triggerHazardImport, onHazardImport, HAZARD_CATEGORIES,
-      triggerUpload, onUpload, download, preview, printPreview,
+      load, triggerUpload, onUpload, download, preview, printPreview,
       removeFile, moveFile
     };
   },
   template: `
   <div>
-    <!-- 企业危险点库（可折叠） -->
-    <el-card style="margin-bottom:14px" shadow="never">
-      <div style="display:flex;align-items:center;cursor:pointer;user-select:none" @click="hazardOpen=!hazardOpen">
-        <el-icon :size="16" style="margin-right:6px"><component :is="hazardOpen ? 'ArrowDown' : 'ArrowRight'" /></el-icon>
-        <b>企业危险点库（{{ docs.hazardLibrary.length }} 条）</b>
-      </div>
-      <template v-if="hazardOpen">
-        <div style="color:#666;font-size:13px;line-height:1.8;margin:10px 0">企业危险点库即作业计划「风险因素 / 风险管控措施」的选取来源。初始为空，需自行录入或导入：可手动新增、编辑、删除、排序，也可通过 Excel 批量导入补充：首个工作表 A 列危险点、C 列控制措施，最多 1000 行、2MB；相同危险点和措施自动跳过。</div>
-        <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
-          <el-input v-model="hazardSearch" placeholder="搜索危险点或措施" style="width:220px" clearable>
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-          <el-button @click="load">刷新</el-button>
-          <el-button type="primary" @click="openHazardAdd">新增危险点</el-button>
-          <el-button @click="triggerHazardImport">导入 Excel</el-button>
-          <input ref="importInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="onHazardImport" />
-        </div>
-        <el-table :data="filteredHazards" border stripe max-height="480">
-          <el-table-column prop="sort" label="排序" width="70" />
-          <el-table-column prop="hazard" label="危险点" min-width="200" show-overflow-tooltip />
-          <el-table-column label="风险大类" width="118" align="center">
-            <template #default="{row}">
-              <el-tag v-if="row.category" size="small" effect="plain" style="white-space:nowrap">{{ row.category }}</el-tag>
-              <span v-else style="color:#bbb">—</span>
+    <div class="doc-card">
+      <div class="doc-title">文档中心</div>
+      <el-tabs v-model="docTab" class="doc-tabs">
+        <el-tab-pane label="文档资源" name="resources">
+          <div class="doc-hint">支持上传任意文件，单文件不超过 20MB。xlsx、xls、docx 可预览，PDF 可在浏览器中打开。</div>
+
+          <el-tabs v-model="activeCat" class="doc-cats">
+            <el-tab-pane v-for="c in docs.categories" :key="c" :label="c + ' (' + catCount(c) + ')'" :name="c" />
+          </el-tabs>
+
+          <div class="doc-upload">
+            <el-button v-if="canWrite('documents')" type="primary" @click="triggerUpload">上传文件到「{{ activeCat }}」</el-button>
+            <input ref="uploadInput" type="file" style="display:none" @change="onUpload" />
+          </div>
+
+          <el-table class="flat-table" :data="pagedFiles" empty-text="暂无数据" style="width:100%">
+            <el-table-column prop="name" label="文件名" min-width="240" show-overflow-tooltip />
+            <el-table-column prop="uploader" label="上传人" width="120" />
+            <el-table-column prop="uploadedAt" label="上传时间" width="160" />
+            <el-table-column label="移动到" width="140">
+              <template #default="{row}">
+                <el-select :model-value="row.category" size="small" style="width:118px" :disabled="!!row.fixed || !canWrite('documents')" @change="v=>moveFile(row,v)">
+                  <el-option v-for="c in docs.categories" :key="c" :label="c" :value="c" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="180">
+              <template #default="{row}">
+                <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
+                <el-button link type="primary" size="small" @click="preview(row)">预览</el-button>
+                <el-tooltip v-if="row.fixed" content="固定系统文件不可删除" placement="top">
+                  <el-button link type="info" size="small" disabled>删除</el-button>
+                </el-tooltip>
+                <el-button v-else-if="canWrite('documents')" link type="danger" size="small" @click="removeFile(row)">删除</el-button>
+              </template>
+            </el-table-column>
+            <template #empty>
+              <div class="doc-empty">
+                <svg class="doc-empty-icon" viewBox="0 0 64 56" width="56" height="49" fill="none" aria-hidden="true"><path d="M7 15a4 4 0 0 1 4-4h11.5l3.8 4.6H53a4 4 0 0 1 4 4V43a4 4 0 0 1-4 4H11a4 4 0 0 1-4-4V15Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M7 23.5h50" stroke="currentColor" stroke-width="1.6"/><circle cx="51.5" cy="11.5" r="7.5" fill="#fff" stroke="currentColor" stroke-width="1.6"/><circle cx="48" cy="11.5" r="1.1" fill="var(--text-3)"/><circle cx="51.5" cy="11.5" r="1.1" fill="var(--text-3)"/><circle cx="55" cy="11.5" r="1.1" fill="var(--text-3)"/></svg>
+                <div class="doc-empty-text">暂无数据</div>
+              </div>
             </template>
-          </el-table-column>
-          <el-table-column prop="measure" label="控制措施" min-width="360" show-overflow-tooltip />
-          <el-table-column label="操作" width="130" fixed="right">
-            <template #default="{row}">
-              <el-button link type="primary" size="small" @click="openHazardEdit(row)">编辑</el-button>
-              <el-button link type="danger" size="small" @click="removeHazard(row)">删除</el-button>
-            </template>
-          </el-table-column>
-          <template #empty>
-            <div style="padding:30px 0"><el-icon :size="44" color="#c0c4cc"><FolderOpened /></el-icon><div style="color:#999;margin-top:8px">暂无数据</div></div>
-          </template>
-        </el-table>
-      </template>
-    </el-card>
+          </el-table>
 
-    <div style="color:#999;font-size:12px;margin-top:14px">支持上传任意文件，单文件不超过 20MB。xlsx、xls、docx 可预览，PDF 可在浏览器中打开。</div>
+          <div v-if="catFiles.length" class="doc-pager">
+            <span style="color:var(--text-2);font-size:13px">共 {{ catFiles.length }} 条</span>
+            <el-pagination background layout="prev, pager, next" :total="catFiles.length" :page-size="filePageSize" :current-page="filePage" @current-change="p=>filePage=p" />
+            <el-select :model-value="filePageSize" size="small" style="width:104px" @change="n=>{filePageSize=n;filePage=1}">
+              <el-option v-for="n in [10,20,50]" :key="n" :label="n + ' 条/页'" :value="n" />
+            </el-select>
+          </div>
 
-    <!-- 固定系统文件 -->
-    <el-card style="margin:14px 0;--el-card-bg-color:#f4f8fe" shadow="never">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
-        <div>
-          <div style="font-weight:600">固定系统文件：{{ docs.surveyTemplate.name || '现场勘察记录模板.docx' }}</div>
-          <div style="color:#888;font-size:12px;margin-top:6px">已上传：{{ docs.surveyTemplate.uploader }} · {{ docs.surveyTemplate.uploadedAt }}</div>
-          <div style="color:#e6a23c;font-size:12px;margin-top:6px">生成现场勘察记录时使用此模板；固定文件不可移动或删除，只能替换。</div>
-        </div>
-        <div style="flex-shrink:0">
-          <el-button type="primary" @click="triggerReplace">替换现场勘察记录模板</el-button>
-        </div>
-      </div>
-      <input ref="replaceInput" type="file" accept=".docx" style="display:none" @change="onReplace" />
-    </el-card>
+        </el-tab-pane>
 
-    <!-- 分类文件 -->
-    <el-tabs v-model="activeCat">
-      <el-tab-pane v-for="c in docs.categories" :key="c" :label="c + '（' + docs.files.filter(f=>f.category===c).length + '）'" :name="c" />
-    </el-tabs>
-    <div style="margin-bottom:12px">
-      <el-button type="primary" @click="triggerUpload">上传文件到「{{ activeCat }}」</el-button>
-      <input ref="uploadInput" type="file" style="display:none" @change="onUpload" />
+        <el-tab-pane label="工作票自动化配置" name="automation">
+          <div class="wt-card" v-loading="wt.loading">
+            <div class="wt-head">
+              <span class="wt-title">配置状态</span>
+              <span class="wt-state" :class="wt.ready ? 'ok' : 'pending'">{{ wt.ready ? '可用于工作票自动化' : '配置未完成' }}</span>
+            </div>
+            <div class="wt-grid">
+              <div v-for="it in wt.items" :key="it.key" class="wt-item">
+                <span class="wt-chip" :class="it.ready ? 'ok' : 'no'">{{ it.ready ? '已就绪' : '未配置' }}</span>
+                <div class="wt-item-main">
+                  <div class="wt-item-title">{{ it.title }}</div>
+                  <div class="wt-item-sub">{{ it.desc }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 资料库 -->
+          <div class="lib-card">
+            <div class="lib-head">
+              <span class="lib-title">资料库</span>
+            </div>
+
+            <div class="lib-list">
+              <div v-for="g in lib.groups" :key="g.key" class="lib-group">
+                <div class="lib-group-head" @click="toggleLib(g.key)">
+                  <span class="lib-group-title">{{ g.title }}<span v-if="g.showCount !== false" class="lib-count">（{{ g.count }}）</span></span>
+                  <span class="lib-arrow" :class="{ open: libOpen[g.key] }"></span>
+                </div>
+
+                <div v-if="libOpen[g.key]" class="lib-group-body">
+                  <!-- 作业内容匹配规则 -->
+                  <template v-if="g.key === 'rules'">
+                    <div class="lib-sub">
+                      <div class="lib-sub-head">
+                        <span class="lib-sub-title">作业内容匹配规则（{{ rules.length }}）</span>
+                        <div class="lib-sub-actions">
+                          <el-button v-if="canWrite('documents')" @click="triggerRuleImport">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" style="margin-right:5px;vertical-align:-2px" aria-hidden="true">
+                              <path d="M12 3v11m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                              <path d="M4 17v2.5h16V17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                            </svg>导入预览
+                          </el-button>
+                          <el-button v-if="canWrite('documents')" @click="openRuleAdd">＋ 新增</el-button>
+                          <input ref="ruleImportInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="onRuleImport" />
+                        </div>
+                      </div>
+
+                      <el-table class="flat-table" :data="rules" empty-text="暂无数据" style="width:100%">
+                        <el-table-column prop="workType" label="作业类型" min-width="130" show-overflow-tooltip />
+                        <el-table-column label="规则" min-width="170">
+                          <template #default="{row}">
+                            <span v-if="row.category" class="lib-cat">{{ row.category }}</span>
+                            <span>{{ row.keywordsRaw || (row.keywords || []).join('、') || '—' }}</span>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="施工技术措施" min-width="160" show-overflow-tooltip>
+                          <template #default="{row}">{{ row.techName || '—' }}</template>
+                        </el-table-column>
+                        <el-table-column label="安全措施" min-width="160" show-overflow-tooltip>
+                          <template #default="{row}">{{ row.safetyName || '—' }}</template>
+                        </el-table-column>
+                        <el-table-column label="操作" width="110">
+                          <template #default="{row}">
+                            <el-button v-if="canWrite('documents')" link type="primary" size="small" @click="openRuleEdit(row)">编辑</el-button>
+                            <el-button v-if="canWrite('documents')" link type="danger" size="small" @click="removeRule(row)">删除</el-button>
+                          </template>
+                        </el-table-column>
+                        <template #empty>
+                          <div class="doc-empty">
+                            <svg class="doc-empty-icon" viewBox="0 0 64 56" width="52" height="45" fill="none" aria-hidden="true">
+                              <path d="M7 15a4 4 0 0 1 4-4h11.5l3.8 4.6H53a4 4 0 0 1 4 4V43a4 4 0 0 1-4 4H11a4 4 0 0 1-4-4V15Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                              <path d="M7 23.5h50" stroke="currentColor" stroke-width="1.6"/>
+                            </svg>
+                            <div class="doc-empty-text">暂无数据</div>
+                          </div>
+                        </template>
+                      </el-table>
+                    </div>
+                  </template>
+
+                  <!-- 施工技术措施原文 / 施工安全措施原文 -->
+                  <template v-else-if="g.key === 'tech' || g.key === 'safety'">
+                    <div class="lib-sub">
+                      <div class="lib-sub-head">
+                        <span class="lib-sub-title">{{ measureLabel(g.key) }}（{{ (measures[g.key] || []).length }}）</span>
+                        <div class="lib-sub-actions">
+                          <el-button v-if="canWrite('documents')" @click="triggerImp(g.key)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" style="margin-right:5px;vertical-align:-2px" aria-hidden="true">
+                              <path d="M12 3v11m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                              <path d="M4 17v2.5h16V17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                            </svg>导入预览
+                          </el-button>
+                          <el-button v-if="canWrite('documents')" @click="openMeaAdd(g.key)">＋ 新增</el-button>
+                        </div>
+                      </div>
+
+                      <el-table class="flat-table" :data="measures[g.key] || []" empty-text="暂无数据" style="width:100%">
+                        <el-table-column prop="sort" label="序号" width="90" />
+                        <el-table-column prop="title" label="条文" min-width="200" show-overflow-tooltip />
+                        <el-table-column label="措施原文预览" min-width="340">
+                          <template #default="{row}">
+                            <div class="mea-preview" :class="{ empty: !row.content }">{{ row.content || '—' }}</div>
+                            <a v-if="row.content" class="mea-more" @click="openMeaView(g.key, row)">查看原文</a>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="操作" width="110">
+                          <template #default="{row}">
+                            <el-button v-if="canWrite('documents')" link type="primary" size="small" @click="openMeaEdit(g.key, row)">编辑</el-button>
+                            <el-button v-if="canWrite('documents')" link type="danger" size="small" @click="removeMea(g.key, row)">删除</el-button>
+                          </template>
+                        </el-table-column>
+                        <template #empty>
+                          <div class="doc-empty">
+                            <svg class="doc-empty-icon" viewBox="0 0 64 56" width="52" height="45" fill="none" aria-hidden="true">
+                              <path d="M7 15a4 4 0 0 1 4-4h11.5l3.8 4.6H53a4 4 0 0 1 4 4V43a4 4 0 0 1-4 4H11a4 4 0 0 1-4-4V15Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                              <path d="M7 23.5h50" stroke="currentColor" stroke-width="1.6"/>
+                            </svg>
+                            <div class="doc-empty-text">暂无数据</div>
+                          </div>
+                        </template>
+                      </el-table>
+                    </div>
+                  </template>
+
+                  <!-- 医院联系方式 -->
+                  <template v-else-if="g.key === 'hospitals'">
+                    <div class="lib-sub">
+                      <div class="lib-sub-head">
+                        <span class="lib-sub-title">医院联系方式（{{ hospitals.length }}）</span>
+                        <div class="lib-sub-actions">
+                          <el-button v-if="canWrite('documents')" @click="triggerImp(g.key)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" style="margin-right:5px;vertical-align:-2px" aria-hidden="true">
+                              <path d="M12 3v11m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                              <path d="M4 17v2.5h16V17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                            </svg>导入预览
+                          </el-button>
+                          <el-button v-if="canWrite('documents')" @click="openHosAdd">＋ 新增</el-button>
+                        </div>
+                      </div>
+
+                      <el-table class="flat-table" :data="hospitals" empty-text="暂无数据" style="width:100%">
+                        <el-table-column prop="area" label="作业地址匹配词" min-width="160" show-overflow-tooltip />
+                        <el-table-column prop="name" label="医院" min-width="150" show-overflow-tooltip />
+                        <el-table-column prop="address" label="地址" min-width="240" show-overflow-tooltip />
+                        <el-table-column prop="phone" label="电话" min-width="130" />
+                        <el-table-column label="操作" width="110">
+                          <template #default="{row}">
+                            <el-button v-if="canWrite('documents')" link type="primary" size="small" @click="openHosEdit(row)">编辑</el-button>
+                            <el-button v-if="canWrite('documents')" link type="danger" size="small" @click="removeHos(row)">删除</el-button>
+                          </template>
+                        </el-table-column>
+                        <template #empty>
+                          <div class="doc-empty">
+                            <svg class="doc-empty-icon" viewBox="0 0 64 56" width="52" height="45" fill="none" aria-hidden="true">
+                              <path d="M7 15a4 4 0 0 1 4-4h11.5l3.8 4.6H53a4 4 0 0 1 4 4V43a4 4 0 0 1-4 4H11a4 4 0 0 1-4-4V15Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                              <path d="M7 23.5h50" stroke="currentColor" stroke-width="1.6"/>
+                            </svg>
+                            <div class="doc-empty-text">暂无数据</div>
+                          </div>
+                        </template>
+                      </el-table>
+                    </div>
+                  </template>
+
+                  <!-- 默认应急医院 -->
+                  <template v-else-if="g.key === 'emergency'">
+                    <div class="lib-emergency">
+                      <el-input v-model="emergency.name" class="em-input" maxlength="100" placeholder="医院名称" :disabled="!canWrite('documents')"
+                        @blur="saveEmergency" @keyup.enter="saveEmergency" />
+                      <el-input v-model="emergency.phone" class="em-input" maxlength="50" placeholder="联系电话" :disabled="!canWrite('documents')"
+                        @blur="saveEmergency" @keyup.enter="saveEmergency" />
+                    </div>
+                  </template>
+
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="wt-collapse">
+            <div class="wt-collapse-head" @click="toggleWtHazards()">
+              <span class="wt-arrow" :class="{ open: wtHazardOpen }"></span>
+              <span>企业危险点库（{{ wt.hazardCount }} 条）</span>
+            </div>
+            <div v-if="wtHazardOpen" class="wt-collapse-body">
+              <div class="hz-hint">可直接新增、编辑、删除和排序。Excel 仅用于追加导入：首个工作表 A 列危险点、C 列控制措施，最多 1000 行、2MB；相同危险点和措施自动跳过。</div>
+
+              <div class="hz-toolbar">
+                <div class="hz-search">
+                  <el-input v-model="hazSearch" placeholder="搜索危险点或措施" clearable
+                    @keyup.enter="applyHazSearch" @clear="applyHazSearch" />
+                  <el-button class="hz-icon-btn" title="搜索" @click="applyHazSearch">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+                      <circle cx="11" cy="11" r="6.2" stroke="currentColor" stroke-width="1.8"/>
+                      <path d="M15.6 15.6 20 20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    </svg>
+                  </el-button>
+                </div>
+                <el-button @click="reloadHazards">重新读取</el-button>
+                <el-button v-if="canWrite('documents')" type="primary" @click="openHazAdd">新增危险点</el-button>
+                <el-button v-if="canWrite('documents')" @click="triggerHazImport">导入 Excel</el-button>
+                <input ref="hazImportInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="onHazImport" />
+              </div>
+
+              <el-table class="flat-table" :data="hazPaged" v-loading="hazLoading" empty-text="暂无数据" style="width:100%">
+                <el-table-column prop="sort" label="排序" width="80" />
+                <el-table-column prop="hazard" label="危险点" min-width="200" show-overflow-tooltip />
+                <el-table-column prop="measure" label="控制措施" min-width="300" show-overflow-tooltip />
+                <el-table-column label="操作" width="130">
+                  <template #default="{row}">
+                    <el-button v-if="canWrite('documents')" link type="primary" size="small" @click="openHazEdit(row)">编辑</el-button>
+                    <el-button v-if="canWrite('documents')" link type="danger" size="small" @click="removeHaz(row)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div class="hz-pager">
+                <span class="hz-total">共 {{ hazFiltered.length }} 条</span>
+                <el-pagination background layout="prev, pager, next" :total="hazFiltered.length"
+                  :page-size="hazPageSize" :current-page="hazPage" @current-change="p=>hazPage=p" />
+                <el-select :model-value="hazPageSize" size="small" style="width:104px" @change="n=>{hazPageSize=n;hazPage=1}">
+                  <el-option v-for="n in [10,20,50]" :key="n" :label="n + ' 条/页'" :value="n" />
+                </el-select>
+              </div>
+            </div>
+          </div>
+
+          <div class="wv-alert wt-alert">
+            <span class="wv-alert-icon">i</span>
+            <div class="wv-alert-main">
+              <div class="wv-alert-text">工作票自动化配置独立于企业初始化。配置完成后，超级用户或资料员可使用自动化，材料员与班组长仅可查看。</div>
+            </div>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
     </div>
-    <el-table :data="pagedFiles" border stripe>
-      <el-table-column prop="name" label="文件名" min-width="240" show-overflow-tooltip />
-      <el-table-column prop="uploader" label="上传人" width="110" />
-      <el-table-column prop="uploadedAt" label="上传时间" width="150" />
-      <el-table-column label="移动到" width="130">
-        <template #default="{row}">
-          <el-select :model-value="row.category" size="small" style="width:112px" :disabled="!!row.fixed" @change="v=>moveFile(row,v)">
-            <el-option v-for="c in docs.categories" :key="c" :label="c" :value="c" />
-          </el-select>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="170" fixed="right">
-        <template #default="{row}">
-          <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
-          <el-button link type="primary" size="small" @click="preview(row)">预览</el-button>
-          <el-tooltip v-if="row.fixed" content="固定系统文件不可删除" placement="top">
-            <el-button link type="info" size="small" disabled>删除</el-button>
-          </el-tooltip>
-          <el-button v-else link type="danger" size="small" @click="removeFile(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-    <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:12px">
-      <span style="color:#666;font-size:13px">共 {{ catFiles.length }} 条</span>
-      <el-pagination background layout="prev, pager, next" :total="catFiles.length" :page-size="filePageSize" :current-page="filePage" @current-change="p=>filePage=p" />
-      <el-select :model-value="filePageSize" size="small" style="width:104px" @change="n=>{filePageSize=n;filePage=1}">
-        <el-option v-for="n in [10,20,50]" :key="n" :label="n + ' 条/页'" :value="n" />
-      </el-select>
-    </div>
 
-    <!-- 新增/编辑危险点 -->
-    <el-dialog :title="hazardEditing ? '编辑危险点' : '新增危险点'" v-model="hazardDialog" width="640px">
-      <el-form :model="hazardForm" label-position="top">
-        <el-form-item label="危险点" required>
-          <el-input v-model="hazardForm.hazard" type="textarea" :rows="3" maxlength="1000" show-word-limit />
+    <!-- 新增/编辑配置行（作业内容匹配规则） -->
+    <el-dialog :title="ruleDlg.editing ? '编辑配置行' : '新增配置行'" v-model="ruleDlg.visible" width="620px" label-position="top">
+      <el-form :model="ruleDlg" label-position="top">
+        <el-form-item label="作业类型名称" required>
+          <el-input v-model="ruleDlg.workType" maxlength="120" />
         </el-form-item>
-        <el-form-item label="风险大类">
-          <el-select v-model="hazardForm.category" placeholder="选择所属风险大类（影响计划里按类带出措施）" clearable style="width:100%">
-            <el-option v-for="c in HAZARD_CATEGORIES" :key="c" :label="c" :value="c" />
-            <el-option label="（未归类）" value="" />
+        <el-form-item label="匹配类别">
+          <el-select v-model="ruleDlg.category" clearable filterable style="width:100%"
+            placeholder="选择固定活动类别；留空可设置自定义匹配词">
+            <el-option v-for="c in lib.categories" :key="c" :label="c" :value="c" />
           </el-select>
         </el-form-item>
-        <el-form-item label="控制措施" required>
-          <el-input v-model="hazardForm.measure" type="textarea" :rows="5" maxlength="4000" show-word-limit />
+        <el-form-item label="自定义匹配词（逗号或换行分隔）" required>
+          <el-input v-model="ruleDlg.keywords" type="textarea" :rows="4" maxlength="2000" />
         </el-form-item>
-        <el-form-item label="排序（小的在前；新增留空则排在末尾）">
-          <el-input-number v-model="hazardForm.sort" :min="0" style="width:180px" />
+        <el-form-item label="关联施工技术措施">
+          <el-select v-model="ruleDlg.techId" clearable filterable style="width:100%" placeholder="选填"
+            @change="id => { const o = lib.techOptions.find(x => x.id === id); ruleDlg.techName = o ? o.name : ''; }">
+            <el-option v-for="o in lib.techOptions" :key="o.id" :label="o.name" :value="o.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="关联施工安全措施">
+          <el-select v-model="ruleDlg.safetyId" clearable filterable style="width:100%" placeholder="选填"
+            @change="id => { const o = lib.safetyOptions.find(x => x.id === id); ruleDlg.safetyName = o ? o.name : ''; }">
+            <el-option v-for="o in lib.safetyOptions" :key="o.id" :label="o.name" :value="o.id" />
+          </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="hazardDialog=false">取消</el-button>
-        <el-button type="primary" @click="submitHazard">确定</el-button>
+        <el-button @click="ruleDlg.visible=false">取消</el-button>
+        <el-button type="primary" :loading="ruleDlg.busy" @click="submitRule">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 导入预览 -->
+    <el-dialog title="导入预览" v-model="rulePreview.visible" width="900px" top="6vh">
+      <div class="lib-preview-tip">共解析到 <b>{{ rulePreview.rows.length }}</b> 条（A 列作业类型、B 列自定义匹配词、C 列施工技术措施、D 列安全措施）。确认后追加导入，不会覆盖已有数据。</div>
+      <div v-if="rulePreview.errors.length" class="lib-preview-err">
+        <div v-for="(e, i) in rulePreview.errors.slice(0, 8)" :key="i">{{ e }}</div>
+        <div v-if="rulePreview.errors.length > 8">……共 {{ rulePreview.errors.length }} 处问题</div>
+      </div>
+      <el-table :data="rulePreview.rows" border size="small" max-height="420" empty-text="没有可导入的数据">
+        <el-table-column prop="workType" label="作业类型" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="keywordsRaw" label="自定义匹配词" min-width="220" show-overflow-tooltip />
+        <el-table-column label="施工技术措施" min-width="180" show-overflow-tooltip><template #default="{row}">{{ row.techName || '—' }}</template></el-table-column>
+        <el-table-column label="安全措施" min-width="180" show-overflow-tooltip><template #default="{row}">{{ row.safetyName || '—' }}</template></el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="rulePreview.visible=false">取消</el-button>
+        <el-button type="primary" :loading="rulePreview.busy" :disabled="!rulePreview.rows.length" @click="confirmRuleImport">确认导入</el-button>
+      </template>
+    </el-dialog>
+
+    <input ref="impInput" type="file" accept=".xlsx,.xls,.csv" data-imp="1" style="display:none" @change="onImp" />
+
+    <!-- 新增/编辑配置行（施工技术 / 安全措施原文） -->
+    <el-dialog :title="meaDlg.editing ? '编辑配置行' : '新增配置行'" v-model="meaDlg.visible" width="620px" label-position="top" class="cfg-row-dlg">
+      <el-form :model="meaDlg" label-position="top">
+        <el-form-item label="序号">
+          <el-input v-model="meaDlg.sort" maxlength="9" />
+        </el-form-item>
+        <el-form-item label="条文标题 / 关键字" required>
+          <el-input v-model="meaDlg.title" type="textarea" :rows="3" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="措施原文" required>
+          <el-input v-model="meaDlg.content" type="textarea" :rows="8" maxlength="20000" show-word-limit />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="meaDlg.visible=false">取消</el-button>
+        <el-button type="primary" :loading="meaDlg.busy" @click="submitMea">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 措施原文全文（二级页面） -->
+    <el-dialog :title="'措施原文 · ' + (meaView.title || '未命名条文')" v-model="meaView.visible" width="620px" top="8vh" class="mea-view-dlg">
+      <div class="mea-view-body">{{ meaView.content }}</div>
+    </el-dialog>
+
+    <!-- 新增/编辑配置行（医院联系方式） -->
+    <el-dialog :title="hosDlg.editing ? '编辑配置行' : '新增配置行'" v-model="hosDlg.visible" width="620px" label-position="top" class="cfg-row-dlg">
+      <el-form :model="hosDlg" label-position="top">
+        <el-form-item label="作业地址匹配词" required>
+          <el-input v-model="hosDlg.area" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="医院名称" required>
+          <el-input v-model="hosDlg.name" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="医院地址" required>
+          <el-input v-model="hosDlg.address" type="textarea" :rows="2" maxlength="300" />
+        </el-form-item>
+        <el-form-item label="联系电话" required>
+          <el-input v-model="hosDlg.phone" maxlength="50" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="hosDlg.visible=false">取消</el-button>
+        <el-button type="primary" :loading="hosDlg.busy" @click="submitHos">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 导入预览（措施原文 / 医院联系方式） -->
+    <el-dialog title="导入预览" v-model="impPreview.visible" width="900px" top="6vh">
+      <div class="lib-preview-tip">
+        共解析到 <b>{{ impPreview.rows.length }}</b> 条（
+        <template v-if="impPreview.kind === 'hospitals'">A 列作业地址匹配词、B 列医院、C 列地址、D 列电话</template>
+        <template v-else>A 列序号（可空）、B 列条文标题 / 关键字、C 列措施原文</template>
+        ）。确认后追加导入，不会覆盖已有数据。
+      </div>
+      <div v-if="impPreview.errors.length" class="lib-preview-err">
+        <div v-for="(e, i) in impPreview.errors.slice(0, 8)" :key="i">{{ e }}</div>
+        <div v-if="impPreview.errors.length > 8">……共 {{ impPreview.errors.length }} 处问题</div>
+      </div>
+      <el-table :data="impPreview.rows" border size="small" max-height="420" empty-text="没有可导入的数据">
+        <template v-if="impPreview.kind === 'hospitals'">
+          <el-table-column prop="area" label="作业地址匹配词" min-width="150" show-overflow-tooltip />
+          <el-table-column prop="name" label="医院" min-width="140" show-overflow-tooltip />
+          <el-table-column prop="address" label="地址" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="phone" label="电话" min-width="120" />
+        </template>
+        <template v-else>
+          <el-table-column prop="sort" label="序号" width="80" />
+          <el-table-column prop="title" label="条文" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="content" label="措施原文" min-width="300" show-overflow-tooltip />
+        </template>
+      </el-table>
+      <template #footer>
+        <el-button @click="impPreview.visible=false">取消</el-button>
+        <el-button type="primary" :loading="impPreview.busy" :disabled="!impPreview.rows.length" @click="confirmImp">确认导入</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 新增/编辑危险点 -->
+    <el-dialog :title="hazDlg.editing ? '编辑危险点' : '新增危险点'" v-model="hazDlg.visible" width="640px" label-position="top">
+      <el-form :model="hazDlg" label-position="top">
+        <el-form-item label="危险点" required>
+          <el-input v-model="hazDlg.hazard" type="textarea" :rows="3" maxlength="1000" show-word-limit placeholder="如：双电源杆" />
+        </el-form-item>
+        <el-form-item label="控制措施" required>
+          <el-input v-model="hazDlg.measure" type="textarea" :rows="6" maxlength="4000" show-word-limit placeholder="如：工作前确认同杆的双电源均已停电。" />
+        </el-form-item>
+        <el-form-item label="排序（小的在前；留空则排在末尾）">
+          <el-input-number v-model="hazDlg.sort" :min="0" style="width:180px" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="hazDlg.visible=false">取消</el-button>
+        <el-button type="primary" :loading="hazDlg.busy" @click="submitHaz">确定</el-button>
       </template>
     </el-dialog>
 
     <!-- 预览 -->
     <el-dialog :title="'预览 - ' + previewData.name" v-model="previewVisible" width="1080px" top="5vh">
-      <div v-if="previewData.kind==='docx'" style="max-height:66vh;overflow:auto;font-family:SimSun,serif;font-size:14px;line-height:1.9;border:1px solid #ebeef5;padding:16px 24px;background:#fff">
+      <div v-if="previewData.kind==='docx'" style="max-height:66vh;overflow:auto;font-family:SimSun,serif;font-size:14px;line-height:1.9;border:1px solid var(--line);padding:16px 24px;background:var(--surface)">
         <p v-for="(l,i) in previewData.lines" :key="i" style="margin:2px 0;white-space:pre-wrap">{{ l }}</p>
       </div>
-      <div v-else-if="previewData.kind==='xlsx' && previewSheet" style="max-height:66vh;overflow:auto">
-        <el-table :data="previewPaged" border size="small" max-height="560">
-          <el-table-column v-for="(c,ci) in previewHeader.length" :key="ci" :label="String(previewHeader[ci] || ('列' + (ci+1)))"
-            :width="ci < 2 ? 170 : undefined" :min-width="ci < 2 ? undefined : 300">
-            <template #default="{row}">{{ fmtCell(row[ci]) }}</template>
-          </el-table-column>
-        </el-table>
-        <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:10px">
-          <span style="color:#666;font-size:13px">共 {{ previewRows.length }} 条</span>
+      <div v-else-if="previewData.kind==='xlsx' && previewSheet" style="display:flex;flex-direction:column;max-height:70vh">
+        <div style="flex:1 1 auto;min-height:0;overflow:auto">
+          <el-table :data="previewPaged" border size="small" max-height="520">
+            <el-table-column v-for="(c,ci) in previewHeader.length" :key="ci" :label="String(previewHeader[ci] || ('列' + (ci+1)))"
+              :width="ci < 2 ? 170 : undefined" :min-width="ci < 2 ? undefined : 300">
+              <template #default="{row}">{{ fmtCell(row[ci]) }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <div style="flex:0 0 auto;display:flex;justify-content:flex-end;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 2px 2px">
+          <span style="color:var(--text-2);font-size:13px">共 {{ previewRows.length }} 条</span>
           <el-pagination background layout="prev, pager, next" :total="previewRows.length" :page-size="100" :current-page="previewPage" @current-change="p=>previewPage=p" />
-          <span style="color:#666;font-size:13px">100 条/页</span>
+          <span style="color:var(--text-2);font-size:13px">100 条/页</span>
         </div>
       </div>
       <div v-else-if="previewData.kind==='pdf'" style="text-align:center;padding:40px 0">
-        <p style="color:#666;margin-bottom:14px">PDF 文件可在浏览器中直接打开</p>
+        <p style="color:var(--text-2);margin-bottom:14px">PDF 文件可在浏览器中直接打开</p>
         <el-button type="primary" @click="window.open(previewData.url,'_blank')">在浏览器中打开</el-button>
       </div>
-      <div v-else style="text-align:center;padding:40px 0;color:#999">{{ previewData.message || '该文件类型暂不支持预览' }}</div>
+      <div v-else style="text-align:center;padding:40px 0;color:var(--text-3)">{{ previewData.message || '该文件类型暂不支持预览' }}</div>
       <template #footer>
         <el-button @click="previewVisible=false">关闭</el-button>
         <el-button type="primary" @click="printPreview">打印</el-button>
@@ -610,6 +1217,9 @@ const MaterialsView = {
     const notCount = computed(() => filtered.value.filter(m => m.status === '未到库').length);
 
     function chipStyle(color) { return 'display:inline-block;padding:2px 10px;border-radius:3px;font-size:12px;line-height:20px;background:' + color + '1f;color:' + color + ';'; }
+    // 入库核对：累计入库（= 已到）与应到比对；剩余可入库 = 应到 - 累计入库（不为负）
+    function inOver(row) { return (Number(row.qtyArrived) || 0) > (Number(row.qtyRequired) || 0); }
+    function inRemain(row) { return Math.max(0, Math.round(((Number(row.qtyRequired) || 0) - (Number(row.qtyArrived) || 0)) * 10000) / 10000); }
 
     // 列筛选（对齐原系统表头漏斗筛选）
     const colFilters = reactive({ project: [], description: '', unit: [], code: '', orderNo: '', source: [], status: [] });
@@ -665,9 +1275,27 @@ const MaterialsView = {
     }
     async function remove(row) {
       try {
-        await ElementPlus.ElMessageBox.confirm('确认删除该物料？', '提示', { type: 'warning' });
-        await api.del('/api/materials/' + row.id); ElementPlus.ElMessage.success('已删除'); load();
-      } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
+        await ElementPlus.ElMessageBox.confirm('确认删除物料「' + (row.description || '') + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' });
+      } catch { return; }
+      try {
+        await api.del('/api/materials/' + row.id);
+        ElementPlus.ElMessage.success('已删除'); load();
+        window.dispatchEvent(new CustomEvent('materials-changed'));
+      } catch (e) {
+        // 依赖引用校验未通过：列出该物料被哪些业务数据引用
+        const refs = e && e.data && e.data.refs;
+        if (Array.isArray(refs) && refs.length) {
+          const html = '<div style="line-height:1.8">该物料已被以下业务数据引用，请先到对应模块清理后再删除：</div>'
+            + '<div style="margin-top:10px;line-height:2">'
+            + refs.map(r => '· ' + r.label + '：<b>' + r.count + '</b> 条').join('<br>')
+            + '</div>';
+          ElementPlus.ElMessageBox.alert(html, '该物料已被其他数据引用，无法删除', {
+            dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning'
+          });
+        } else {
+          ElementPlus.ElMessage.error(e.message || '删除失败');
+        }
+      }
     }
     const staging = ref([]); // 暂存清单（存物料 id）
     const stagingQty = reactive({}); // 暂存清单每行领料数量（可任意填，默认=可继续领料，上限=可继续领料）
@@ -812,7 +1440,7 @@ const MaterialsView = {
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
       projectOptions, workTypeOptions, subProjectNames, filtered, statCount, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
-      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, fmtQty, fmt2, outMap, goOutbound };
+      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
   <div>
@@ -829,10 +1457,10 @@ const MaterialsView = {
         <span class="spacer"></span>
         <el-button type="primary" @click="load">刷新台账</el-button>
         <el-button @click="downloadTemplate">下载导入模板</el-button>
-        <el-button @click="importMaterials">导入材料表</el-button>
-        <el-button @click="openAdd">新增材料</el-button>
-        <el-button :disabled="!selection.length" @click="addStaging">加入暂存（{{ selection.length }}）</el-button>
-        <el-button @click="showStaging">暂存清单（{{ staging.length }}）</el-button>
+        <el-button v-if="canWrite('materials')" @click="importMaterials">导入材料表</el-button>
+        <el-button v-if="canWrite('materials')" @click="openAdd">新增材料</el-button>
+        <el-button v-if="canWrite('materials')" :disabled="!selection.length" @click="addStaging">加入暂存（{{ selection.length }}）</el-button>
+        <el-button v-if="canWrite('materials')" @click="showStaging">暂存清单（{{ staging.length }}）</el-button>
       </div>
 
       <div class="toolbar">
@@ -855,28 +1483,28 @@ const MaterialsView = {
         <el-button type="primary" @click="load">搜索</el-button>
       </div>
 
-      <div style="display:flex;gap:14px;margin-bottom:14px;flex-wrap:wrap">
-        <div style="background:#fff;border:1px solid #e7e9ec;border-radius:4px;padding:14px 20px;min-width:180px">
-          <div style="color:#86909c;font-size:12px">材料（全部筛选结果）</div>
-          <div style="font-size:24px;font-weight:700;color:#3370ff;margin-top:6px">{{ statCount }}</div>
+      <div class="mat-stats">
+        <div class="mat-stat">
+          <div class="mat-stat-lb">材料（全部筛选结果）</div>
+          <div class="mat-stat-v">{{ statCount }}</div>
         </div>
-        <div style="background:#fff;border:1px solid #e7e9ec;border-radius:4px;padding:14px 20px;min-width:280px">
-          <div style="color:#86909c;font-size:12px">全部需求总数量/已到/未到</div>
-          <div style="font-size:18px;font-weight:700;color:#3370ff;margin-top:8px">{{ fmt2(sumRequired) }} / {{ fmt2(sumArrived) }} / {{ fmt2(sumNot) }}</div>
+        <div class="mat-stat">
+          <div class="mat-stat-lb">全部需求总数量 / 已到 / 未到</div>
+          <div class="mat-stat-v sm">{{ fmt2(sumRequired) }} / {{ fmt2(sumArrived) }} / {{ fmt2(sumNot) }}</div>
         </div>
-        <div style="background:#fff;border:1px solid #e7e9ec;border-radius:4px;padding:14px 20px;min-width:150px">
-          <div style="color:#86909c;font-size:12px">全部 / 部分</div>
-          <div style="font-size:18px;font-weight:700;margin-top:8px"><span style="color:#389e0d">{{ fullCount }}</span>&nbsp;&nbsp;<span style="color:#e6932c">{{ partCount }}</span></div>
+        <div class="mat-stat">
+          <div class="mat-stat-lb">全部 / 部分到库</div>
+          <div class="mat-stat-v sm"><span class="st-ok">{{ fullCount }}</span><span class="st-warn">{{ partCount }}</span></div>
         </div>
-        <div style="background:#fff;border:1px solid #e7e9ec;border-radius:4px;padding:14px 20px;min-width:170px">
-          <div style="color:#86909c;font-size:12px">未到 / 异常 / 无效</div>
-          <div style="font-size:18px;font-weight:700;margin-top:8px"><span style="color:#f56c6c">{{ notCount }}</span>&nbsp;&nbsp;<span style="color:#999">0</span>&nbsp;&nbsp;<span style="color:#999">0</span></div>
+        <div class="mat-stat">
+          <div class="mat-stat-lb">未到 / 异常 / 无效</div>
+          <div class="mat-stat-v sm"><span class="st-danger">{{ notCount }}</span><span class="st-muted">0</span><span class="st-muted">0</span></div>
         </div>
       </div>
 
-      <el-table ref="mainTable" :data="filtered" v-loading="loading" border stripe style="width:100%" @selection-change="onSel">
+      <el-table ref="mainTable" :data="filtered" v-loading="loading" class="mat-table" style="width:100%" @selection-change="onSel">
         <el-table-column type="selection" width="46" :selectable="canSelect" />
-        <el-table-column prop="project" min-width="220" show-overflow-tooltip>
+        <el-table-column prop="project" min-width="176">
           <template #header><div class="th-inner"><span>项目名称</span>
             <el-popover placement="bottom-end" trigger="click" :width="200">
               <template #reference><funnel-icon :on="fActive('project')" /></template>
@@ -886,9 +1514,9 @@ const MaterialsView = {
               <div style="text-align:right;margin-top:8px"><el-button size="small" @click="resetArr('project')">重置</el-button></div>
             </el-popover>
           </template>
-          <template #default="{row}">{{ row.project }}</template>
+          <template #default="{row}"><span class="mat-project" :title="row.project">{{ row.project }}</span></template>
         </el-table-column>
-        <el-table-column prop="description" min-width="200">
+        <el-table-column prop="description" min-width="270">
           <template #header><div class="th-inner"><span>物料描述</span>
             <el-popover placement="bottom-end" trigger="click" :width="220">
               <template #reference><funnel-icon :on="fActive('description')" /></template>
@@ -900,26 +1528,38 @@ const MaterialsView = {
             </el-popover>
           </template>
           <template #default="{row}">
-            <div>{{ row.description }}</div>
-            <div v-if="outMap[row.id]" style="margin-top:4px;display:flex;align-items:center;gap:8px">
+            <div class="mat-desc" :title="row.description">{{ row.description }}</div>
+            <div v-if="outMap[row.id]" class="mat-desc-extra">
               <span :style="chipStyle('#3370ff')">有出库记录</span>
               <el-link type="primary" :underline="false" style="font-size:12px" @click="goOutbound(row)">查看出库单</el-link>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="数量" min-width="215" align="left">
+        <el-table-column label="数量" width="224" align="left">
           <template #header><span>数量</span></template>
           <template #default="{row}">
-            <div style="white-space:nowrap">应到 {{ fmtQty(row.qtyRequired) }} / 已到 {{ fmtQty(row.qtyArrived) }} / 未到 {{ fmtQty(row.qtyNotArrived) }}</div>
-            <div style="color:#3370ff;font-size:12px;line-height:18px;white-space:nowrap">已生成领料单 {{ fmtQty(row.qtyGenerated || 0) }} / 可继续领料 {{ fmtQty(row.qtyCanGen || 0) }}</div>
-            <div style="margin-top:3px;display:flex;align-items:center;gap:8px;white-space:nowrap">
-              <span v-if="(Number(row.qtyNotArrived) || 0) > 0" :style="chipStyle('#389e0d')">累计未入库</span>
-              <span v-if="(Number(row.qtyArrived) || 0) > 0" style="color:#909399;font-size:12px">累计入库 {{ fmtQty(row.qtyArrived) }} {{ row.unit || '' }}</span>
+            <div class="mat-qty-main mat-num">
+              <span class="mat-qty-cell"><span class="mat-qty-lb">应到</span><b>{{ fmtQty(row.qtyRequired) }}</b></span>
+              <span class="mat-qty-sep">/</span>
+              <span class="mat-qty-cell"><span class="mat-qty-lb">已到</span><b :class="{ 'is-in': (Number(row.qtyArrived) || 0) > 0 }">{{ fmtQty(row.qtyArrived) }}</b></span>
+              <span class="mat-qty-sep">/</span>
+              <span class="mat-qty-cell"><span class="mat-qty-lb">未到</span><b>{{ fmtQty(row.qtyNotArrived) }}</b></span>
+            </div>
+            <div class="mat-qty-sub mat-num">已生成领料单 {{ fmtQty(row.qtyGenerated || 0) }} / 可继续领料 {{ fmtQty(row.qtyCanGen || 0) }}</div>
+            <div v-if="(Number(row.qtyArrived) || 0) > 0" class="mat-qty-foot mat-num">累计入库 {{ fmtQty(row.qtyArrived) }} {{ row.unit || '' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="入库核对" width="132">
+          <template #header><span>入库核对</span></template>
+          <template #default="{row}">
+            <span class="in-chip" :class="{ 'is-over': inOver(row) }">{{ inOver(row) ? '累计已超额' : '累计未超额' }}</span>
+            <div class="mat-in-remain mat-num" :title="'应到 ' + fmtQty(row.qtyRequired) + ' / 累计入库 ' + fmtQty(row.qtyArrived) + (inOver(row) ? '（超出 ' + fmtQty((Number(row.qtyArrived) || 0) - (Number(row.qtyRequired) || 0)) + (row.unit ? ' ' + row.unit : '') + '）' : '')">
+              剩余可入库 {{ fmtQty(inRemain(row)) }} {{ row.unit || '' }}
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="unit" width="80">
-          <template #header><div class="th-inner"><span>单位</span>
+        <el-table-column prop="unit" width="66" align="center">
+          <template #header><div class="th-inner th-center"><span>单位</span>
             <el-popover placement="bottom-end" trigger="click" :width="140">
               <template #reference><funnel-icon :on="fActive('unit')" /></template>
               <el-checkbox-group v-model="colFilters.unit">
@@ -927,10 +1567,10 @@ const MaterialsView = {
               </el-checkbox-group>
               <div style="text-align:right;margin-top:6px"><el-button size="small" @click="resetArr('unit')">重置</el-button></div>
             </el-popover>
-          </template>
-          <template #default="{row}">{{ row.unit }}</template>
+          </div></template>
+          <template #default="{row}"><span class="mat-sub">{{ row.unit || '—' }}</span></template>
         </el-table-column>
-        <el-table-column prop="code" width="130">
+        <el-table-column prop="code" width="116">
           <template #header><div class="th-inner"><span>物料编码</span>
             <el-popover placement="bottom-end" trigger="click" :width="210">
               <template #reference><funnel-icon :on="fActive('code')" /></template>
@@ -940,11 +1580,11 @@ const MaterialsView = {
                 <el-button size="small" @click="resetTmp('code')">重置</el-button>
               </div>
             </el-popover>
-          </template>
-          <template #default="{row}">{{ row.code }}</template>
+          </div></template>
+          <template #default="{row}"><span class="mat-code">{{ row.code || '—' }}</span></template>
         </el-table-column>
-        <el-table-column prop="orderNo" width="115">
-          <template #header><div class="th-inner"><span>采购订单号</span>
+        <el-table-column prop="orderNo" width="106" align="center">
+          <template #header><div class="th-inner th-center"><span>采购订单号</span>
             <el-popover placement="bottom-end" trigger="click" :width="210">
               <template #reference><funnel-icon :on="fActive('orderNo')" /></template>
               <el-input v-model="tmpFilters.orderNo" size="small" placeholder="筛选采购订单号" @keyup.enter="applyTmp('orderNo')" clearable />
@@ -953,11 +1593,11 @@ const MaterialsView = {
                 <el-button size="small" @click="resetTmp('orderNo')">重置</el-button>
               </div>
             </el-popover>
-          </template>
-          <template #default="{row}">{{ row.orderNo }}</template>
+          </div></template>
+          <template #default="{row}"><span class="mat-code" :class="{ 'is-empty': !row.orderNo || row.orderNo === '-' }">{{ row.orderNo && row.orderNo !== '-' ? row.orderNo : '—' }}</span></template>
         </el-table-column>
-        <el-table-column prop="source" width="115">
-          <template #header><div class="th-inner"><span>来源</span>
+        <el-table-column prop="source" width="92" align="center">
+          <template #header><div class="th-inner th-center"><span>来源</span>
             <el-popover placement="bottom-end" trigger="click" :width="160">
               <template #reference><funnel-icon :on="fActive('source')" /></template>
               <el-checkbox-group v-model="colFilters.source">
@@ -965,11 +1605,11 @@ const MaterialsView = {
               </el-checkbox-group>
               <div style="text-align:right;margin-top:6px"><el-button size="small" @click="resetArr('source')">重置</el-button></div>
             </el-popover>
-          </template>
-          <template #default="{row}"><span :style="chipStyle(sourceColors[row.source] || '#909399')">{{ row.source }}</span></template>
+          </div></template>
+          <template #default="{row}"><span :style="chipStyle(sourceColors[row.source] || 'var(--text-3)')">{{ row.source }}</span></template>
         </el-table-column>
-        <el-table-column prop="status" width="110">
-          <template #header><div class="th-inner"><span>状态</span>
+        <el-table-column prop="status" width="88" align="center">
+          <template #header><div class="th-inner th-center"><span>状态</span>
             <el-popover placement="bottom-end" trigger="click" :width="170">
               <template #reference><funnel-icon :on="fActive('status')" /></template>
               <el-checkbox-group v-model="colFilters.status">
@@ -979,13 +1619,15 @@ const MaterialsView = {
               </el-checkbox-group>
               <div style="text-align:right;margin-top:6px"><el-button size="small" @click="resetArr('status')">重置</el-button></div>
             </el-popover>
-          </template>
-          <template #default="{row}"><span :style="chipStyle(statusColors[row.status] || '#909399') + 'cursor:pointer'" title="点击查看关联领料单" @click="openRelated(row)">{{ row.status }}</span></template>
+          </div></template>
+          <template #default="{row}"><span :style="chipStyle(statusColors[row.status] || 'var(--text-3)') + 'cursor:pointer'" title="点击查看关联领料单" @click="openRelated(row)">{{ row.status }}</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <el-table-column v-if="canWrite('materials')" label="操作" width="98" align="center" fixed="right">
           <template #default="{row}">
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+            <div class="mat-acts">
+              <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+              <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -1004,7 +1646,7 @@ const MaterialsView = {
             <template #default="{row}">
               <el-input-number v-model="stagingQty[row.id]" :min="0" :max="Number(row.qtyCanGen) || 0"
                 controls-position="right" size="small" style="width:120px" placeholder="领料数量" />
-              <div style="color:#999;font-size:12px;line-height:18px;margin-top:2px">可继续领料 {{ fmtQty(row.qtyCanGen) }} {{ row.unit }}（应到 {{ fmtQty(row.qtyRequired) }} / 已生成 {{ fmtQty(row.qtyGenerated) }}）</div>
+              <div style="color:var(--text-3);font-size:12px;line-height:18px;margin-top:2px">可继续领料 {{ fmtQty(row.qtyCanGen) }} {{ row.unit }}（应到 {{ fmtQty(row.qtyRequired) }} / 已生成 {{ fmtQty(row.qtyGenerated) }}）</div>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="80">
@@ -1028,7 +1670,7 @@ const MaterialsView = {
         <template #header>
           <div>
             <div style="font-size:16px;font-weight:600">关联领料单：{{ relDlg.material && relDlg.material.description }}</div>
-            <div style="color:#999;font-size:12px;margin-top:4px">显示本材料关联的全部领料单，包含已入库和已作废记录；展开查看材料明细及入库记录。</div>
+            <div style="color:var(--text-3);font-size:12px;margin-top:4px">显示本材料关联的全部领料单，包含已入库和已作废记录；展开查看材料明细及入库记录。</div>
           </div>
         </template>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -1038,7 +1680,7 @@ const MaterialsView = {
         <el-table :data="relPaged" border style="width:100%">
           <el-table-column type="expand">
             <template #default="{row}">
-              <div style="padding:10px 24px 16px;background:#fafbfc">
+              <div style="padding:10px 24px 16px;background:var(--surface-2)">
                 <div style="font-weight:600;margin-bottom:8px">材料明细</div>
                 <el-table :data="[relItem(row)]" size="small" border>
                   <el-table-column prop="code" label="物料编码" width="130" />
@@ -1054,7 +1696,7 @@ const MaterialsView = {
                   <el-table-column label="入库情况" width="100"><template #default="{row}"><span :style="chipStyle(row.abnormal ? '#f56c6c' : '#389e0d')">{{ row.abnormal ? '异常' : '正常' }}</span></template></el-table-column>
                   <el-table-column prop="reason" label="异常原因"><template #default="{row}">{{ row.reason || '—' }}</template></el-table-column>
                 </el-table>
-                <div v-else style="color:#999;font-size:12px">暂无入库记录（确认入库/补入库后按次记录）</div>
+                <div v-else style="color:var(--text-3);font-size:12px">暂无入库记录（确认入库/补入库后按次记录）</div>
               </div>
             </template>
           </el-table-column>
@@ -1153,7 +1795,7 @@ const MaterialsView = {
         </el-row>
         <el-form-item label="修改应到数量原因" style="margin-bottom:6px">
           <el-input v-model="form.modifyReason" placeholder="如：ERP导出数量修正、录入纠偏" />
-          <div style="color:#999;font-size:12px;margin-top:2px">{{ editingId ? '修改了应到数量时必填。' : '新增材料不需要填写。' }}</div>
+          <div style="color:var(--text-3);font-size:12px;margin-top:2px">{{ editingId ? '修改了应到数量时必填。' : '新增材料不需要填写。' }}</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -1162,31 +1804,6 @@ const MaterialsView = {
       </template>
     </el-dialog>
   </div>`
-};
-
-/* 领料单：暂存清单生成 → 下载 Excel → 确认入库/作废（按原系统截图实现） */
-const importCfg = {
-  endpoint: 'materialImports', title: '导入批次',
-  columns: [
-    { key: 'batch', label: '批次号', width: 140 }, { key: 'fileName', label: '文件名' }, { key: 'rows', label: '行数', width: 80 },
-    { key: 'importedBy', label: '导入人', width: 100 }, { key: 'importedAt', label: '导入时间', width: 170 }, { key: 'status', label: '状态', tag: true, width: 90 }
-  ],
-  formFields: [
-    { key: 'batch', label: '批次号' }, { key: 'fileName', label: '文件名' }, { key: 'rows', label: '行数', type: 'number' },
-    { key: 'importedBy', label: '导入人' }, { key: 'importedAt', label: '导入时间' }, { key: 'status', label: '状态', type: 'select', options: [{ label: '成功', value: '成功' }, { label: '失败', value: '失败' }] }
-  ]
-};
-const outboundCfg = {
-  endpoint: 'materialOutbound', title: '出库管理',
-  columns: [
-    { key: 'project', label: '项目' }, { key: 'material', label: '物料' }, { key: 'qty', label: '数量', width: 80 },
-    { key: 'recipient', label: '领用人', width: 120 }, { key: 'date', label: '日期', width: 120 }, { key: 'status', label: '状态', tag: true, width: 100 }
-  ],
-  formFields: [
-    { key: 'project', label: '项目' }, { key: 'material', label: '物料' }, { key: 'qty', label: '数量', type: 'number' },
-    { key: 'recipient', label: '领用人' }, { key: 'date', label: '日期' },
-    { key: 'status', label: '状态', type: 'select', options: [{ label: '待出库', value: '待出库' }, { label: '已出库', value: '已出库' }] }
-  ]
 };
 
 /* ---------------- 首页仪表盘 ---------------- */
@@ -1216,7 +1833,7 @@ const Dashboard = {
       <el-col :span="4" :xs="12"><div class="stat-card"><div class="num">{{ stats.requisitions }}</div><div class="label">领料单</div></div></el-col>
       <el-col :span="4" :xs="12"><div class="stat-card"><div class="num">{{ stats.documents }}</div><div class="label">文档中心文件</div></div></el-col>
       <el-col :span="4" :xs="12"><div class="stat-card"><div class="num">{{ stats.borrow }}</div><div class="label">借工记录</div></div></el-col>
-      <el-col :span="4" :xs="12"><div class="stat-card"><div class="num" style="color:#52c41a">在线</div><div class="label">当前用户：{{ me.name || me.username || '-' }}</div></div></el-col>
+      <el-col :span="4" :xs="12"><div class="stat-card"><div class="num" style="color:var(--ok-text)">在线</div><div class="label">当前用户：{{ me.name || me.username || '-' }}</div></div></el-col>
     </el-row>
   </div>`
 };
@@ -1253,12 +1870,6 @@ const teamCfg = {
     { key: 'sort', label: '排序', type: 'number', default: 0 }
   ]
 };
-const materialCatalogCfg = {
-  endpoint: 'materialCatalog', title: '材料目录', dialogTitle: '材料目录',
-  columns: [ { key: 'name', label: '材料名称' }, { key: 'alias', label: '别名（不同写法）' }, { key: 'unit', label: '单位', width: 100 }, { key: 'baseQuantity', label: '基数', width: 90 } ],
-  formFields: [ { key: 'name', label: '材料名称', required: true }, { key: 'alias', label: '别名（识别不同写法）' }, { key: 'unit', label: '单位' }, { key: 'baseQuantity', label: '材料基数', type: 'number' } ]
-};
-
 const SettingsView = {
   setup() {
     const active = ref('annualPlans');
@@ -1272,6 +1883,8 @@ const SettingsView = {
         if (!site.loginBgMode) site.loginBgMode = 'cover';
         if (![0, 90, 180, 270].includes(Number(site.loginBgRotate))) site.loginBgRotate = 0;
         savedName.value = s.companyName || '';
+        // 从初始化向导「在网站设置中编辑」跳转而来：自动切到「网站设置」标签页
+        if (window.__pendingSettingsTab) { active.value = window.__pendingSettingsTab; window.__pendingSettingsTab = ''; }
         // 旧上传图若缺占位元数据，用浏览器补算并回填，消除首帧黑闪
         if (isLoginBgCustom(site.loginBg) && !site.loginBgMeta) {
           const m = await makeLqip(site.loginBg);
@@ -1319,7 +1932,7 @@ const SettingsView = {
     // 设置页实时预览：跟随所选背景与铺展方式（旋转由 CSS 类控制）
     const previewStyle = computed(() => {
       const url = site.loginBg || '/login-bg/valley.jpg';
-      const s = { backgroundImage: `url('${url}')`, backgroundColor: '#e9edf2' };
+      const s = { backgroundImage: `url('${url}')`, backgroundColor: 'var(--surface-3)' };
       switch (site.loginBgMode) {
         case 'contain': s.backgroundSize = 'contain'; s.backgroundRepeat = 'no-repeat'; s.backgroundPosition = 'center'; break;
         case 'stretch': s.backgroundSize = '100% 100%'; s.backgroundRepeat = 'no-repeat'; s.backgroundPosition = 'center'; break;
@@ -1439,7 +2052,7 @@ const SettingsView = {
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
     onMounted(() => { loadSite(); loadUnits(); });
-    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, materialCatalogCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
+    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
   },
   template: `
   <div>
@@ -1455,7 +2068,7 @@ const SettingsView = {
           <template #header>
             <div style="display:flex;justify-content:space-between;align-items:center">
               <b>{{ t === '分包单位' ? '分包（已方）单位' : t }}</b>
-              <el-button type="primary" size="small" @click="openUnitAdd(t)">新 增</el-button>
+              <el-button v-if="canWrite('settings')" type="primary" size="small" @click="openUnitAdd(t)">新 增</el-button>
             </div>
           </template>
           <el-table :data="unitsOf(t)" size="small">
@@ -1463,11 +2076,11 @@ const SettingsView = {
             <el-table-column prop="sort" label="排序" width="110" />
             <el-table-column label="操作" width="150" align="center">
               <template #default="{row}">
-                <el-button link type="primary" size="small" @click="openUnitEdit(row)">编辑</el-button>
-                <el-button link type="danger" size="small" @click="removeUnit(row)">删除</el-button>
+                <el-button v-if="canWrite('settings')" link type="primary" size="small" @click="openUnitEdit(row)">编辑</el-button>
+                <el-button v-if="canWrite('settings')" link type="danger" size="small" @click="removeUnit(row)">删除</el-button>
               </template>
             </el-table-column>
-            <template #empty><span style="color:#909399;font-size:12px">暂无数据</span></template>
+            <template #empty><span style="color:var(--text-3);font-size:12px">暂无数据</span></template>
           </el-table>
         </el-card>
 
@@ -1500,27 +2113,27 @@ const SettingsView = {
               <el-button size="small" @click="loadSite">重新读取</el-button>
             </div>
           </template>
-          <div style="color:#666;font-size:13px;line-height:1.8;margin-bottom:14px">
+          <div style="color:var(--text-2);font-size:13px;line-height:1.8;margin-bottom:14px">
             选择预设背景或上传本机图片，作为访客登录页的全屏背景。建议使用 1920×1080 及以上的横图，JPG / PNG / WebP / GIF，不超过 10MB。
           </div>
 
           <!-- 当前背景预览 + 铺展方式 -->
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:18px;align-items:flex-start">
             <div style="flex:0 1 auto;max-width:100%;min-width:0">
-              <div style="font-size:13px;color:#4e5969;margin-bottom:6px">实时预览</div>
+              <div style="font-size:13px;color:var(--text-2);margin-bottom:6px">实时预览</div>
               <div class="login-preview">
                 <div class="login-preview-inner" :class="previewRotClass" :style="previewStyle"></div>
               </div>
             </div>
             <div style="flex:1 1 300px;min-width:260px">
-              <div style="font-size:13px;color:#4e5969;margin-bottom:6px">铺展方式（同 Windows 壁纸）</div>
+              <div style="font-size:13px;color:var(--text-2);margin-bottom:6px">铺展方式（同 Windows 壁纸）</div>
               <el-radio-group v-model="site.loginBgMode" size="small" style="display:flex;flex-wrap:wrap;gap:8px">
                 <el-radio-button v-for="m in LOGIN_BG_MODES" :key="m.key" :value="m.key" :label="m.key">{{ m.label }}</el-radio-button>
               </el-radio-group>
-              <div style="margin-top:8px;font-size:12px;color:#909399;line-height:1.7">
+              <div style="margin-top:8px;font-size:12px;color:var(--text-3);line-height:1.7">
                 {{ (LOGIN_BG_MODES.find(m => m.key === site.loginBgMode) || {}).desc || '' }}
               </div>
-              <div style="margin-top:14px;font-size:13px;color:#4e5969;margin-bottom:6px">旋转（照片方向不对时转正）</div>
+              <div style="margin-top:14px;font-size:13px;color:var(--text-2);margin-bottom:6px">旋转（照片方向不对时转正）</div>
               <el-radio-group v-model="site.loginBgRotate" size="small" style="display:flex;flex-wrap:wrap;gap:8px">
                 <el-radio-button v-for="r in LOGIN_BG_ROTATES" :key="r.key" :value="r.key" :label="r.key">{{ r.label }}</el-radio-button>
               </el-radio-group>
@@ -1538,25 +2151,26 @@ const SettingsView = {
                  @click="site.loginBg = p.url">
               <div :style="{
                      backgroundImage:'url(' + p.url + ')',
-                     border: site.loginBg === p.url ? '2px solid #3370ff' : '1px solid #e7e9ec',
+                     border: site.loginBg === p.url ? '2px solid #3370ff' : '1px solid var(--line)',
                      borderRadius:'4px', height:'104px', backgroundSize:'cover', backgroundPosition:'center'
                    }"></div>
-              <div style="margin-top:6px;font-size:13px;color:#1f2d3d;display:flex;justify-content:space-between;align-items:center">
+              <div style="margin-top:6px;font-size:13px;color:var(--text-1);display:flex;justify-content:space-between;align-items:center">
                 <span>{{ p.label }}</span>
                 <el-tag v-if="site.loginBg === p.url" type="primary" size="small">使用中</el-tag>
               </div>
-              <div style="font-size:12px;color:#999">{{ p.desc }}</div>
+              <div style="font-size:12px;color:var(--text-3)">{{ p.desc }}</div>
             </div>
             <div style="width:186px">
-              <div style="border:1px dashed #d4d8de;border-radius:4px;height:104px;display:flex;align-items:center;justify-content:center;background:#fafbfc">
+              <div style="border:1px dashed var(--line-strong);border-radius:4px;height:104px;display:flex;align-items:center;justify-content:center;background:var(--surface-2)">
                 <el-upload
                   :show-file-list="false"
                   accept=".jpg,.jpeg,.png,.webp,.gif,image/*"
+                  :disabled="!canWrite('settings')"
                   :http-request="uploadLoginBg">
                   <el-button size="small" type="primary" plain :loading="bgUploading">上传本机图片</el-button>
                 </el-upload>
               </div>
-              <div style="margin-top:6px;font-size:12px;color:#999;line-height:1.6">
+              <div style="margin-top:6px;font-size:12px;color:var(--text-3);line-height:1.6">
                 自定义上传；上传后自动应用
               </div>
             </div>
@@ -1571,20 +2185,20 @@ const SettingsView = {
             </div>
           </el-alert>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <el-button type="primary" :loading="bgSaving" @click="saveLoginBg">保存背景设置</el-button>
-            <el-button type="danger" plain :loading="bgDeleting" :disabled="!isLoginBgCustom(site.loginBg)" @click="deleteLoginBg">删除自定义背景</el-button>
+            <el-button v-if="canWrite('settings')" type="primary" :loading="bgSaving" @click="saveLoginBg">保存背景设置</el-button>
+            <el-button v-if="canWrite('settings')" type="danger" plain :loading="bgDeleting" :disabled="!isLoginBgCustom(site.loginBg)" @click="deleteLoginBg">删除自定义背景</el-button>
           </div>
         </el-card>
       </el-tab-pane>
       <el-tab-pane label="网站设置" name="site">
         <el-card style="margin-bottom:16px">
           <template #header><b>网站标题（最多 128 个字符）</b></template>
-          <div style="color:#666;font-size:13px;line-height:1.8;margin-bottom:12px">这里保存的网站标题作为初始化的企业名称。其他标签的设置不会代替企业名称保存；填写后点击下方"保存"。</div>
+          <div style="color:var(--text-2);font-size:13px;line-height:1.8;margin-bottom:12px">这里保存的网站标题作为初始化的企业名称。其他标签的设置不会代替企业名称保存；填写后点击下方"保存"。</div>
           <el-alert v-if="savedName" type="success" :closable="false" style="margin-bottom:12px">
             <template #title>已保存企业名称：{{ savedName }}</template>
           </el-alert>
           <el-input v-model="site.companyName" :placeholder="savedName || '请输入企业名称'" maxlength="128" show-word-limit style="max-width:640px" />
-          <div style="margin-top:12px"><el-button type="primary" @click="saveSite">保存</el-button></div>
+          <div v-if="canWrite('settings')" style="margin-top:12px"><el-button type="primary" @click="saveSite">保存</el-button></div>
         </el-card>
 
         <el-card>
@@ -1594,16 +2208,16 @@ const SettingsView = {
               <el-button size="small" @click="loadSite">重新读取</el-button>
             </div>
           </template>
-          <div style="color:#666;font-size:13px;line-height:1.8;margin-bottom:12px">设置访客登录前看到的企业介绍和 Logo。访客只会看到欢迎内容，不会看到企业内部资料。</div>
+          <div style="color:var(--text-2);font-size:13px;line-height:1.8;margin-bottom:12px">设置访客登录前看到的企业介绍和 Logo。访客只会看到欢迎内容，不会看到企业内部资料。</div>
           <el-form label-position="top">
             <el-form-item label="欢迎语（最多 500 个字符）">
               <el-input v-model="site.welcome.greeting" type="textarea" :rows="4" maxlength="500" show-word-limit placeholder="欢迎来到我们的企业工作台" style="max-width:720px" />
             </el-form-item>
             <el-form-item label="企业 Logo 图片地址（最多 2048 个字符）">
               <el-input v-model="site.welcome.logoUrl" maxlength="2048" placeholder="https://... 或 /images/logo.png" style="max-width:720px" />
-              <div style="color:#999;font-size:12px;margin-top:6px">建议使用 PNG、JPG、WebP。比例建议 1:1、推荐 512×512、最小建议 128×128，文件建议不超过 500KB。填写 https:// 图片地址或站内 / 图片路径；系统校验地址格式，不会读取或远程图片核验尺寸或文件大小。</div>
+              <div style="color:var(--text-3);font-size:12px;margin-top:6px">建议使用 PNG、JPG、WebP。比例建议 1:1、推荐 512×512、最小建议 128×128，文件建议不超过 500KB。填写 https:// 图片地址或站内 / 图片路径；系统校验地址格式，不会读取或远程图片核验尺寸或文件大小。</div>
             </el-form-item>
-            <el-button type="primary" @click="saveWelcome">保存欢迎页</el-button>
+            <el-button v-if="canWrite('settings')" type="primary" @click="saveWelcome">保存欢迎页</el-button>
           </el-form>
         </el-card>
       </el-tab-pane>
@@ -1611,33 +2225,253 @@ const SettingsView = {
   </div>`
 };
 
-/* 用户管理 — 标签页1：登录账号列表 */
-const userCfg = {
-  endpoint: 'users', title: '用户',
-  columns: [
-    { key: 'username', label: '账号', width: 120 }, { key: 'name', label: '姓名', width: 120 },
-    { key: 'role', label: '角色', width: 110 }, { key: 'spaceId', label: '绑定空间', width: 150 },
-    { key: 'status', label: '状态', width: 90 }, { key: 'phone', label: '电话' }
-  ],
-  formFields: [
-    { key: 'username', label: '账号', required: true }, { key: 'name', label: '姓名', required: true },
-    { key: 'role', label: '角色', type: 'select', options: [{ label: '超级用户', value: '超级用户' }, { label: '资料员', value: '资料员' }, { label: '班组长', value: '班组长' }, { label: '访客', value: '访客' }] },
-    { key: 'password', label: '密码' }, { key: 'phone', label: '电话' }
-  ]
+/* ---------------- 首次使用初始化（前期检查：5 项基础设置） ---------------- */
+const InitView = {
+  setup() {
+    const status = reactive({ initialized: false, companyName: '', workers: 0, workersWithTeam: 0 });
+    const loading = ref(true);
+    const finishing = ref(false);
+
+    async function loadStatus() {
+      try {
+        const s = await api.get('/api/init-status');
+        Object.assign(status, s);
+      } catch (e) {}
+      finally { loading.value = false; }
+    }
+
+    // 各项完成度：全部基于后端真实数据（外部通讯录不列入初始化必填项，可后续在「用户管理」补充）
+    const doneMap = computed(() => ({
+      company: !!status.companyName,
+      workers: status.workersWithTeam > 0
+    }));
+
+    const steps = computed(() => {
+      const d = doneMap.value;
+      return [
+        { key: 'company', title: '企业名称', target: 'settings',
+          desc: '网站标题作为企业在页面显示的名称，点击下方按钮前往「全局设置 · 网站设置」填写。',
+          statusText: d.company ? status.companyName : '尚未填写企业名称' },
+        { key: 'workers', title: '班组与施工人员', target: 'workers',
+          desc: '至少建立一个班组和一位已确认的施工人员。账号与施工人员分开维护。',
+          statusText: d.workers ? '已建立班组和施工人员' : '请建立班组并添加施工人员' }
+      ];
+    });
+
+    const doneCount = computed(() => Object.values(doneMap.value).filter(Boolean).length);
+    const pct = computed(() => Math.round(doneCount.value / steps.value.length * 100));
+    // 企业名称为必填项；其余为基础配置项，可在对应模块随时补充
+    const canStart = computed(() => doneMap.value.company);
+
+    function goTarget(t, tab) {
+      if (t === 'settings') window.__pendingSettingsTab = 'site';
+      if (t === 'users' && tab) window.__pendingUsersTab = tab;
+      window.dispatchEvent(new CustomEvent('nav-to', { detail: t }));
+    }
+    async function finish() {
+      if (!canStart.value) { ElementPlus.ElMessage.warning('请先填写并保存企业名称'); return; }
+      finishing.value = true;
+      try {
+        await api.put('/api/settings', { initialized: true });
+        ElementPlus.ElMessage.success('初始化完成，欢迎使用');
+        // 刷新顶栏企业名/标题，并标记初始化完成（App 监听到后放行并进入用户中心）
+        window.dispatchEvent(new CustomEvent('brand-changed'));
+        window.dispatchEvent(new CustomEvent('init-done'));
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { finishing.value = false; }
+    }
+
+    // 从网站设置保存后返回向导时同步刷新完成情况
+    function onBrandChanged() { loadStatus(); }
+    onMounted(() => { loadStatus(); window.addEventListener('brand-changed', onBrandChanged); });
+    onUnmounted(() => window.removeEventListener('brand-changed', onBrandChanged));
+    return { status, loading, finishing, doneMap, doneCount, pct, canStart, steps, goTarget, finish };
+  },
+  template: `
+  <div class="init-page">
+    <div class="init-tabs"><span class="init-tab">前期检查</span></div>
+
+    <div class="init-intro"><span class="dot"></span>首次使用请完成以下基础设置，完成后即可开始使用系统。</div>
+
+    <div class="init-progress-row">
+      <div class="init-progress"><div class="init-progress-inner" :style="{ width: pct + '%' }"></div></div>
+      <span class="init-progress-num">{{ doneCount }}/{{ steps.length }}</span>
+    </div>
+
+    <div class="init-grid">
+      <div v-for="s in steps" :key="s.key" class="init-block">
+        <div class="init-block-head">
+          <span class="init-block-title">{{ s.title }}</span>
+          <span class="init-badge" :class="doneMap[s.key] ? 'done' : 'pending'">{{ doneMap[s.key] ? '已完成' : '待完成' }}</span>
+        </div>
+        <div class="init-block-desc">{{ s.desc }}</div>
+        <div class="init-block-status" :class="{ pending: !doneMap[s.key] }">{{ s.statusText }}</div>
+
+        <!-- 本页仅做引导：企业名称统一在「全局设置 · 网站设置」中填写与修改 -->
+        <div class="init-block-actions">
+          <el-button size="small" @click="goTarget(s.target, s.tab)">{{ doneMap[s.key] ? '查看或修改' : '去设置' }}</el-button>
+        </div>
+      </div>
+    </div>
+
+    <div class="init-footer">
+      <span class="tip">企业名称为必填项；班组与施工人员可稍后补充，外部通讯录可在「用户管理」中随时维护。</span>
+      <el-button type="primary" :loading="finishing" :disabled="!canStart" @click="finish">开始使用</el-button>
+    </div>
+  </div>`
 };
 
 /* 用户管理 — 标签页3：外部通讯录 */
-const contactCfg = {
-  endpoint: 'contacts', title: '外部通讯录',
-  columns: [
-    { key: 'name', label: '姓名', width: 120 }, { key: 'unit', label: '单位' },
-    { key: 'post', label: '职务', width: 140 }, { key: 'phone', label: '电话', width: 160 },
-    { key: 'remark', label: '备注' }
-  ],
-  formFields: [
-    { key: 'name', label: '姓名', required: true }, { key: 'unit', label: '单位' },
-    { key: 'post', label: '职务' }, { key: 'phone', label: '电话' }, { key: 'remark', label: '备注' }
-  ]
+/* 用户管理 — 外部通讯录（对齐截图：配置说明 + 新增/导入/导出 + 部门表） */
+const ContactsPanel = {
+  setup() {
+    const list = ref([]);
+    const loading = ref(false);
+    const filters = reactive({ dept: '', name: '' });
+    const dlg = reactive({ visible: false, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '' });
+    const fileInput = ref(null);
+
+    const filtered = computed(() => list.value.filter(c => {
+      if (filters.dept && !(c.dept || c.unit || '').includes(filters.dept)) return false;
+      if (filters.name && !(c.name || '').includes(filters.name)) return false;
+      return true;
+    }));
+    function reset() { filters.dept = ''; filters.name = ''; }
+
+    async function load() {
+      loading.value = true;
+      try { list.value = await api.get('/api/contacts'); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { loading.value = false; }
+    }
+    function openAdd() {
+      Object.assign(dlg, { visible: true, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '' });
+    }
+    function openEdit(row) {
+      Object.assign(dlg, {
+        visible: true, editing: true, busy: false, id: row.id,
+        dept: row.dept || row.unit || '', name: row.name || '', post: row.post || '',
+        phone: row.phone || '', shortNo: row.shortNo || ''
+      });
+    }
+    async function submit() {
+      const name = (dlg.name || '').trim();
+      if (!name) { ElementPlus.ElMessage.warning('请填写姓名'); return; }
+      dlg.busy = true;
+      try {
+        const payload = {
+          dept: (dlg.dept || '').trim(), name,
+          post: (dlg.post || '').trim(), phone: (dlg.phone || '').trim(), shortNo: (dlg.shortNo || '').trim()
+        };
+        if (dlg.editing) await api.put('/api/contacts/' + dlg.id, payload);
+        else await api.post('/api/contacts', payload);
+        ElementPlus.ElMessage.success('已保存');
+        dlg.visible = false; load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { dlg.busy = false; }
+    }
+    async function remove(row) {
+      try { await ElementPlus.ElMessageBox.confirm('确认删除联系人「' + row.name + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
+      catch (e) { return; }
+      try { await api.del('/api/contacts/' + row.id); ElementPlus.ElMessage.success('已删除'); load(); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    function triggerImport() { if (fileInput.value) fileInput.value.click(); }
+    async function onFileChange(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!file) return;
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const res = await fetch('/api/contacts/import', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') },
+          body: fd
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '导入失败');
+        ElementPlus.ElMessage.success('导入完成：' + data.imported + ' 位联系人（覆盖原有 ' + (data.replaced || 0) + ' 条）');
+        load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    function doExport() {
+      const token = localStorage.getItem('erp_token');
+      fetch('/api/contacts/export', { headers: { Authorization: 'Bearer ' + token } })
+        .then(r => { if (!r.ok) throw new Error('导出失败'); return r.blob(); })
+        .then(blob => {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob); a.download = '外部通讯录.xlsx'; a.click();
+        })
+        .catch(e => ElementPlus.ElMessage.error(e.message));
+    }
+    function deptOf(row) { return row.dept || row.unit || '-'; }
+
+    onMounted(load);
+    return { list, loading, filters, filtered, reset, dlg, fileInput, openAdd, openEdit, submit, remove,
+      triggerImport, onFileChange, doExport, deptOf };
+  },
+  template: `
+  <div>
+    <div class="wv-alert">
+      <span class="wv-alert-icon">i</span>
+      <div class="wv-alert-main">
+        <div class="wv-alert-title">配置说明</div>
+        <div class="wv-alert-text">外部通讯录用于维护工作票和施工资料中需要引用的联系人，与登录账号、作业人员名单分开维护。建议至少填写姓名和手机；系统会按姓名匹配联系方式。导入会覆盖现有数据，请先导出备份；导出文件可直接再次导入。</div>
+      </div>
+    </div>
+
+    <div class="ct-toolbar">
+      <el-button v-if="canWrite('users')" type="primary" size="small" @click="openAdd">新增</el-button>
+      <el-button v-if="canWrite('users')" size="small" @click="triggerImport">导入</el-button>
+      <span class="ct-hint">导入会覆盖现有外部通讯录；建议先导出备份。支持含「员工」sheet 的 xls/xlsx，新标准表头为部门、姓名、职务、手机、移动短号。</span>
+      <el-button size="small" :disabled="!list.length" @click="doExport">导出</el-button>
+      <input ref="fileInput" type="file" accept=".xls,.xlsx,.csv" style="display:none" @change="onFileChange" />
+    </div>
+
+    <div class="wv-filters">
+      <el-input v-model="filters.dept" placeholder="按部门筛选" clearable style="width:180px" />
+      <el-input v-model="filters.name" placeholder="按姓名筛选" clearable style="width:180px" />
+      <el-button @click="reset">重置</el-button>
+    </div>
+
+    <el-table class="flat-table" :data="filtered" v-loading="loading" style="width:100%" empty-text="暂无数据">
+      <el-table-column label="部门" min-width="200"><template #default="{row}">{{ deptOf(row) }}</template></el-table-column>
+      <el-table-column prop="name" label="姓名" min-width="140" />
+      <el-table-column prop="post" label="职务" min-width="160" />
+      <el-table-column prop="phone" label="手机" min-width="160" />
+      <el-table-column prop="shortNo" label="移动短号" min-width="140" />
+      <el-table-column label="操作" width="150">
+        <template #default="{row}">
+          <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="canWrite('users')" link type="danger" size="small" @click="remove(row)">删除</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+
+    <el-dialog :title="dlg.editing ? '编辑通讯录' : '新增通讯录'" v-model="dlg.visible" width="560px" label-position="top">
+      <el-form :model="dlg" label-position="top">
+        <el-form-item label="部门">
+          <el-input v-model="dlg.dept" placeholder="如：公司领导、办公室" maxlength="60" />
+        </el-form-item>
+        <el-form-item label="姓名" required>
+          <el-input v-model="dlg.name" placeholder="姓名" maxlength="40" />
+        </el-form-item>
+        <el-form-item label="职务">
+          <el-input v-model="dlg.post" placeholder="选填" maxlength="40" />
+        </el-form-item>
+        <el-form-item label="手机">
+          <el-input v-model="dlg.phone" placeholder="选填" maxlength="20" />
+        </el-form-item>
+        <el-form-item label="移动短号">
+          <el-input v-model="dlg.shortNo" placeholder="选填" maxlength="20" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dlg.visible=false">取消</el-button>
+        <el-button type="primary" :loading="dlg.busy" @click="submit">确定</el-button>
+      </template>
+    </el-dialog>
+  </div>`
 };
 
 /* 用户管理 — 标签页2：作业人员名单（对齐原系统截图） */
@@ -1645,7 +2479,11 @@ const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工
 const WORKER_CERT_OPTIONS = ['高压电工', '低压电工', '高处', '电力电缆作业', '电气试验', '司索工', '吊车司机', '挖机操作工'];
 
 const WorkersPanel = {
-  setup() {
+  // variant: 'page' = 独立二级页「作业人员与班组」（含卡片头与班组维护）
+  //          'tab'  = 用户管理 → 作业人员名单标签（无卡片头、无班组区块，列含身份证号）
+  props: { variant: { type: String, default: 'page' } },
+  setup(props) {
+    const isTab = computed(() => props.variant === 'tab');
     const list = ref([]);
     const teams = ref([]);
     const loading = ref(false);
@@ -1656,6 +2494,41 @@ const WorkersPanel = {
     const editing = ref(false);
     const form = reactive({ name: '', idNumber: '', phone: '', identity: '', team: '', certTypes: [], validRange: null });
     const fileInput = ref(null);
+    // 班组维护（新增 / 编辑 / 删除）：班组即全局字典 teams，周计划选项对应 showOnDeploy
+    const teamDlg = reactive({ visible: false, editing: false, busy: false, id: '', name: '', showOnDeploy: '展示', sort: 0, inWorkerList: '列入' });
+    const sortedTeams = computed(() => [...teams.value].sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0)));
+    function openTeamAdd() {
+      Object.assign(teamDlg, { visible: true, editing: false, id: '', name: '', showOnDeploy: '展示', sort: sortedTeams.value.length, inWorkerList: '列入' });
+    }
+    function openTeamEdit(row) {
+      Object.assign(teamDlg, {
+        visible: true, editing: true, id: row.id, name: row.name || '',
+        showOnDeploy: row.showOnDeploy || '展示', sort: Number(row.sort) || 0, inWorkerList: row.inWorkerList || '列入'
+      });
+    }
+    async function saveTeam() {
+      const name = (teamDlg.name || '').trim();
+      if (!name) { ElementPlus.ElMessage.warning('请填写班组名称'); return; }
+      teamDlg.busy = true;
+      try {
+        const payload = { name, showOnDeploy: teamDlg.showOnDeploy, inWorkerList: teamDlg.inWorkerList, sort: Number(teamDlg.sort) || 0 };
+        if (teamDlg.editing) await api.put('/api/teams/' + teamDlg.id, payload);
+        else await api.post('/api/teams', payload);
+        ElementPlus.ElMessage.success('已保存');
+        teamDlg.visible = false; load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { teamDlg.busy = false; }
+    }
+    async function removeTeam(row) {
+      try { await ElementPlus.ElMessageBox.confirm('确认删除班组「' + row.name + '」？', '提示', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
+      catch (e) { return; }
+      try {
+        await api.del('/api/teams/' + row.id);
+        ElementPlus.ElMessage.success('已删除'); load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    // 「周计划选项」列：展示/隐藏 以「显示/隐藏」呈现（对齐截图口径）
+    function weekOption(row) { return row.showOnDeploy === '隐藏' ? '隐藏' : '显示'; }
 
     async function load() {
       loading.value = true;
@@ -1684,7 +2557,7 @@ const WorkersPanel = {
       return (fmtCN(row.validStart) || '?') + (row.validEnd ? ' - ' + fmtCN(row.validEnd) : '');
     }
     function fmtCerts(row) {
-      return (row.certTypes && row.certTypes.length) ? row.certTypes.join('、') : '-';
+      return (row.certTypes && row.certTypes.length) ? row.certTypes.join('；') : '-';
     }
 
     function openAdd() {
@@ -1774,61 +2647,143 @@ const WorkersPanel = {
     }
 
     onMounted(load);
-    return { list, teams, loading, filters, page, pageSize, filtered, paged, resetFilters, dialogVisible, editing, form, fileInput,
-      openAdd, openEdit, submit, togglePending, remove, downloadTemplate, downloadExport, triggerImport, onFileChange,
+    return { isTab, list, teams, sortedTeams, loading, filters, page, pageSize, filtered, paged, resetFilters, dialogVisible, editing, form, fileInput,
+      openAdd, openEdit, submit, togglePending, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
+      teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
       fmtValid, fmtCerts, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
   },
   template: `
   <div>
-    <el-alert type="info" :closable="false" style="margin-bottom:14px">
-      <template #title><b>配置说明</b></template>
-      <div style="line-height:1.8">作业人员名单用于维护所参与现场作业、可在周计划和工作票中选择的人员，与登录账号分开管理，作业人员无需登录系统；建议维护姓名、电话、身份、班组、证件类型和准入有效期。移入待定后，该人员不再供周计划选择。</div>
-    </el-alert>
+    <input ref="fileInput" type="file" accept=".csv,.xls,.xlsx" style="display:none" @change="onFileChange" />
 
-    <div class="toolbar">
-      <el-button type="primary" @click="openAdd">新增</el-button>
-      <el-button type="primary" @click="triggerImport">选择文件导入</el-button>
-      <span style="color:#888;font-size:12px;margin:0 6px">支持 .csv、.xls、.xlsx；请按模板填写，身份证号、手机号和有效期格式错误时整批不会导入。</span>
-      <el-button link type="primary" @click="downloadExport">下载</el-button>
-      <el-button link type="primary" @click="downloadTemplate">下载模板</el-button>
-      <input ref="fileInput" type="file" accept=".csv,.xls,.xlsx" style="display:none" @change="onFileChange" />
+    <!-- 独立二级页：作业人员与班组 -->
+    <div v-if="!isTab" class="wv-card">
+      <div class="wv-head">
+        <span class="wv-title">作业人员与班组</span>
+        <div class="wv-actions">
+          <el-button v-if="canWrite('users')" @click="openTeamAdd">新增班组</el-button>
+          <el-button v-if="canWrite('users')" type="primary" @click="openAdd">新增人员</el-button>
+          <el-button v-if="canWrite('users')" @click="triggerImport">选择文件导入</el-button>
+          <el-button @click="downloadExport">下载</el-button>
+          <el-button @click="downloadTemplate">下载模板</el-button>
+          <el-button :loading="loading" @click="load">刷新人员</el-button>
+        </div>
+      </div>
+
+      <div class="wv-body">
+        <div class="wv-alert">
+          <span class="wv-alert-icon">i</span>
+          <div class="wv-alert-main">
+            <div class="wv-alert-title">配置说明</div>
+            <div class="wv-alert-text">作业人员名单用于周计划和工作票的现场人员选择，与登录账号分开管理。导入支持 CSV、XLS、XLSX，身份证号填写18位数字（末位可为X），手机号填写11位数字；准入有效期填写完整范围，如 2026-01-01 - 2026-12-31，也可用 2026年1月1日 - 2026年12月31日。证件类型支持多个，手动填写时只能使用模板「选项」表中的名称，并用中文分号（；）分隔。导入前会检查整份文件，存在错误时不会提交。</div>
+          </div>
+        </div>
+
+        <div class="wv-section">作业人员名单</div>
+        <div class="wv-filters">
+          <el-input v-model="filters.name" placeholder="按姓名筛选" clearable style="width:200px" @input="page=1" />
+          <el-select v-model="filters.identity" placeholder="身份" clearable style="width:230px" @change="page=1">
+            <el-option v-for="o in WORKER_IDENTITY_OPTIONS" :key="o" :label="o" :value="o" />
+          </el-select>
+          <el-select v-model="filters.team" placeholder="班组" clearable style="width:170px" @change="page=1">
+            <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
+          </el-select>
+          <el-button @click="resetFilters">重置</el-button>
+        </div>
+
+        <el-table class="flat-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员">
+          <el-table-column prop="name" label="姓名" min-width="90" />
+          <el-table-column prop="identity" label="身份" min-width="185" />
+          <el-table-column prop="team" label="班组" min-width="100" />
+          <el-table-column prop="phone" label="电话" min-width="120" />
+          <el-table-column label="证件" min-width="120"><template #default="{row}">{{ fmtCerts(row) }}</template></el-table-column>
+          <el-table-column label="准入有效期" min-width="190"><template #default="{row}">{{ fmtValid(row) }}</template></el-table-column>
+          <el-table-column label="状态" width="95">
+            <template #default="{row}">
+              <el-tag :type="row.status==='待定' ? 'warning' : 'success'" size="small">{{ row.status || '已准入' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="170">
+            <template #default="{row}">
+              <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+              <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>
+              <el-button v-if="canWrite('users')" link type="danger" size="small" @click="remove(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="filtered.length > pageSize" style="display:flex;justify-content:flex-end;margin-top:12px">
+          <el-pagination background layout="prev, pager, next" :total="filtered.length" :page-size="pageSize" :current-page="page" @current-change="p=>page=p" />
+        </div>
+
+        <div class="wv-section">班组</div>
+        <el-table class="flat-table" :data="sortedTeams" v-loading="loading" style="width:100%" empty-text="暂无班组">
+          <el-table-column prop="name" label="班组" min-width="200" />
+          <el-table-column label="周计划选项" min-width="200"><template #default="{row}">{{ weekOption(row) }}</template></el-table-column>
+          <el-table-column label="排序" min-width="120"><template #default="{row}">{{ Number(row.sort) || 0 }}</template></el-table-column>
+          <el-table-column label="操作" width="180">
+            <template #default="{row}">
+              <el-button v-if="canWrite('users')" size="small" @click="openTeamEdit(row)">编辑</el-button>
+              <el-button v-if="canWrite('users')" size="small" class="wv-del-btn" @click="removeTeam(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </div>
 
-    <div class="toolbar">
-      <el-input v-model="filters.name" placeholder="按姓名筛选" clearable style="width:150px" @input="page=1" />
-      <el-select v-model="filters.identity" placeholder="身份" clearable style="width:230px" @change="page=1">
-        <el-option v-for="o in WORKER_IDENTITY_OPTIONS" :key="o" :label="o" :value="o" />
-      </el-select>
-      <el-select v-model="filters.team" placeholder="班组" clearable style="width:150px" @change="page=1">
-        <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
-      </el-select>
-      <el-button @click="resetFilters">重置</el-button>
-      <span style="color:#999;font-size:12px;margin-left:8px">由资料员或管理员维护，无需为每名作业人员创建登录账号</span>
-    </div>
+    <!-- 用户管理 → 作业人员名单标签：不出现卡片头与班组区块 -->
+    <div v-else>
+      <div class="wv-alert">
+        <span class="wv-alert-icon">i</span>
+        <div class="wv-alert-main">
+          <div class="wv-alert-title">配置说明</div>
+          <div class="wv-alert-text">作业人员名单用于维护实际参与现场作业、可在周计划和工作票中选择的人员，与登录账号分开管理。作业人员无需登录系统；建议维护姓名、电话、身份、班组、证件类型和准入有效期。移入待定后，该人员不再供周计划选择。</div>
+        </div>
+      </div>
 
-    <el-table :data="paged" v-loading="loading" border stripe style="width:100%">
-      <el-table-column prop="name" label="姓名" min-width="90" />
-      <el-table-column prop="identity" label="身份" min-width="190" />
-      <el-table-column prop="team" label="班组" min-width="110" />
-      <el-table-column label="证件类型" min-width="130"><template #default="{row}">{{ fmtCerts(row) }}</template></el-table-column>
-      <el-table-column label="准入有效期" min-width="220"><template #default="{row}">{{ fmtValid(row) }}</template></el-table-column>
-      <el-table-column prop="idNumber" label="身份证号" min-width="180" />
-      <el-table-column prop="phone" label="电话号码" min-width="130" />
-      <el-table-column label="状态" width="90">
-        <template #default="{row}">
-          <el-tag :type="row.status==='待定' ? 'warning' : 'success'" size="small">{{ row.status || '已准入' }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="160" fixed="right">
-        <template #default="{row}">
-          <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>
-          <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-    <div style="display:flex;justify-content:flex-end;margin-top:12px">
-      <el-pagination background layout="prev, pager, next" :total="filtered.length" :page-size="pageSize" :current-page="page" @current-change="p=>page=p" />
+      <div class="ck-toolbar">
+        <el-button v-if="canWrite('users')" type="primary" size="small" @click="openAdd">新增</el-button>
+        <el-button v-if="canWrite('users')" size="small" @click="triggerImport">选择文件导入</el-button>
+        <span class="ck-hint">支持 .csv、.xls、.xlsx；请按模板填写，身份证号、手机号和有效期格式错误时整批不会导入。</span>
+        <el-button size="small" @click="downloadExport">下载</el-button>
+        <el-button link type="primary" @click="downloadTemplate">下载模板</el-button>
+      </div>
+
+      <div class="wv-filters">
+        <el-input v-model="filters.name" placeholder="按姓名筛选" clearable style="width:160px" @input="page=1" />
+        <el-select v-model="filters.identity" placeholder="身份" clearable style="width:230px" @change="page=1">
+          <el-option v-for="o in WORKER_IDENTITY_OPTIONS" :key="o" :label="o" :value="o" />
+        </el-select>
+        <el-select v-model="filters.team" placeholder="班组" clearable style="width:150px" @change="page=1">
+          <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
+        </el-select>
+        <el-button @click="resetFilters">重置</el-button>
+        <span class="ck-note">由资料员维护，无需为每名作业人员创建登录账号</span>
+      </div>
+
+      <el-table class="flat-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员">
+        <el-table-column prop="name" label="姓名" min-width="90" />
+        <el-table-column prop="identity" label="身份" min-width="190" />
+        <el-table-column prop="team" label="班组" min-width="100" />
+        <el-table-column label="证件类型" min-width="170"><template #default="{row}">{{ fmtCerts(row) }}</template></el-table-column>
+        <el-table-column label="准入有效期" min-width="200"><template #default="{row}">{{ fmtValid(row) }}</template></el-table-column>
+        <el-table-column prop="idNumber" label="身份证号" min-width="180" />
+        <el-table-column prop="phone" label="电话号码" min-width="140" />
+        <el-table-column label="状态" width="100">
+          <template #default="{row}">
+            <el-tag :type="row.status==='待定' ? 'warning' : 'success'" size="small">{{ row.status || '已准入' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="170">
+          <template #default="{row}">
+            <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>
+            <el-button v-if="canWrite('users')" link type="danger" size="small" @click="remove(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div style="display:flex;justify-content:flex-end;margin-top:12px">
+        <el-pagination background layout="prev, pager, next" :total="filtered.length" :page-size="pageSize" :current-page="page" @current-change="p=>page=p" />
+      </div>
     </div>
 
     <el-dialog :title="editing ? '编辑人员' : '新增人员'" v-model="dialogVisible" width="620px" label-position="top">
@@ -1868,227 +2823,34 @@ const WorkersPanel = {
         <el-button type="primary" @click="submit">确定</el-button>
       </template>
     </el-dialog>
-  </div>`
-};
 
-/* 团队管理（母账号 + 团队子空间）
-   母账号：全部团队；可新建/编辑/停启用/解散团队、一键清空、管理任意团队成员与权限、查看审计日志
-   团队管理员：仅自己管理的团队；可添加成员并分配「查看/录入/导出/审批」权限；无新建/解散/清空权 */
-const TeamsPanel = {
-  setup() {
-    const { ref, reactive, onMounted } = Vue;
-    const EP = ElementPlus;
-    const me = ref({ isParent: false, isTeamAdmin: false });
-    const teams = ref([]);
-    const audit = ref([]);
-    const loading = ref(false);
-    const PERMS = ['查看', '录入', '导出', '审批'];
-    const STATUS_TAG = { active: 'success', disabled: 'danger' };
-
-    const teamDlg = reactive({ visible: false, mode: 'create', id: '', name: '', busy: false });
-    const resetDlg = reactive({ visible: false, team: null, reason: '', busy: false });
-    const resetConfirm = ref('');
-    const memberDlg = reactive({ visible: false, teamId: '', teamName: '', busy: false });
-    const members = ref([]);
-    const allAccounts = ref([]);
-    const memberForm = reactive({ username: '', role: '团队成员', permissions: ['查看', '录入'] });
-
-    async function load() {
-      loading.value = true;
-      try {
-        teams.value = await api.get('/api/biz-teams');
-        const m = await api.get('/api/me');
-        me.value = m.user; me.value.isTeamAdmin = m.isTeamAdmin;
-        if (m.user.isParent) { try { audit.value = await api.get('/api/audit-logs'); } catch (e) {} }
-      } catch (e) { EP.ElMessage.error(e.message); }
-      finally { loading.value = false; }
-    }
-    function openCreate() { teamDlg.mode = 'create'; teamDlg.id = ''; teamDlg.name = ''; teamDlg.visible = true; }
-    function openEdit(row) { teamDlg.mode = 'edit'; teamDlg.id = row.id; teamDlg.name = row.name; teamDlg.visible = true; }
-    async function saveTeam() {
-      if (!teamDlg.name.trim()) { EP.ElMessage.warning('请填写团队名称'); return; }
-      teamDlg.busy = true;
-      try {
-        if (teamDlg.mode === 'create') await api.post('/api/biz-teams', { name: teamDlg.name.trim() });
-        else await api.put('/api/biz-teams/' + teamDlg.id, { name: teamDlg.name.trim() });
-        teamDlg.visible = false; EP.ElMessage.success('已保存'); load();
-      } catch (e) { EP.ElMessage.error(e.message); }
-      finally { teamDlg.busy = false; }
-    }
-    async function toggleStatus(row) {
-      try { await api.put('/api/biz-teams/' + row.id, { status: row.status === 'active' ? 'disabled' : 'active' }); load(); }
-      catch (e) { EP.ElMessage.error(e.message); }
-    }
-    async function removeTeam(row) {
-      try {
-        await EP.ElMessageBox.confirm('解散团队「' + row.name + '」将物理删除其全部业务数据与附件，且不可恢复。确定解散？', '解散团队（高危）', { type: 'error', confirmButtonText: '确定解散', cancelButtonText: '取消' });
-      } catch (e) { return; }
-      try { const r = await api.del('/api/biz-teams/' + row.id); EP.ElMessage.success('已解散，清除 ' + (r.deletedCount || 0) + ' 条数据'); load(); }
-      catch (e) { EP.ElMessage.error(e.message); }
-    }
-    function openReset(row) { resetDlg.team = row; resetDlg.reason = ''; resetConfirm.value = ''; resetDlg.visible = true; }
-    async function doReset() {
-      if (!resetDlg.reason.trim()) { EP.ElMessage.warning('请填写清空原因'); return; }
-      if (resetConfirm.value !== '确认清空') { EP.ElMessage.warning('请在下方输入「确认清空」以二次确认'); return; }
-      resetDlg.busy = true;
-      try {
-        const r = await api.post('/api/biz-teams/' + resetDlg.team.id + '/reset', { reason: resetDlg.reason.trim() });
-        EP.ElMessage.success('已清空：删除 ' + (r.deletedCount || 0) + ' 条业务数据、' + (r.fileCount || 0) + ' 个附件；团队与成员已保留');
-        resetDlg.visible = false; load();
-      } catch (e) { EP.ElMessage.error(e.message); }
-      finally { resetDlg.busy = false; }
-    }
-    async function openMembers(row) {
-      memberDlg.teamId = row.id; memberDlg.teamName = row.name; memberDlg.visible = true;
-      memberForm.username = ''; memberForm.role = '团队成员'; memberForm.permissions = ['查看', '录入'];
-      if (me.value.isParent) { try { allAccounts.value = await api.get('/api/users'); } catch (e) { allAccounts.value = []; } }
-      await loadMembers();
-    }
-    async function loadMembers() {
-      try { members.value = await api.get('/api/biz-teams/' + memberDlg.teamId + '/members'); }
-      catch (e) { EP.ElMessage.error(e.message); }
-    }
-    async function addMember() {
-      const username = (memberForm.username || '').trim();
-      if (!username) { EP.ElMessage.warning('请填写账号'); return; }
-      memberDlg.busy = true;
-      try {
-        await api.post('/api/biz-teams/' + memberDlg.teamId + '/members', { username, role: memberForm.role, permissions: memberForm.permissions });
-        EP.ElMessage.success('已添加成员'); memberForm.username = ''; await loadMembers(); load();
-      } catch (e) { EP.ElMessage.error(e.message); }
-      finally { memberDlg.busy = false; }
-    }
-    async function updateMember(m) {
-      try { await api.put('/api/team-members/' + m.id, { role: m.role, permissions: m.permissions }); EP.ElMessage.success('已更新'); }
-      catch (e) { EP.ElMessage.error(e.message); await loadMembers(); }
-    }
-    async function removeMember(m) {
-      try { await EP.ElMessageBox.confirm('确定将「' + m.name + '」移出团队？', '移除成员', { type: 'warning' }); }
-      catch (e) { return; }
-      try { await api.del('/api/team-members/' + m.id); EP.ElMessage.success('已移除'); await loadMembers(); load(); }
-      catch (e) { EP.ElMessage.error(e.message); }
-    }
-    onMounted(load);
-    return { me, teams, audit, loading, PERMS, STATUS_TAG, teamDlg, openCreate, openEdit, saveTeam, toggleStatus, removeTeam, resetDlg, resetConfirm, openReset, doReset, memberDlg, members, allAccounts, memberForm, openMembers, addMember, updateMember, removeMember };
-  },
-  template: `
-  <div>
-    <el-alert type="warning" :closable="false" show-icon title="团队 = 独立业务空间"
-      :description="me.isParent ? '母账号可创建/停用/解散团队、一键清空指定团队全部业务数据（物理删除，保留团队/成员/字典/日志），并查看全部团队审计日志。团队成员仅见本团队数据，团队之间互相隔离。' : '您是本团队的管理员：可添加成员并分配「查看/录入/导出/审批」权限；团队空间清空权仅归母账号。'" style="margin-bottom:12px" />
-    <div style="margin-bottom:12px" v-if="me.isParent">
-      <el-button type="primary" @click="openCreate">+ 新建团队</el-button>
-    </div>
-    <el-table :data="teams" v-loading="loading" border stripe style="width:100%">
-      <el-table-column prop="name" label="团队名称" min-width="150" />
-      <el-table-column label="团队管理员" min-width="140">
-        <template #default="{ row }">
-          <span v-if="row.admins && row.admins.length">{{ row.admins.map(a => a.name).join('、') }}</span>
-          <span v-else style="color:#c0c4cc">未设置</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="memberCount" label="成员数" width="80" />
-      <el-table-column prop="recordCount" label="业务记录" width="90" />
-      <el-table-column prop="fileCount" label="附件" width="70" />
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }"><el-tag :type="STATUS_TAG[row.status] || 'info'">{{ row.status === 'active' ? '启用' : '已停用' }}</el-tag></template>
-      </el-table-column>
-      <el-table-column label="操作" width="290" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="openMembers(row)">成员/权限</el-button>
-          <template v-if="me.isParent">
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link size="small" @click="toggleStatus(row)">{{ row.status === 'active' ? '停用' : '启用' }}</el-button>
-            <el-button link type="danger" size="small" @click="openReset(row)">一键清空</el-button>
-            <el-button link type="danger" size="small" @click="removeTeam(row)">解散</el-button>
-          </template>
-        </template>
-      </el-table-column>
-    </el-table>
-
-    <template v-if="me.isParent">
-      <h4 style="margin:18px 0 10px;color:#303133">审计日志（团队清空/解散永久留痕，不可被团队层面清除）</h4>
-      <el-table :data="audit" border stripe style="width:100%" max-height="360">
-        <el-table-column prop="at" label="时间" width="170" />
-        <el-table-column prop="actor" label="操作人" width="100" />
-        <el-table-column prop="action" label="动作" width="150" />
-        <el-table-column prop="targetOwner" label="目标团队" width="150" />
-        <el-table-column prop="deletedCount" label="清除记录" width="90" />
-        <el-table-column prop="fileCount" label="清除附件" width="90" />
-        <el-table-column prop="reason" label="原因" min-width="160" show-overflow-tooltip />
-      </el-table>
-    </template>
-
-    <el-dialog :title="teamDlg.mode === 'create' ? '新建团队' : '编辑团队'" v-model="teamDlg.visible" width="440px">
-      <el-form label-width="80px">
-        <el-form-item label="团队名称" required><el-input v-model="teamDlg.name" placeholder="如：甲施工队" /></el-form-item>
+    <el-dialog :title="teamDlg.editing ? '编辑班组' : '新增班组'" v-model="teamDlg.visible" width="480px" label-position="top">
+      <el-form :model="teamDlg" label-position="top">
+        <el-form-item label="班组" required>
+          <el-input v-model="teamDlg.name" placeholder="如：施工一队" maxlength="60" />
+        </el-form-item>
+        <el-form-item label="周计划选项">
+          <el-select v-model="teamDlg.showOnDeploy" style="width:100%">
+            <el-option label="显示" value="展示" />
+            <el-option label="隐藏" value="隐藏" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="排序">
+          <el-input-number v-model="teamDlg.sort" :min="0" :max="999" style="width:100%" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="teamDlg.visible=false">取消</el-button>
-        <el-button type="primary" :loading="teamDlg.busy" @click="saveTeam">保存</el-button>
+        <el-button type="primary" :loading="teamDlg.busy" @click="saveTeam">确定</el-button>
       </template>
-    </el-dialog>
-
-    <el-dialog title="一键清空团队空间（高危）" v-model="resetDlg.visible" width="540px">
-      <el-alert type="error" :closable="false" show-icon title="此操作将物理删除该团队全部项目/表单/附件等业务数据，且不可恢复！"
-        description="保留：团队本身、成员关系、全局字典模板、系统日志。" style="margin-bottom:12px" />
-      <p style="margin:0 0 6px">目标团队：<b>{{ resetDlg.team && resetDlg.team.name }}</b></p>
-      <el-form label-width="80px">
-        <el-form-item label="清空原因" required>
-          <el-input v-model="resetDlg.reason" type="textarea" :rows="3" placeholder="请填写清空原因（必填，记入审计日志）" />
-        </el-form-item>
-        <el-form-item label="二次确认">
-          <el-input v-model="resetConfirm" placeholder="请输入「确认清空」以二次确认" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="resetDlg.visible=false">取消</el-button>
-        <el-button type="danger" :loading="resetDlg.busy" @click="doReset">确认清空</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog :title="'成员与权限 — ' + memberDlg.teamName" v-model="memberDlg.visible" width="680px">
-      <div v-if="me.isParent && allAccounts.length" style="margin-bottom:10px">
-        <span style="color:#909399;font-size:12px;margin-right:6px">已有账号快速加入：</span>
-        <el-tag v-for="a in allAccounts.filter(a => !members.some(m => m.username === a.username))" :key="a.username"
-          style="cursor:pointer;margin-right:6px" @click="memberForm.username = a.username">{{ a.username }}（{{ a.name }}）＋</el-tag>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:flex-start">
-        <el-input v-model="memberForm.username" placeholder="输入已有账号名（回车添加）" clearable style="flex:1" @keyup.enter="addMember" />
-        <el-select v-model="memberForm.role" style="width:120px">
-          <el-option label="团队成员" value="团队成员" />
-          <el-option v-if="me.isParent" label="团队管理员" value="团队管理员" />
-        </el-select>
-        <el-button type="primary" :loading="memberDlg.busy" @click="addMember">添加</el-button>
-      </div>
-      <div style="margin-bottom:8px;color:#909399;font-size:12px">账号需先在「用户管理-登录账号列表」创建；在此将已有账号加入本团队并分配权限。</div>
-      <el-table :data="members" border size="small">
-        <el-table-column prop="name" label="姓名" width="100" />
-        <el-table-column prop="username" label="账号" width="140" />
-        <el-table-column label="角色" width="140">
-          <template #default="{ row }">
-            <el-select v-model="row.role" size="small" :disabled="!me.isParent && row.role === '团队管理员'" @change="updateMember(row)">
-              <el-option label="团队成员" value="团队成员" />
-              <el-option v-if="me.isParent" label="团队管理员" value="团队管理员" />
-            </el-select>
-          </template>
-        </el-table-column>
-        <el-table-column label="权限" min-width="210">
-          <template #default="{ row }">
-            <el-checkbox-group v-model="row.permissions" @change="updateMember(row)">
-              <el-checkbox v-for="p in PERMS" :key="p" :label="p" />
-            </el-checkbox-group>
-          </template>
-        </el-table-column>
-        <el-table-column prop="accountStatus" label="账号状态" width="90" />
-        <el-table-column label="操作" width="70" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="danger" size="small" :disabled="!me.isParent && row.role === '团队管理员'" @click="removeMember(row)">移除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer><el-button @click="memberDlg.visible=false">关闭</el-button></template>
     </el-dialog>
   </div>`
+};
+
+/* 作业人员与班组：独立二级页（初始化向导「班组与施工人员 → 去设置」跳转落地页）
+   与「用户管理 → 作业人员名单」标签共用同一个 WorkersPanel 组件 */
+const WorkersView = {
+  template: `<div class="wv-page"><WorkersPanel /></div>`
 };
 
 /* 登录账号列表（对齐原系统截图）：管理可登录系统的人员 */
@@ -2099,23 +2861,31 @@ const AccountsPanel = {
     const list = ref([]);
     const loading = ref(false);
     const showPwd = ref(false);
-    const dlg = reactive({ visible: false, mode: 'create', id: '', loginName: '', email: '', password: '', name: '', phone: '', userGroup: '普通用户', busy: false });
+    const GROUPS = ['超级用户', '资料员', '材料员', '班组长'];
+    const dlg = reactive({ visible: false, mode: 'create', id: '', loginName: '', email: '', password: '', name: '', phone: '', userGroup: '班组长', busy: false });
     const detail = reactive({ visible: false, row: null });
-    function openConfig() { window.dispatchEvent(new Event('nav-teamspace')); }
     async function load() {
       loading.value = true;
       try { list.value = await api.get('/api/users'); }
       catch (e) { EP.ElMessage.error(e.message); }
       finally { loading.value = false; }
     }
-    function openCreate() { Object.assign(dlg, { visible: true, mode: 'create', id: '', loginName: '', email: '', password: '', name: '', phone: '', userGroup: '普通用户', busy: false }); showPwd.value = false; }
-    function openEdit(row) { Object.assign(dlg, { visible: true, mode: 'edit', id: row.id, loginName: row.loginName || row.username, email: row.email || '', password: '', name: row.name || '', phone: row.phone || '', userGroup: row.userGroup || '普通用户', busy: false }); showPwd.value = false; }
+    function openCreate() { Object.assign(dlg, { visible: true, mode: 'create', id: '', loginName: '', email: '', password: '', name: '', phone: '', userGroup: '班组长', busy: false }); showPwd.value = false; }
+    function openEdit(row) { Object.assign(dlg, { visible: true, mode: 'edit', id: row.id, loginName: row.loginName || row.username, email: row.email || '', password: '', name: row.name || '', phone: row.phone || '', userGroup: row.userGroup || '班组长', busy: false }); showPwd.value = false; }
     function openDetail(row) { detail.row = row; detail.visible = true; }
     async function save() {
       if (!dlg.loginName.trim()) { EP.ElMessage.warning('请填写登录名'); return; }
       if (!dlg.email.trim()) { EP.ElMessage.warning('请填写邮箱'); return; }
       if (dlg.mode === 'create' && !dlg.password) { EP.ElMessage.warning('请填写密码'); return; }
-      if (dlg.password && (dlg.password.length < 8 || dlg.password.length > 32)) { EP.ElMessage.warning('密码需为 8-32 位'); return; }
+      if (dlg.password) {
+        if (dlg.password.length < 8 || dlg.password.length > 32) { EP.ElMessage.warning('密码需为 8-32 位'); return; }
+        let cls = 0;
+        if (/[a-z]/.test(dlg.password)) cls++;
+        if (/[A-Z]/.test(dlg.password)) cls++;
+        if (/\d/.test(dlg.password)) cls++;
+        if (/[^A-Za-z0-9]/.test(dlg.password)) cls++;
+        if (cls < 3) { EP.ElMessage.warning('密码需包含大写/小写/数字/符号中的至少三类'); return; }
+      }
       dlg.busy = true;
       try {
         const body = { loginName: dlg.loginName.trim(), email: dlg.email.trim(), name: dlg.name.trim(), phone: dlg.phone.trim(), userGroup: dlg.userGroup };
@@ -2127,45 +2897,46 @@ const AccountsPanel = {
       finally { dlg.busy = false; }
     }
     async function remove(row) {
-      try { await EP.ElMessageBox.confirm('确定删除账号「' + (row.loginName || row.username) + '」？删除后该账号将从所有团队移除。', '删除账号', { type: 'warning' }); }
+      try { await EP.ElMessageBox.confirm('确定删除账号「' + (row.loginName || row.username) + '」？', '删除账号', { type: 'warning' }); }
       catch (e) { return; }
       try { await api.del('/api/users/' + row.id); EP.ElMessage.success('已删除'); load(); }
       catch (e) { EP.ElMessage.error(e.message); }
     }
+    function groupTag(g) { return g === '超级用户' ? 'danger' : (g === '资料员' ? 'success' : (g === '材料员' ? 'warning' : 'info')); }
     onMounted(load);
-    return { list, loading, showPwd, dlg, detail, openConfig, openCreate, openEdit, openDetail, save, remove };
+    return { list, loading, showPwd, dlg, detail, GROUPS, groupTag, openCreate, openEdit, openDetail, save, remove };
   },
   template: `
   <div>
     <el-alert type="info" :closable="false" show-icon style="margin-bottom:14px">
       <template #title><b>配置说明</b></template>
-      <div>登录账号列表用于管理本企业需要登录系统的人员。新建时需设置登录名、邮箱与密码，建议补充姓名、电话，并按职责选择用户组。</div>
-      <div style="margin-top:6px">仅为需要登录系统的人员创建账号，并按职责配置权限。
-        <el-button size="small" type="primary" plain style="margin-left:8px" @click="openConfig">配置</el-button>
-      </div>
+      <div>登录账号列表用于管理本企业需要登录系统的人员、登录资料和操作权限，与作业人员名单、外部通讯录分开维护。仅为需要使用系统的人员创建账号，无需为每名现场作业人员开通账号。</div>
+      <div style="margin-top:6px">新增时填写登录名、邮箱和密码，建议补充姓名、电话，并按职责选择用户组。账号的新增、编辑与删除仅超级用户可操作。</div>
     </el-alert>
-    <div style="margin-bottom:12px;text-align:right">
-      <el-button type="primary" @click="openCreate">+ 新增用户</el-button>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <span style="color:var(--text-2);font-size:13px">仅为需要登录系统的人员创建账号，并按职责分配权限</span>
+      <el-button v-if="canAdmin()" type="primary" @click="openCreate">新增用户</el-button>
     </div>
     <el-table :data="list" v-loading="loading" border stripe style="width:100%">
       <el-table-column prop="email" label="邮箱" min-width="220" />
+      <el-table-column label="姓名" min-width="120"><template #default="{ row }">{{ row.name || '-' }}</template></el-table-column>
       <el-table-column label="电话" width="150">
         <template #default="{ row }">{{ row.phone || '-' }}</template>
       </el-table-column>
       <el-table-column label="用户组" width="110">
-        <template #default="{ row }"><el-tag :type="row.userGroup === '超级用户' ? 'danger' : 'info'" size="small">{{ row.userGroup }}</el-tag></template>
+        <template #default="{ row }"><el-tag :type="groupTag(row.userGroup)" size="small">{{ row.userGroup }}</el-tag></template>
       </el-table-column>
-      <el-table-column label="操作" width="170" fixed="right">
+      <el-table-column label="操作" width="200" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
-          <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button v-if="!row.isSelf" link type="danger" size="small" @click="remove(row)">删除</el-button>
+          <el-button v-if="canAdmin()" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="canAdmin() && !row.isSelf" link type="danger" size="small" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
 
     <el-dialog :title="dlg.mode === 'create' ? '新增用户' : '编辑用户'" v-model="dlg.visible" width="480px">
-      <el-form label-width="72px">
+      <el-form label-position="top">
         <el-form-item label="登录名" required>
           <el-input v-model="dlg.loginName" placeholder="CloudBase 登录名" :disabled="dlg.mode === 'edit'" />
         </el-form-item>
@@ -2185,8 +2956,7 @@ const AccountsPanel = {
         </el-form-item>
         <el-form-item label="用户组" required>
           <el-select v-model="dlg.userGroup" style="width:100%">
-            <el-option label="普通用户" value="普通用户" />
-            <el-option label="超级用户" value="超级用户" />
+            <el-option v-for="g in GROUPS" :key="g" :label="g" :value="g" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -2203,10 +2973,7 @@ const AccountsPanel = {
         <el-descriptions-item label="姓名">{{ detail.row.name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="电话">{{ detail.row.phone || '-' }}</el-descriptions-item>
         <el-descriptions-item label="用户组">{{ detail.row.userGroup }}</el-descriptions-item>
-        <el-descriptions-item label="所属团队">
-          <span v-if="detail.row.teams && detail.row.teams.length">{{ detail.row.teams.map(t => t.teamName + '(' + t.role + ')').join('、') }}</span>
-          <span v-else style="color:#c0c4cc">未加入团队</span>
-        </el-descriptions-item>
+        <el-descriptions-item label="可写模块">{{ ['超级用户','资料员'].includes(detail.row.userGroup) ? '全部模块' : (detail.row.userGroup === '材料员' ? '材料台账' : (detail.row.userGroup === '班组长' ? '计划管理 · 当日计划工作量' : '只读')) }}</el-descriptions-item>
         <el-descriptions-item label="状态">{{ detail.row.status }}</el-descriptions-item>
       </el-descriptions>
       <template #footer><el-button @click="detail.visible=false">关闭</el-button></template>
@@ -2217,56 +2984,25 @@ const AccountsPanel = {
 /* 用户管理：登录账号列表 / 作业人员名单 / 外部通讯录 */
 const UsersView = {
   setup() {
-    const { ref } = Vue;
+    const { ref, onMounted } = Vue;
     const tab = ref('accounts');
-    return { tab, contactCfg };
+    // 支持从其它页面编程式跳转到指定标签页（如外部通讯录）
+    onMounted(() => {
+      if (window.__pendingUsersTab) { tab.value = window.__pendingUsersTab; window.__pendingUsersTab = ''; }
+    });
+    return { tab };
   },
   template: `
   <div>
     <el-tabs v-model="tab">
       <el-tab-pane label="登录账号列表" name="accounts"><AccountsPanel /></el-tab-pane>
-      <el-tab-pane label="作业人员名单" name="workers" lazy><WorkersPanel /></el-tab-pane>
-      <el-tab-pane label="外部通讯录" name="contacts" lazy><CrudView :config="contactCfg" :key="contactCfg.endpoint" /></el-tab-pane>
+      <el-tab-pane label="作业人员名单" name="workers" lazy><WorkersPanel variant="tab" /></el-tab-pane>
+      <el-tab-pane label="外部通讯录" name="contacts" lazy><ContactsPanel /></el-tab-pane>
     </el-tabs>
   </div>`
 };
 
 /* 项目/计划/借工/竣工资料 配置 */
-const projectCfg = {
-  endpoint: 'projects', title: '项目',
-  refs: {
-    annualPlan: { endpoint: 'annualPlans', label: 'name', value: 'name' },
-    substation: { endpoint: 'substations', label: 'name', value: 'name' }
-  },
-  columns: [
-    { key: 'name', label: '项目名称' }, { key: 'annualPlan', label: '年度计划', width: 150 }, { key: 'substation', label: '供电所', width: 110 },
-    { key: 'voltage', label: '电压等级', width: 90 }, { key: 'type', label: '类型', width: 110 },
-    { key: 'manager', label: '经理', width: 100 }, { key: 'status', label: '状态', tag: true, width: 100 },
-    { key: 'progress', label: '进度%', width: 90 }, { key: 'start', label: '开工', width: 120 }, { key: 'end', label: '竣工', width: 120 }
-  ],
-  formFields: [
-    { key: 'name', label: '项目名称（包）', required: true },
-    { key: 'annualPlan', label: '年度计划', type: 'select' },
-    { key: 'substation', label: '属地供电所', type: 'select' },
-    { key: 'voltage', label: '电压等级', type: 'select', options: [{ label: '10kV', value: '10kV' }, { label: '0.4kV', value: '0.4kV' }] },
-    { key: 'type', label: '类型' }, { key: 'manager', label: '经理' },
-    { key: 'status', label: '状态', type: 'select', options: [{ label: '未开工', value: '未开工' }, { label: '进行中', value: '进行中' }, { label: '已完工', value: '已完工' }] },
-    { key: 'progress', label: '进度%', type: 'number' }, { key: 'start', label: '开工日期' }, { key: 'end', label: '竣工日期' }
-  ]
-};
-const planCfg = {
-  endpoint: 'plans', title: '计划',
-  columns: [
-    { key: 'title', label: '计划名称' }, { key: 'owner', label: '负责人', width: 100 }, { key: 'startDate', label: '开始', width: 120 },
-    { key: 'dueDate', label: '截止', width: 120 }, { key: 'status', label: '状态', tag: true, width: 100 }, { key: 'progress', label: '进度%', width: 90 }
-  ],
-  formFields: [
-    { key: 'title', label: '计划名称', required: true }, { key: 'owner', label: '负责人' },
-    { key: 'startDate', label: '开始日期' }, { key: 'dueDate', label: '截止日期' },
-    { key: 'status', label: '状态', type: 'select', options: [{ label: '未开始', value: '未开始' }, { label: '进行中', value: '进行中' }, { label: '已完成', value: '已完成' }] },
-    { key: 'progress', label: '进度%', type: 'number' }
-  ]
-};
 const borrowCfg = {
   endpoint: 'borrowWorks', title: '借工',
   columns: [
@@ -2302,13 +3038,15 @@ const ProjectsView = {
     const users = ref([]);
     const materials = ref([]);
     const workPlans = ref([]);
+    const units = ref([]);   // 单位维护（分包/监理/抄送），分包单位下拉数据源
+    const unitsLoading = ref(true);
     const filters = reactive({ keyword: '', annualPlan: '', batch: '', substation: '', leader: '' });
     const page = ref(1);
     const pageSize = ref(50);
 
     const dialogVisible = ref(false);
     const editingId = ref(null);
-    const emptyForm = () => ({ annualPlan: '', batch: '', name: '', workType: '', specialty: '', provincialDept: '', substation: '', leader: '', startDate: '', endDate: '', subProjects: [], category: '', completed: false });
+    const emptyForm = () => ({ annualPlan: '', batch: '', name: '', subcontractor: '', contractNo: '', workType: '', specialty: '', provincialDept: '', substation: '', leader: '', startDate: '', endDate: '', subProjects: [], category: '', completed: false });
     const form = reactive(emptyForm());
 
     const workTypes = ['配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程', '借工'];
@@ -2317,15 +3055,19 @@ const ProjectsView = {
 
     async function load() {
       try {
-        const [p, a, ss, u, ms, wp] = await Promise.all([
+        const [p, a, ss, u, ms, wp, un] = await Promise.all([
           api.get('/api/projects'), api.get('/api/annualPlans'), api.get('/api/substations'), api.get('/api/users'),
-          api.get('/api/materials'), api.get('/api/workPlans')
+          api.get('/api/materials'), api.get('/api/workPlans'), api.get('/api/units')
         ]);
         projects.value = p; annualPlans.value = a; substations.value = ss; users.value = u;
         materials.value = Array.isArray(ms) ? ms : (ms.data || []);
         workPlans.value = Array.isArray(wp) ? wp : (wp.data || []);
+        units.value = Array.isArray(un) ? un : (un.data || []);
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { unitsLoading.value = false; }
     }
+    // 分包（己方）单位：来自全局设置「单位维护」中 type=分包单位 的字典
+    const subcontractorUnits = computed(() => units.value.filter(u => u.type === '分包单位').slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0)));
     // 项目关联的材料/计划：项目名 ∪ 子项目名（与材料台账、计划管理的关联项目口径一致）
     const projNames = computed(() => {
       const d = detail.value;
@@ -2341,11 +3083,19 @@ const ProjectsView = {
       return workPlans.value.filter(p => names.includes(p.project));
     });
     // 材料类型归类：电杆 / 线材 / 设备（用于核错汇总）
+    // 电杆：电杆 / 预应力 / 方杆
+    // 线材：按型号代码匹配 GJ、JL/G1A、JKLGYJ、YJLV、BLV、JKLYJ、YJV、BV（忽略大小写，兼容 JL / G1A 写法）
+    // 设备：变压器、JP柜、开关、熔断器、真空开关、一二次融合断路器（断路器已覆盖真空/一二次融合）
+    // 其余（铁附件 / 金具）暂计入设备桶，后续如需单列再加「铁附件」桶
+    const POLE_RE = /电杆|预应力|方杆/;
+    const CABLE_RE = /GJ|JL\s*\/\s*G1A|JKLGYJ|YJLV|BLV|JKLYJ|YJV|BV/i;
+    const DEVICE_RE = /变压器|JP\s*柜|开关|熔断器|断路器/;
     function matType(desc) {
       const s = String(desc || '');
-      if (s.includes('电杆')) return 'pole';
-      if (s.includes('导线') || s.includes('电缆') || s.includes('线') || s.includes('绞线')) return 'cable';
-      return 'device';
+      if (POLE_RE.test(s)) return 'pole';
+      if (CABLE_RE.test(s)) return 'cable';
+      if (DEVICE_RE.test(s)) return 'device';
+      return 'device'; // 铁附件 / 金具等未匹配项（后续可单独建桶）
     }
     // 按桶汇总：电杆 / 线材 / 设备（设备含变压器、隔离开关、一二次融合断路器等）
     const ledger = computed(() => {
@@ -2373,8 +3123,15 @@ const ProjectsView = {
       window.dispatchEvent(new CustomEvent('materials-filter-project', { detail: { project: detail.value.name } }));
       window.dispatchEvent(new CustomEvent('nav-materials'));
     }
+    // 查看月计划/周计划：精准跳转到「计划管理」对应页签，并只保留本项目（含子项目）的计划
+    // 计划管理为懒挂载组件，事件会先于其监听器注册触发，故先把跳转意图全局暂存、由目标页 setup 时消费
     function enterPlans(kind) {
-      window.dispatchEvent(new CustomEvent('plans-filter-project', { detail: { project: detail.value.name } }));
+      const d = detail.value || {};
+      window.__pendingPlansNav = {
+        tab: kind === 'month' ? 'month' : 'week',
+        label: d.name || '',
+        names: projNames.value.slice()
+      };
       window.dispatchEvent(new CustomEvent('nav-plans'));
     }
     function fmtQty(n) { const v = Number(n) || 0; return String(Math.round(v * 10000) / 10000); }
@@ -2405,7 +3162,7 @@ const ProjectsView = {
 
     // 局计划进度：深蓝=电杆、浅蓝=线材、灰=设备；完成 100% 隐藏，<1% 显示 <1%，超额显示超出比例
     function progressChips(row) {
-      const conf = [['pole', '电杆', '#3370ff'], ['cable', '线材', '#7aa7ff'], ['device', '设备', '#c3c9d4']];
+      const conf = [['pole', '电杆', '#3370ff'], ['cable', '线材', '#7aa7ff'], ['device', '设备', 'var(--line-strong)']];
       const out = [];
       conf.forEach(([k, label, color]) => {
         const p = (row.progress && row.progress[k]) || {};
@@ -2436,10 +3193,9 @@ const ProjectsView = {
       if (!form.annualPlan) return ElementPlus.ElMessage.error('请选择年度计划名称');
       if (!form.name) return ElementPlus.ElMessage.error('请输入项目名称（包）');
       if (!form.substation) return ElementPlus.ElMessage.error('请选择属地供电所');
-      if (!form.leader) return ElementPlus.ElMessage.error('请选择班组长');
       for (let i = 0; i < form.subProjects.length; i++) {
         const s = form.subProjects[i];
-        if (!s.name || !s.substation || !s.leader) return ElementPlus.ElMessage.error('子项目 ' + (i + 1) + '：名称、属地供电所、班组长均为必填');
+        if (!s.name || !s.substation) return ElementPlus.ElMessage.error('子项目 ' + (i + 1) + '：名称、属地供电所均为必填');
       }
       try {
         const body = JSON.parse(JSON.stringify(form));
@@ -2470,7 +3226,21 @@ const ProjectsView = {
         await api.del('/api/projects/' + detail.value.id);
         ElementPlus.ElMessage.success('已删除');
         backToList();
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) {
+        // 依赖引用校验未通过：列出被哪些业务数据引用，避免用户反复试
+        const refs = e && e.data && e.data.refs;
+        if (Array.isArray(refs) && refs.length) {
+          const html = '<div style="line-height:1.8">该项目已被以下业务数据引用，请先到对应模块清理后再删除：</div>'
+            + '<div style="margin-top:10px;line-height:2">'
+            + refs.map(r => '· ' + r.label + '：<b>' + r.count + '</b> 条').join('<br>')
+            + '</div>';
+          ElementPlus.ElMessageBox.alert(html, '该项目已被其他数据引用，无法删除', {
+            dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning'
+          });
+        } else {
+          ElementPlus.ElMessage.error(e.message || '删除失败');
+        }
+      }
     }
 
     // ---- 详情页资料管理：设计图纸/奥维地图/现场照片/规范图纸 ----
@@ -2506,20 +3276,6 @@ const ProjectsView = {
         } catch (e) { ElementPlus.ElMessage.error(e.message); }
       }
     }
-    function downloadProjFile(f) {
-      fetch('/api/projects/' + detail.value.id + '/files/' + f.id + '/download', {
-        headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }
-      })
-        .then(r => { if (!r.ok) throw new Error('下载失败'); return r.blob(); })
-        .then(blob => {
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = f.name;
-          document.body.appendChild(a); a.click(); a.remove();
-          setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-        })
-        .catch(e => ElementPlus.ElMessage.error(e.message));
-    }
     async function delProjFile(f) {
       try { await ElementPlus.ElMessageBox.confirm('确认删除「' + f.name + '」？', '删除', { type: 'warning' }); } catch { return; }
       try {
@@ -2549,12 +3305,10 @@ const ProjectsView = {
       const p = n => String(n).padStart(2, '0');
       return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
     }
-    function todoTip(name) { ElementPlus.ElMessage.info(name + '功能待「计划管理」等后续模块完成后开放'); }
-
     // ---- 详情页材料台账汇总（材料台账/周计划模块完成前，按项目进度推导的占位数据） ----
     const LEDGER_CONF = [['pole', '电杆', '根'], ['cable', '线材', '千米'], ['device', '设备', '台']];
     // 桶配色（与项目列表局计划进度色一致：深蓝=电杆、浅蓝=线材、灰=设备）
-    function bucketColor(key) { return { pole: '#3370ff', cable: '#7aa7ff', device: '#86909c' }[key] || '#86909c'; }
+    function bucketColor(key) { return { pole: '#3370ff', cable: '#7aa7ff', device: 'var(--text-3)' }[key] || 'var(--text-3)'; }
     // 材料状态 → 标签类型（扁平 plain 样式）
     function statusTagType(s) {
       if (s === '全部到库') return 'success';
@@ -2570,9 +3324,10 @@ const ProjectsView = {
       activeTab, projects, annualPlans, substations, users, filters, page, pageSize,
       batchOptions, filteredList, pagedList, switchTab, resetFilters, progressChips,
       dialogVisible, editingId, form, workTypes, specialties, provincialDepts,
+      units, unitsLoading, subcontractorUnits,
       openAdd, openEdit, addSub, removeSub, submit,
       detail, showDetail, backToList, completeProject, removeProject,
-      projFileInput, projFiles, triggerProjUpload, onProjUpload, downloadProjFile, delProjFile, packProjDownload, fmtDT, todoTip,
+      projFileInput, projFiles, triggerProjUpload, onProjUpload, delProjFile, packProjDownload, fmtDT,
       projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, bucketColor, statusTagType
     };
   },
@@ -2580,20 +3335,19 @@ const ProjectsView = {
   <div>
    <template v-if="!detail">
     <!-- 顶部页签 -->
-    <div style="display:flex;gap:10px;margin-bottom:16px">
-      <div v-for="t in ['自有工程','客户工程','已竣工']" :key="t" @click="switchTab(t)"
-        :style="{padding:'7px 18px',borderRadius:'6px',cursor:'pointer',fontSize:'14px',
-          border: activeTab===t ? '1px solid #3370ff' : '1px solid #e4e7ed',
-          background: activeTab===t ? '#3370ff' : '#f5f7fa',
-          color: activeTab===t ? '#fff' : '#606266'}">{{ t }}</div>
+    <div class="proj-bar">
+      <div class="seg">
+        <div v-for="t in ['自有工程','客户工程','已竣工']" :key="t" @click="switchTab(t)"
+          class="seg-item" :class="{ on: activeTab===t }">{{ t }}</div>
+      </div>
+      <div class="bar-spacer"></div>
+      <el-button v-if="activeTab!=='已竣工' && canWrite('projects')" type="primary" @click="openAdd">新增项目</el-button>
     </div>
 
-    <el-button v-if="activeTab!=='已竣工'" type="primary" @click="openAdd">新增项目</el-button>
-
     <!-- 筛选 -->
-    <div style="background:#fff;border-radius:4px;padding:14px 16px;margin:14px 0 4px">
+    <div class="panel" style="padding:14px 16px;margin:14px 0 12px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <span style="font-size:14px;color:#303133">筛选：</span>
+        <span style="font-size:14px;color:var(--text-1)">筛选：</span>
         <el-input v-model="filters.keyword" placeholder="项目名称（包）/子项目..." clearable style="width:200px" @input="page=1" />
         <el-select v-model="filters.annualPlan" placeholder="年度计划" clearable style="width:170px" @change="page=1">
           <el-option v-for="a in annualPlans" :key="a.id" :label="a.name" :value="a.name" />
@@ -2609,7 +3363,7 @@ const ProjectsView = {
         </el-select>
         <el-button @click="resetFilters">重置</el-button>
       </div>
-      <div style="color:#999;font-size:12px;margin-top:10px">过滤分组排序：电杆、线材、设备；深蓝=电杆，浅蓝=线材，灰=设备（括内显示数量，完成 100% 时隐藏，超额时显示超出比例）</div>
+      <div style="color:var(--text-3);font-size:12px;margin-top:10px">过滤分组排序：电杆、线材、设备；深蓝=电杆，浅蓝=线材，灰=设备（括内显示数量，完成 100% 时隐藏，超额时显示超出比例）</div>
     </div>
 
     <!-- 列表 -->
@@ -2636,7 +3390,7 @@ const ProjectsView = {
       </el-table-column>
     </el-table>
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:14px">
-      <span style="color:#666;font-size:13px">共 {{ filteredList.length }} 条</span>
+      <span style="color:var(--text-2);font-size:13px">共 {{ filteredList.length }} 条</span>
       <el-pagination background layout="prev, pager, next" :total="filteredList.length" :page-size="pageSize" :current-page="page" @current-change="p=>page=p" />
       <el-select :model-value="pageSize" size="small" style="width:104px" @change="n=>{pageSize=n;page=1}">
         <el-option v-for="n in [20,50,100]" :key="n" :label="n + ' 条/页'" :value="n" />
@@ -2654,7 +3408,7 @@ const ProjectsView = {
       <template #header>
         <div style="display:flex;justify-content:space-between;align-items:center">
           <span style="font-weight:600">项目信息</span>
-          <div style="display:flex;align-items:center;gap:4px">
+          <div v-if="canWrite('projects')" style="display:flex;align-items:center;gap:4px">
             <el-button type="primary" size="small" @click="completeProject">竣工</el-button>
             <el-button size="small" @click="openEdit(detail)">编辑</el-button>
             <el-button link type="danger" size="small" @click="removeProject" style="margin-left:8px">删除项目</el-button>
@@ -2678,9 +3432,9 @@ const ProjectsView = {
         ['预期竣工日期', detail.endDate || '-'],
         ['创建时间', fmtDT(detail.createdAt)],
         ['周计划进度', '-']
-      ]" :key="r[0]" style="display:flex;border-bottom:1px solid #ebeef5;font-size:14px;line-height:22px">
-        <div style="width:280px;flex-shrink:0;background:#fafafa;padding:10px 16px;color:#606266">{{ r[0] }}</div>
-        <div style="flex:1;padding:10px 16px;color:#303133">{{ r[1] }}</div>
+      ]" :key="r[0]" style="display:flex;border-bottom:1px solid var(--line);font-size:14px;line-height:22px">
+        <div style="width:280px;flex-shrink:0;background:var(--surface-2);padding:10px 16px;color:var(--text-2)">{{ r[0] }}</div>
+        <div style="flex:1;padding:10px 16px;color:var(--text-1)">{{ r[1] }}</div>
       </div>
     </el-card>
 
@@ -2691,63 +3445,63 @@ const ProjectsView = {
         <div>
           <div style="font-weight:600;font-size:14px;margin-bottom:14px">图纸</div>
           <div style="margin-bottom:20px">
-            <div style="font-size:14px;color:#303133;margin-bottom:8px">设计图纸</div>
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:8px">设计图纸</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-              <el-button type="primary" size="small" @click="triggerProjUpload('design')">上传设计图纸</el-button>
+              <el-button v-if="canWrite('projects')" type="primary" size="small" @click="triggerProjUpload('design')">上传设计图纸</el-button>
               <el-button size="small" :disabled="!projFiles('design').length" @click="packProjDownload('design')">打包下载（{{ projFiles('design').length }}）</el-button>
-              <span style="color:#999;font-size:12px">可多选，单文件不超过 2MB</span>
+              <span style="color:var(--text-3);font-size:12px">可多选，单文件不超过 2MB</span>
             </div>
-            <div v-for="f in projFiles('design')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed #ebeef5">
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#303133">{{ f.name }}</span>
-              <el-button link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
-              <span style="color:#999;font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
+            <div v-for="f in projFiles('design')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed var(--line)">
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1)">{{ f.name }}</span>
+              <el-button v-if="canWrite('projects')" link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
+              <span style="color:var(--text-3);font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
             </div>
-            <div v-if="!projFiles('design').length" style="color:#999;font-size:12px;padding:8px 0">暂无设计图纸，可点击上传</div>
+            <div v-if="!projFiles('design').length" style="color:var(--text-3);font-size:12px;padding:8px 0">暂无设计图纸，可点击上传</div>
           </div>
           <div>
-            <div style="font-size:14px;color:#303133;margin-bottom:8px">奥维地图</div>
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:8px">奥维地图</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-              <el-button type="primary" size="small" @click="triggerProjUpload('map')">上传奥维地图</el-button>
+              <el-button v-if="canWrite('projects')" type="primary" size="small" @click="triggerProjUpload('map')">上传奥维地图</el-button>
               <el-button size="small" :disabled="!projFiles('map').length" @click="packProjDownload('map')">打包下载（{{ projFiles('map').length }}）</el-button>
-              <span style="color:#999;font-size:12px">单文件不超过 2MB</span>
+              <span style="color:var(--text-3);font-size:12px">单文件不超过 2MB</span>
             </div>
-            <div v-for="f in projFiles('map')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed #ebeef5">
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#303133">{{ f.name }}</span>
-              <el-button link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
-              <span style="color:#999;font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
+            <div v-for="f in projFiles('map')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed var(--line)">
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1)">{{ f.name }}</span>
+              <el-button v-if="canWrite('projects')" link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
+              <span style="color:var(--text-3);font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
             </div>
-            <div v-if="!projFiles('map').length" style="color:#999;font-size:12px;padding:8px 0">暂无奥维地图，可点击上传</div>
+            <div v-if="!projFiles('map').length" style="color:var(--text-3);font-size:12px;padding:8px 0">暂无奥维地图，可点击上传</div>
           </div>
         </div>
         <div>
           <div style="font-weight:600;font-size:14px;margin-bottom:14px">现场资料</div>
           <div style="margin-bottom:20px">
-            <div style="font-size:14px;color:#303133;margin-bottom:8px">现场照片</div>
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:8px">现场照片</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-              <el-button type="primary" size="small" @click="triggerProjUpload('photo')">上传现场照片</el-button>
+              <el-button v-if="canWrite('projects')" type="primary" size="small" @click="triggerProjUpload('photo')">上传现场照片</el-button>
               <el-button size="small" :disabled="!projFiles('photo').length" @click="packProjDownload('photo')">打包下载（{{ projFiles('photo').length }}）</el-button>
-              <span style="color:#999;font-size:12px">可多选，单张不超过 10MB</span>
+              <span style="color:var(--text-3);font-size:12px">可多选，单张不超过 10MB</span>
             </div>
-            <div v-for="f in projFiles('photo')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed #ebeef5">
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#303133">{{ f.name }}</span>
-              <el-button link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
-              <span style="color:#999;font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
+            <div v-for="f in projFiles('photo')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed var(--line)">
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1)">{{ f.name }}</span>
+              <el-button v-if="canWrite('projects')" link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
+              <span style="color:var(--text-3);font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
             </div>
-            <div v-if="!projFiles('photo').length" style="color:#999;font-size:12px;padding:8px 0">暂无现场照片，可点击上传</div>
+            <div v-if="!projFiles('photo').length" style="color:var(--text-3);font-size:12px;padding:8px 0">暂无现场照片，可点击上传</div>
           </div>
           <div>
-            <div style="font-size:14px;color:#303133;margin-bottom:8px">规范图纸</div>
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:8px">规范图纸</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-              <el-button type="primary" size="small" @click="triggerProjUpload('spec')">上传规范图纸</el-button>
+              <el-button v-if="canWrite('projects')" type="primary" size="small" @click="triggerProjUpload('spec')">上传规范图纸</el-button>
               <el-button size="small" :disabled="!projFiles('spec').length" @click="packProjDownload('spec')">打包下载（{{ projFiles('spec').length }}）</el-button>
-              <span style="color:#999;font-size:12px">可多选，单文件不超过 3MB</span>
+              <span style="color:var(--text-3);font-size:12px">可多选，单文件不超过 3MB</span>
             </div>
-            <div v-for="f in projFiles('spec')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed #ebeef5">
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#303133">{{ f.name }}</span>
-              <el-button link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
-              <span style="color:#999;font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
+            <div v-for="f in projFiles('spec')" :key="f.id" style="display:flex;align-items:center;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px dashed var(--line)">
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1)">{{ f.name }}</span>
+              <el-button v-if="canWrite('projects')" link type="danger" size="small" @click="delProjFile(f)">删除</el-button>
+              <span style="color:var(--text-3);font-size:12px;flex-shrink:0">{{ fmtDT(f.uploadedAt) }}</span>
             </div>
-            <div v-if="!projFiles('spec').length" style="color:#999;font-size:12px;padding:8px 0">暂无规范图纸，可点击上传</div>
+            <div v-if="!projFiles('spec').length" style="color:var(--text-3);font-size:12px;padding:8px 0">暂无规范图纸，可点击上传</div>
           </div>
         </div>
       </div>
@@ -2774,7 +3528,7 @@ const ProjectsView = {
           <el-table-column prop="endDate" label="结束" width="120" />
           <el-table-column prop="status" label="状态" width="90" />
         </el-table>
-        <div v-else style="color:#999;font-size:13px">暂无与本项目关联的月计划，可在「计划管理」-「月计划管理」中新增计划并关联本项目。</div>
+        <div v-else style="color:var(--text-3);font-size:13px">暂无与本项目关联的月计划，可在「计划管理」-「月计划管理」中新增计划并关联本项目。</div>
       </div>
       <div>
         <div style="font-weight:600;font-size:14px;margin-bottom:8px">周计划（{{ projPlans.filter(p => p.planType === '周计划').length }}）</div>
@@ -2786,7 +3540,7 @@ const ProjectsView = {
           <el-table-column prop="endDate" label="结束" width="120" />
           <el-table-column prop="status" label="状态" width="90" />
         </el-table>
-        <div v-else style="color:#999;font-size:13px">暂无与本项目关联的周计划，可在「计划管理」-「周计划管理」中新增计划并关联本项目。</div>
+        <div v-else style="color:var(--text-3);font-size:13px">暂无与本项目关联的周计划，可在「计划管理」-「周计划管理」中新增计划并关联本项目。</div>
       </div>
     </el-card>
 
@@ -2799,39 +3553,39 @@ const ProjectsView = {
         </div>
       </template>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px">
-        <div style="border:1px solid #e7e9ec;border-radius:4px;padding:12px 16px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:4px;padding:12px 16px;background:var(--surface)">
           <div style="font-size:20px;font-weight:700;color:#3370ff;line-height:26px">{{ ledger.count }}</div>
-          <div style="color:#86909c;font-size:12px;margin-top:2px">材料行</div>
+          <div style="color:var(--text-3);font-size:12px;margin-top:2px">材料行</div>
         </div>
-        <div style="border:1px solid #e7e9ec;border-radius:4px;padding:12px 16px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:4px;padding:12px 16px;background:var(--surface)">
           <div style="display:flex;gap:18px">
-            <div style="white-space:nowrap"><div style="font-size:17px;font-weight:700;color:#3370ff;line-height:24px">{{ fmtQty(ledger.required) }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">应到</div></div>
-            <div style="white-space:nowrap"><div style="font-size:17px;font-weight:700;color:#389e0d;line-height:24px">{{ fmtQty(ledger.arrived) }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">已到</div></div>
-            <div style="white-space:nowrap"><div style="font-size:17px;font-weight:700;color:#f56c6c;line-height:24px">{{ fmtQty(ledger.notArrived) }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">未到</div></div>
+            <div style="white-space:nowrap"><div style="font-size:17px;font-weight:700;color:#3370ff;line-height:24px">{{ fmtQty(ledger.required) }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">应到</div></div>
+            <div style="white-space:nowrap"><div style="font-size:17px;font-weight:700;color:#389e0d;line-height:24px">{{ fmtQty(ledger.arrived) }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">已到</div></div>
+            <div style="white-space:nowrap"><div style="font-size:17px;font-weight:700;color:#f56c6c;line-height:24px">{{ fmtQty(ledger.notArrived) }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">未到</div></div>
           </div>
         </div>
-        <div style="border:1px solid #e7e9ec;border-radius:4px;padding:12px 16px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:4px;padding:12px 16px;background:var(--surface)">
           <div style="display:flex;gap:18px">
-            <div><div style="font-size:20px;font-weight:700;color:#389e0d;line-height:26px">{{ ledger.allCount }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">全部到库</div></div>
-            <div><div style="font-size:20px;font-weight:700;color:#e6932c;line-height:26px">{{ ledger.partCount }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">部分到库</div></div>
+            <div><div style="font-size:20px;font-weight:700;color:#389e0d;line-height:26px">{{ ledger.allCount }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">全部到库</div></div>
+            <div><div style="font-size:20px;font-weight:700;color:#e6932c;line-height:26px">{{ ledger.partCount }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">部分到库</div></div>
           </div>
         </div>
-        <div style="border:1px solid #e7e9ec;border-radius:4px;padding:12px 16px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:4px;padding:12px 16px;background:var(--surface)">
           <div style="display:flex;gap:18px">
-            <div><div style="font-size:20px;font-weight:700;color:#f56c6c;line-height:26px">{{ ledger.notArrived }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">未到</div></div>
-            <div><div style="font-size:20px;font-weight:700;color:#e6a23c;line-height:26px">{{ ledger.abnormal }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">异常</div></div>
-            <div><div style="font-size:20px;font-weight:700;color:#909399;line-height:26px">{{ ledger.invalid }}</div><div style="color:#86909c;font-size:12px;margin-top:2px">无效</div></div>
+            <div><div style="font-size:20px;font-weight:700;color:#f56c6c;line-height:26px">{{ ledger.notArrived }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">未到</div></div>
+            <div><div style="font-size:20px;font-weight:700;color:#e6a23c;line-height:26px">{{ ledger.abnormal }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">异常</div></div>
+            <div><div style="font-size:20px;font-weight:700;color:var(--text-3);line-height:26px">{{ ledger.invalid }}</div><div style="color:var(--text-3);font-size:12px;margin-top:2px">无效</div></div>
           </div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
         <span style="font-weight:600;font-size:14px">按桶汇总</span>
-        <span style="color:#86909c;font-size:12px">台账应到 / 已报计划量 / 需补计划量</span>
+        <span style="color:var(--text-3);font-size:12px">台账应到 / 已报计划量 / 需补计划量</span>
       </div>
       <el-table :data="ledger.rows" border size="small">
         <el-table-column type="expand">
           <template #default="{row}">
-            <div style="padding:8px 16px 12px;background:#fafbfc">
+            <div style="padding:8px 16px 12px;background:var(--surface-2)">
               <el-table :data="row.items" size="small" border>
                 <el-table-column prop="description" label="物料描述" min-width="240" show-overflow-tooltip />
                 <el-table-column label="应到" width="120" align="right"><template #default="{row}">{{ fmtQty(row.qtyRequired) }}</template></el-table-column>
@@ -2841,7 +3595,7 @@ const ProjectsView = {
                 <el-table-column label="状态" width="110" align="center">
                   <template #default="{row}"><el-tag size="small" effect="plain" :type="statusTagType(row.status)">{{ row.status }}</el-tag></template>
                 </el-table-column>
-                <template #empty><span style="color:#909399;font-size:12px">该类暂无材料</span></template>
+                <template #empty><span style="color:var(--text-3);font-size:12px">该类暂无材料</span></template>
               </el-table>
             </div>
           </template>
@@ -2859,15 +3613,15 @@ const ProjectsView = {
           <template #default="{row}">
             <div style="display:flex;align-items:center;gap:10px;padding:3px 0">
               <span style="font-size:13px;min-width:56px;text-align:right;white-space:nowrap">{{ fmtQty(row.planned) }}</span>
-              <div style="flex:1;height:6px;background:#f0f2f5;border-radius:3px;overflow:hidden">
+              <div style="flex:1;height:6px;background:var(--surface-3);border-radius:3px;overflow:hidden">
                 <div :style="{ width: row.pct + '%', background: row.pct >= 100 ? '#389e0d' : '#3370ff', height: '100%', transition: 'width .3s' }"></div>
               </div>
-              <span :style="{fontSize:'12px',flexShrink:0,color: row.pct >= 100 ? '#389e0d' : '#606266',whiteSpace:'nowrap'}">已报 {{ row.pct }}%</span>
+              <span :style="{fontSize:'12px',flexShrink:0,color: row.pct >= 100 ? '#389e0d' : 'var(--text-2)',whiteSpace:'nowrap'}">已报 {{ row.pct }}%</span>
             </div>
           </template>
         </el-table-column>
         <el-table-column label="需补计划量" width="140" align="right">
-          <template #default="{row}"><span :style="{fontWeight:600,color: row.need > 0 ? '#f56c6c' : '#c9cdd4'}">{{ fmtQty(row.need) }}</span></template>
+          <template #default="{row}"><span :style="{fontWeight:600,color: row.need > 0 ? '#f56c6c' : 'var(--line-strong)'}">{{ fmtQty(row.need) }}</span></template>
         </el-table-column>
       </el-table>
     </el-card>
@@ -2879,72 +3633,86 @@ const ProjectsView = {
     <el-dialog :title="editingId ? '编辑项目' : '新增项目'" v-model="dialogVisible" width="720px" top="4vh">
       <div style="max-height:68vh;overflow:auto;padding-right:8px">
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>年度计划名称</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>年度计划名称</div>
           <el-select v-model="form.annualPlan" placeholder="请选择" style="width:100%">
             <el-option v-for="a in annualPlans" :key="a.id" :label="a.name" :value="a.name" />
           </el-select>
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">批次</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">批次</div>
           <el-input v-model="form.batch" placeholder="请输入（选填）" />
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>项目名称（包）</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>项目名称（包）</div>
           <el-input v-model="form.name" placeholder="请输入项目名称（包）" />
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">作业类型</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">分包单位</div>
+          <el-select v-model="form.subcontractor" placeholder="请从分包（己方）单位中选择" clearable filterable allow-create default-first-option style="width:100%"
+                     :loading="unitsLoading">
+            <el-option v-for="u in subcontractorUnits" :key="u.id" :label="u.name" :value="u.name" />
+          </el-select>
+          <div v-if="!unitsLoading && !subcontractorUnits.length" style="font-size:12px;color:var(--text-3);margin-top:4px">
+            暂无可选分包单位，请先到「全局设置 → 单位维护 → 分包单位」中添加
+          </div>
+        </div>
+        <div style="margin-bottom:16px">
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">合同编号</div>
+          <el-input v-model="form.contractNo" placeholder="请输入合同编号（选填）" clearable />
+        </div>
+        <div style="margin-bottom:16px">
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">作业类型</div>
           <el-select v-model="form.workType" placeholder="请选择" style="width:100%">
             <el-option v-for="t in workTypes" :key="t" :label="t" :value="t" />
           </el-select>
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">作业专业</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">作业专业</div>
           <el-select v-model="form.specialty" placeholder="请选择" style="width:100%">
             <el-option v-for="t in specialties" :key="t" :label="t" :value="t" />
           </el-select>
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">省专业管理部门</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">省专业管理部门</div>
           <el-select v-model="form.provincialDept" placeholder="请选择" style="width:100%">
             <el-option v-for="t in provincialDepts" :key="t" :label="t" :value="t" />
           </el-select>
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>属地供电所</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>属地供电所</div>
           <el-select v-model="form.substation" placeholder="请选择" style="width:100%">
             <el-option v-for="s in substations" :key="s.id" :label="s.name" :value="s.name" />
           </el-select>
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>班组长</div>
-          <el-select v-model="form.leader" placeholder="请选择（班组长用户组）" style="width:100%">
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">班组长（选填）</div>
+          <el-select v-model="form.leader" placeholder="请选择（班组长用户组，可留空）" clearable style="width:100%">
             <el-option v-for="u in users" :key="u.id" :label="u.name" :value="u.name" />
           </el-select>
         </div>
         <div style="margin-bottom:16px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">子项目（选填）</div>
-          <div v-for="(sp,si) in form.subProjects" :key="si" style="border:1px solid #e4e7ed;border-radius:4px;padding:14px 16px;margin-bottom:12px">
-            <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>子项目名称</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">子项目（选填）</div>
+          <div v-for="(sp,si) in form.subProjects" :key="si" style="border:1px solid var(--line);border-radius:4px;padding:14px 16px;margin-bottom:12px">
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>子项目名称</div>
             <el-input v-model="sp.name" placeholder="请输入子项目名称" style="margin-bottom:12px" />
-            <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>属地供电所</div>
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>属地供电所</div>
             <el-select v-model="sp.substation" placeholder="请选择" style="width:100%;margin-bottom:12px">
               <el-option v-for="s in substations" :key="s.id" :label="s.name" :value="s.name" />
             </el-select>
-            <div style="font-size:14px;color:#303133;margin-bottom:6px"><span style="color:#f56c6c;margin-right:2px">*</span>班组长</div>
-            <el-select v-model="sp.leader" placeholder="请选择（班组长用户组）" style="width:100%;margin-bottom:8px">
+            <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">班组长（选填）</div>
+            <el-select v-model="sp.leader" placeholder="请选择（班组长用户组，可留空）" clearable style="width:100%;margin-bottom:8px">
               <el-option v-for="u in users" :key="u.id" :label="u.name" :value="u.name" />
             </el-select>
             <el-button link type="danger" @click="removeSub(si)">删除</el-button>
           </div>
-          <div style="border:1px dashed #dcdfe6;border-radius:4px;text-align:center;padding:12px;cursor:pointer;color:#606266;font-size:14px" @click="addSub">+ 添加子项目</div>
+          <div style="border:1px dashed var(--line-strong);border-radius:4px;text-align:center;padding:12px;cursor:pointer;color:var(--text-2);font-size:14px" @click="addSub">+ 添加子项目</div>
         </div>
         <div style="margin-bottom:8px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">开工日期</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">开工日期</div>
           <el-date-picker v-model="form.startDate" type="date" placeholder="请选择日期" value-format="YYYY-MM-DD" style="width:100%" />
         </div>
         <div style="margin-bottom:8px">
-          <div style="font-size:14px;color:#303133;margin-bottom:6px">预期竣工日期</div>
+          <div style="font-size:14px;color:var(--text-1);margin-bottom:6px">预期竣工日期</div>
           <el-date-picker v-model="form.endDate" type="date" placeholder="请选择日期" value-format="YYYY-MM-DD" style="width:100%" />
         </div>
       </div>
@@ -2957,14 +3725,33 @@ const ProjectsView = {
 };
 
 /* ---------------- 根组件：登录 + 布局 + 路由 ---------------- */
+// 侧栏菜单图标（内联 SVG，随文字颜色变化，暗色模式无需另配图）
+const _ico = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const MENU_ICONS = {
+  home: _ico('<path d="M4 10.6 12 4l8 6.6V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"/>'),
+  projects: _ico('<path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  materials: _ico('<path d="M20.5 8 12 3.5 3.5 8v8L12 20.5 20.5 16z"/><path d="M3.5 8 12 12.5 20.5 8M12 12.5v8"/>'),
+  plans: _ico('<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M8 3v4M16 3v4M3.5 10h17"/>'),
+  borrow: _ico('<path d="M4 8h13l-3-3M20 16H7l3 3"/>'),
+  completion: _ico('<path d="M14 3.5H7A2 2 0 0 0 5 5.5v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-9z"/><path d="M14 3.5v5h5"/><path d="m9 14.5 2 2 4-4.5"/>'),
+  documents: _ico('<path d="M6 3.5h8l4 4v13H6z"/><path d="M14 3.5v4h4M9 12h6M9 16h4.5"/>'),
+  settings: _ico('<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'),
+  users: _ico('<circle cx="12" cy="8" r="3.4"/><path d="M4.8 20a7.2 7.2 0 0 1 14.4 0"/>'),
+  workers: _ico('<circle cx="9" cy="8" r="3.2"/><path d="M2.8 19.5a6.2 6.2 0 0 1 12.4 0"/><path d="M16.5 5.6a3 3 0 0 1 0 5.6M17.6 19.5a6.4 6.4 0 0 0-1.6-4.2"/>'),
+  init: _ico('<path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7z"/><path d="M18.3 15.6l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/>')
+};
+
 const App = {
   setup() {
     const { onUnmounted } = Vue;
     const token = ref(localStorage.getItem('erp_token'));
-    const me = reactive({ name: '', role: '', isParent: false, isTeamAdmin: false, activeTeamId: '', parentViewingTeam: false, teams: [] });
+    const me = reactive({ name: '', role: '' });
     const viewVersion = ref(0);
     const tenant = ref('');
     const sysName = ref('电网生产ERP（本地版）');
+    // 首次使用初始化向导是否已完成
+    const initialized = ref(true);
+    const initMode = computed(() => !!token.value && !initialized.value);
     // 移动端（<768px）默认收起侧栏，避免抽屉一进来就压住内容
     const collapsed = ref(typeof window !== 'undefined' && window.innerWidth < 768);
     const route = ref('home');
@@ -2975,45 +3762,52 @@ const App = {
     const loginBg = ref('');
     const loginBrand = reactive({ systemName: '', companyName: '' });
 
+    // ===== 明暗主题：首屏由 index.html 内联脚本预先定好，这里只做切换与持久化 =====
+    const theme = ref(document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+    function applyTheme(next) {
+      theme.value = next;
+      document.documentElement.classList.toggle('dark', next === 'dark');
+      try { localStorage.setItem('erp_theme', next); } catch (e) {}
+    }
+    function toggleTheme() { applyTheme(theme.value === 'dark' ? 'light' : 'dark'); }
+    function menuIcon(key) { return MENU_ICONS[key] || MENU_ICONS.home; }
+
+    // 首次初始化未完成时仅以下页面可访问，其余点击一律转跳初始化向导
+    const INIT_ALLOWED = ['init', 'documents', 'settings', 'users', 'workers'];
     const allMenu = [
-      { key: 'home', label: '用户中心', comp: 'Dashboard' },
-      { key: 'projects', label: '项目列表', comp: 'ProjectsView' },
-      { key: 'materials', label: '材料台账', comp: 'MaterialsView' },
-      { key: 'plans', label: '计划管理', comp: 'PlansView' },
-      { key: 'borrow', label: '借工管理', comp: 'CrudView', cfg: borrowCfg },
-      { key: 'completion', label: '竣工资料（开发中）', comp: 'CrudView', cfg: completionCfg },
-      { key: 'documents', label: '文档中心', comp: 'DocumentsView' },
-      { key: 'settings', label: '全局设置', comp: 'SettingsView' },
-      { key: 'users', label: '用户管理', comp: 'UsersView' },
-      { key: 'teamspace', label: '团队管理', comp: 'TeamsPanel', adminOnly: true }
+      { key: 'home', label: '用户中心', sub: '数据概览与常用入口', comp: 'Dashboard' },
+      { key: 'projects', label: '项目列表', sub: '工程项目台账 · 进度与资料', comp: 'ProjectsView' },
+      { key: 'materials', label: '材料台账', sub: '材料明细 · 领料出库与库存', comp: 'MaterialsView' },
+      { key: 'plans', label: '计划管理', sub: '周计划 / 月计划 / 当日施工量', comp: 'PlansView' },
+      { key: 'borrow', label: '借工管理', sub: '借工登记与用工台账', comp: 'CrudView', cfg: borrowCfg },
+      { key: 'completion', label: '竣工资料（开发中）', sub: '竣工资料归档', comp: 'CrudView', cfg: completionCfg },
+      { key: 'documents', label: '文档中心', comp: 'DocumentsView', hideTitle: true },
+      { key: 'settings', label: '全局设置', sub: '系统参数 · 单位与字典维护', comp: 'SettingsView' },
+      { key: 'users', label: '用户管理', sub: '登录账号 · 作业人员 · 外部通讯录', comp: 'UsersView' },
+      { key: 'workers', label: '作业人员与班组', sub: '人员名单与班组', comp: 'WorkersView', hidden: true, hideTitle: true },
+      { key: 'init', label: '初始化设置', sub: '首次使用引导', comp: 'InitView', hidden: true }
     ];
-    // 「团队管理」仅母账号 / 团队管理员可见
-    const menu = computed(() => allMenu.filter(m => !m.adminOnly || me.isParent || me.isTeamAdmin));
-    const current = computed(() => menu.value.find(m => m.key === route.value) || menu.value[0]);
+    // init 为首次向导隐藏入口
+    const visibleMenu = computed(() => allMenu.filter(m => !m.hidden));
+    const current = computed(() => allMenu.find(m => m.key === route.value) || visibleMenu.value[0] || allMenu[0]);
 
     async function fetchMe() {
       try {
         const r = await api.get('/api/me');
         me.name = r.user.name; me.role = r.user.role;
-        me.isParent = !!r.user.isParent; me.isTeamAdmin = !!r.isTeamAdmin;
-        me.teams = r.teams || []; me.activeTeamId = r.activeTeamId || '';
-        me.parentViewingTeam = !!r.user.parentViewingTeam;
+        Auth.loaded = true;
+        Auth.isAdmin = !!r.user.isAdmin;
+        Auth.group = r.user.role;
+        Auth.writeModules = (r.user.permissions && r.user.permissions.writeModules) || [];
         // 顶栏企业名跟随「网站设置-企业名称」，未设置时回退租户名
         tenant.value = (r.settings && r.settings.companyName) || r.tenant.name;
         sysName.value = r.settings.systemName;
         document.title = r.settings.systemName || document.title;
-        // 若当前路由变为不可见（如非管理员停留在团队管理），回退用户中心
-        const cur = allMenu.find(m => m.key === route.value);
-        if (cur && cur.adminOnly && !(me.isParent || me.isTeamAdmin)) route.value = 'home';
+        // 首次使用初始化向导：未完成时进入「初始化设置」首屏
+        initialized.value = !!(r.settings && r.settings.initialized);
+        // 首次初始化未完成：若当前停留在非允许页面（含首页），强制转跳回初始化向导
+        if (!initialized.value && !INIT_ALLOWED.includes(route.value)) route.value = 'init';
       } catch (e) {}
-    }
-    // 切换当前团队（成员）/ 或母账号审计查看某团队；切换后重挂当前视图按新上下文重取数据
-    async function switchTeam(teamId) {
-      try {
-        await api.post('/api/active-team', { teamId: teamId || '' });
-        await fetchMe();
-        viewVersion.value++;
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     async function login() {
       loginLoading.value = true;
@@ -3025,15 +3819,29 @@ const App = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
       finally { loginLoading.value = false; }
     }
-    function logout() { localStorage.removeItem('erp_token'); token.value = ''; location.reload(); }
-    // 移动端点击菜单后自动收起抽屉
-    function go(key) { route.value = key; if (typeof window !== 'undefined' && window.innerWidth < 768) collapsed.value = true; }
+    function logout() { localStorage.removeItem('erp_token'); Auth.loaded = false; Auth.isAdmin = false; Auth.writeModules = []; token.value = ''; location.reload(); }
+    // 页面跳转：移动端自动收起抽屉；未完成初始化时，除「文档中心/全局设置/用户管理」外一律转跳回初始化向导
+    function go(key) {
+      if (initMode.value && !INIT_ALLOWED.includes(key)) {
+        route.value = 'init';
+        if (typeof window !== 'undefined' && window.innerWidth < 768) collapsed.value = true;
+        ElementPlus.ElMessage.info('请先完成系统初始化设置');
+        return;
+      }
+      route.value = key;
+      if (typeof window !== 'undefined' && window.innerWidth < 768) collapsed.value = true;
+    }
+
+    // 安全网：任何非经 go() 直接修改 route 的路径，未初始化时若落在受限页面，强制转跳
+    watch(route, (v) => { if (initMode.value && !INIT_ALLOWED.includes(v)) route.value = 'init'; });
+    // 初始化完成：放行业务页面并进入用户中心（不依赖 fetchMe 异步时序）
+    function onInitDone() { initialized.value = true; route.value = 'home'; }
 
     onMounted(() => {
       if (token.value) fetchMe();
       // 登录页公开配置（无需登录）：背景图 + 系统名 / 企业名
       api.get('/api/public-config').then(c => {
-        const bg = c.loginBg || '/login-bg/ink-color.jpg';
+        const bg = c.loginBg || '/login-bg/valley.jpg';
         loginBg.value = bg;
         // 回退设置：仅当服务端未注入（值为 none）时才覆盖，避免覆盖正确的直出值造成闪跳
         const cur = getComputedStyle(document.documentElement).getPropertyValue('--login-bg').trim();
@@ -3042,22 +3850,25 @@ const App = {
         loginBrand.companyName = c.companyName || '';
       }).catch(() => {});
       // 项目详情跳转：进入材料台账 / 计划管理（跨模块导航）
-      function navMaterials() { route.value = 'materials'; }
-      function navPlans() { route.value = 'plans'; }
-      function navTeamspace() { route.value = 'teamspace'; }
+      // 跨模块跳转同样受初始化守卫约束：未初始化时业务页面一律转跳初始化向导
+      function navMaterials() { go('materials'); }
+      function navPlans() { go('plans'); }
+      function navTo(e) { go(e.detail); }
       window.addEventListener('nav-materials', navMaterials);
       window.addEventListener('nav-plans', navPlans);
-      window.addEventListener('nav-teamspace', navTeamspace);
+      window.addEventListener('nav-to', navTo);
+      window.addEventListener('init-done', onInitDone);
       onUnmounted(() => {
         window.removeEventListener('nav-materials', navMaterials);
         window.removeEventListener('nav-plans', navPlans);
-        window.removeEventListener('nav-teamspace', navTeamspace);
+        window.removeEventListener('nav-to', navTo);
+        window.removeEventListener('init-done', onInitDone);
       });
     });
     // 网站设置保存后实时刷新顶部标题/企业名称
     window.addEventListener('brand-changed', fetchMe);
 
-    return { token, me, tenant, sysName, collapsed, route, loginForm, loginLoading, loginBg, loginBrand, menu, current, login, logout, go, switchTeam, viewVersion };
+    return { token, me, tenant, sysName, initialized, initMode, collapsed, route, loginForm, loginLoading, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
   },
   template: `
   <div v-if="!token">
@@ -3066,17 +3877,19 @@ const App = {
         <div class="login-bg-lqip"></div>
         <div class="login-bg-layer"></div>
       </div>
+      <div class="login-ambient" aria-hidden="true"><span class="b1"></span><span class="b2"></span><span class="b3"></span></div>
       <div class="login-card">
-        <div class="brand">
-          <h2>{{ loginBrand.systemName || '电网生产ERP' }}</h2>
-          <div class="sub">本地自托管版 · 请登录</div>
+        <div class="login-inner">
+          <div class="brand">
+            <h2>{{ loginBrand.systemName || '电网生产ERP' }}</h2>
+            <div class="sub">本地自托管版 · 请登录</div>
+          </div>
+          <el-form @submit.prevent="login">
+            <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" autocomplete="username" @keyup.enter="login" /></el-form-item>
+            <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password autocomplete="current-password" @keyup.enter="login" /></el-form-item>
+            <el-button type="primary" size="large" class="login-btn" :loading="loginLoading" @click="login">登录</el-button>
+          </el-form>
         </div>
-        <el-form @submit.prevent="login">
-          <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" :prefix-icon="'User'" /></el-form-item>
-          <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password :prefix-icon="'Lock'" /></el-form-item>
-          <el-button type="primary" size="large" style="width:100%" :loading="loginLoading" @click="login">登 录</el-button>
-        </el-form>
-        <div class="login-tip">默认账号 <b>admin</b> / <b>admin123</b></div>
       </div>
       <div class="login-page-footer">
         <div class="company" v-if="loginBrand.companyName">{{ loginBrand.companyName }}</div>
@@ -3084,42 +3897,71 @@ const App = {
       </div>
     </div>
   </div>
-  <div v-else style="height:100%">
-    <div class="app-header">
+  <div v-else class="app-shell">
+    <header class="app-header">
       <div class="left">
-        <span style="cursor:pointer;font-size:20px" @click="collapsed=!collapsed">☰</span>
+        <button class="icon-btn" @click="collapsed=!collapsed" :title="collapsed?'展开菜单':'收起菜单'" aria-label="菜单">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3.5 7h17M3.5 12h17M3.5 17h17"/></svg>
+        </button>
+        <div class="app-brand" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 2.5 5 13.4h5.6l-1 8.1 8.4-11.3h-5.7z"/></svg>
+        </div>
         <span class="sysname">{{ sysName }}</span>
-        <span v-if="tenant" class="tenant-name" style="color:#8fb8e0;font-size:13px">{{ tenant }}</span>
+        <span v-if="tenant" class="tenant-name">{{ tenant }}</span>
       </div>
       <div class="right">
-        <el-tag v-if="me.parentViewingTeam" type="warning" size="small" style="margin-right:8px">审计只读</el-tag>
-        <span class="user-name" style="margin-right:8px">{{ me.name || me.username }}（{{ me.role }}）</span>
-        <el-select v-if="!me.isParent && me.teams.length" :model-value="me.activeTeamId" @change="switchTeam" size="small" class="team-select" placeholder="切换团队">
-          <el-option v-for="t in me.teams" :key="t.teamId" :label="t.name" :value="t.teamId" />
-        </el-select>
-        <el-select v-else-if="me.isParent" :model-value="me.parentViewingTeam ? me.activeTeamId : ''" @change="switchTeam" size="small" class="team-select team-select-wide" placeholder="母账号 · 自有空间">
-          <el-option label="母账号 · 自有空间" value="" />
-          <el-option v-for="t in me.teams" :key="t.teamId" :label="'审计查看：' + t.name" :value="t.teamId" />
-        </el-select>
-        <el-button size="small" @click="logout">退出登录</el-button>
+        <button class="theme-toggle" @click="toggleTheme" :title="theme==='dark' ? '切换到浅色模式' : '切换到深色模式'">
+          <svg v-if="theme==='dark'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4"/><path d="M12 2.6v2.2M12 19.2v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4 8.4 8.4 0 1 0 20 14.2z"/>
+          </svg>
+          <span>{{ theme==='dark' ? '浅色' : '深色' }}</span>
+        </button>
+        <span class="user-name">{{ me.name || me.username }}</span>
+        <span v-if="me.role" class="user-role">{{ me.role }}</span>
+        <span class="logout-btn" @click="logout">退出登录</span>
       </div>
-    </div>
+    </header>
     <div class="layout">
-      <div class="aside" :class="{ collapsed }">
-        <div v-for="m in menu" :key="m.key" class="menu-item" :class="{ active: route===m.key }" @click="go(m.key)">{{ m.label }}</div>
-      </div>
+      <aside class="aside" :class="{ collapsed }">
+        <div v-for="m in visibleMenu" :key="m.key" class="menu-item" :class="{ active: route===m.key || (m.key==='home' && route==='init') }" @click="go(m.key)">
+          <span class="mi" v-html="menuIcon(m.key)"></span>
+          <span class="mt">{{ m.label }}</span>
+        </div>
+      </aside>
       <div class="aside-mask" v-if="!collapsed" @click="collapsed = true"></div>
-      <div class="main">
-        <h2 class="page-title">{{ current.label }}</h2>
-        <component :is="current.comp" v-if="current.comp==='CrudView'" :config="current.cfg" :key="current.key + '-' + viewVersion" />
+      <main class="main">
+        <div v-if="initMode && route!=='init'" class="init-bar">
+          <span>企业初始化尚未完成。</span>
+          <span class="link" @click="go('init')">返回初始化卡片</span>
+        </div>
+        <div class="page-head" v-if="!current.hideTitle">
+          <h2 class="page-title">{{ current.label }}</h2>
+          <div class="page-sub" v-if="current.sub">{{ current.sub }}</div>
+        </div>
+        <InitView v-if="route==='init'" />
+        <component :is="current.comp" v-else-if="current.comp==='CrudView'" :config="current.cfg" :key="current.key + '-' + viewVersion" />
         <component :is="current.comp" v-else :key="current.key + '-' + viewVersion" />
-      </div>
+      </main>
     </div>
   </div>`
 };
 
 const app = createApp(App);
-const lp = (ElementPlus.lang && ElementPlus.lang.zhCn) ? { locale: ElementPlus.lang.zhCn } : {};
+
+// 全局权限助手：各组件模板可直接用 canWrite('模块') / canAdmin()
+app.mixin({
+  methods: {
+    canWrite(mod) {
+      if (!Auth.loaded) return false;
+      return Auth.writeModules.includes('*') || Auth.writeModules.includes(mod);
+    },
+    canAdmin() { return !!Auth.isAdmin; }
+  }
+});
+const lp = (typeof ElementPlusLocaleZhCn !== 'undefined') ? { locale: ElementPlusLocaleZhCn } : ((ElementPlus.lang && ElementPlus.lang.zhCn) ? { locale: ElementPlus.lang.zhCn } : {});
 app.use(ElementPlus, lp);
 app.component('FunnelIcon', { props: { on: Boolean },
   template: `<svg class="col-funnel" :class="{on}" viewBox="0 0 1024 1024" width="12" height="12"><path fill="currentColor" d="M384 523.392V928a32 32 0 0 0 46.336 28.608l192-96A32 32 0 0 0 640 832V523.392l280.768-343.104a32 32 0 0 0-24.768-52.288H128a32 32 0 0 0-24.768 52.288L384 523.392z"/></svg>` });
@@ -3129,9 +3971,11 @@ app.component('DocumentsView', DocumentsView);
 app.component('MaterialsView', MaterialsView);
 app.component('Dashboard', Dashboard);
 app.component('SettingsView', SettingsView);
+app.component('InitView', InitView);
 app.component('WorkersPanel', WorkersPanel);
+app.component('ContactsPanel', ContactsPanel);
+app.component('WorkersView', WorkersView);
 app.component('UsersView', UsersView);
-app.component('TeamsPanel', TeamsPanel);
 app.component('AccountsPanel', AccountsPanel);
 app.component('Requisitions', {
   setup() {
@@ -3311,8 +4155,8 @@ app.component('Requisitions', {
             <el-table :data="row.items" size="small" border :row-class-name="expRowClass(row)">
               <el-table-column type="expand" width="40">
                 <template #default="{ row: it }">
-                  <div style="padding:8px 14px 10px 48px;background:#fafafa">
-                    <div style="font-size:12px;color:#909399;margin-bottom:8px">入库记录（共 {{ itemHistory(row, it.materialId).length }} 次）</div>
+                  <div style="padding:8px 14px 10px 48px;background:var(--surface-2)">
+                    <div style="font-size:12px;color:var(--text-3);margin-bottom:8px">入库记录（共 {{ itemHistory(row, it.materialId).length }} 次）</div>
                     <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border style="max-width:860px">
                       <el-table-column prop="at" label="入库时间" width="150" />
                       <el-table-column prop="thisQty" label="本次入库数量" width="120" align="right" />
@@ -3325,7 +4169,7 @@ app.component('Requisitions', {
                         <template #default="{ row: h }">{{ h.reason || '-' }}</template>
                       </el-table-column>
                     </el-table>
-                    <div v-else style="color:#c0c4cc;font-size:12px">暂无入库记录（确认入库/补入库后按次记录）</div>
+                    <div v-else style="color:var(--text-3);font-size:12px">暂无入库记录（确认入库/补入库后按次记录）</div>
                   </div>
                 </template>
               </el-table-column>
@@ -3361,10 +4205,10 @@ app.component('Requisitions', {
       <el-table-column label="操作" width="200" fixed="right">
         <template #default="{row}">
           <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
-          <el-button v-if="row.status==='待入库'" link type="primary" size="small" @click="openConfirm(row)">确认入库</el-button>
-          <el-button v-if="row.status==='部分到库'" link type="primary" size="small" @click="openSupplement(row)">补入库</el-button>
-          <el-button v-if="row.status!=='已作废'" link type="danger" size="small" @click="voidReq(row)">作 废</el-button>
-          <el-button v-if="row.status==='已作废'" link type="danger" size="small" @click="deleteReq(row)">删除</el-button>
+          <el-button v-if="row.status==='待入库' && canWrite('materials')" link type="primary" size="small" @click="openConfirm(row)">确认入库</el-button>
+          <el-button v-if="row.status==='部分到库' && canWrite('materials')" link type="primary" size="small" @click="openSupplement(row)">补入库</el-button>
+          <el-button v-if="row.status!=='已作废' && canWrite('materials')" link type="danger" size="small" @click="voidReq(row)">作 废</el-button>
+          <el-button v-if="row.status==='已作废' && canWrite('materials')" link type="danger" size="small" @click="deleteReq(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -3374,7 +4218,7 @@ app.component('Requisitions', {
         <div>
           <div style="font-size:16px;font-weight:600">{{ dlg.type==='supplement' ? '补入库' : '确认入库' }}</div>
           <div style="margin-top:6px"><span style="font-weight:600">{{ dlg.rec && dlg.rec.reqNo }}</span>
-            <span style="color:#999;margin-left:10px">请核对领料单明细后{{ dlg.type==='supplement' ? '补入库' : '确认入库' }}</span></div>
+            <span style="color:var(--text-3);margin-left:10px">请核对领料单明细后{{ dlg.type==='supplement' ? '补入库' : '确认入库' }}</span></div>
         </div>
       </template>
       <el-radio-group v-model="dlg.mode" style="margin-bottom:14px" @change="onModeChange">
@@ -3423,9 +4267,9 @@ app.component('Requisitions', {
         <span style="font-weight:600">{{ vdlg.rec.reqNo }}</span>
         作废后会扣减该领料单已入库数量，材料状态按扣减后的已到数量重新汇总。
       </div>
-      <div style="background:#f5f7fa;border-radius:6px;padding:14px 18px;margin:14px 0">
-        <div style="color:#999;font-size:13px">将冲销已入库数量</div>
-        <div style="font-size:24px;font-weight:700;color:#222;margin-top:4px">{{ voidDeduct(vdlg.rec || {}) }}</div>
+      <div style="background:var(--surface-3);border-radius:6px;padding:14px 18px;margin:14px 0">
+        <div style="color:var(--text-3);font-size:13px">将冲销已入库数量</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text-1);margin-top:4px">{{ voidDeduct(vdlg.rec || {}) }}</div>
       </div>
       <el-input v-model="vdlg.reason" type="textarea" :rows="3" placeholder="请输入作废原因" />
       <template #footer>
@@ -3457,8 +4301,46 @@ app.component('Imports', {
       } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { loading.value = false; }
     }
     function doSearch() { page.value = 1; }
+    // 删除导入批次（仅超级用户）：批次 + 该批次导入的材料一并删除
+    async function removeBatch(row) {
+      const n = Array.isArray(row.materialIds) && row.materialIds.length ? row.materialIds.length : (row.rows || 0);
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          '删除批次「' + (row.fileName || '') + '」后，该批次导入的 ' + n + ' 条材料将一并从「材料明细」中删除，且不可恢复。是否继续？',
+          '删除导入批次',
+          { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }
+        );
+      } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.info('已取消'); return; }
+      try {
+        const r = await api.del('/api/materialImports/' + row.id);
+        const n = r && typeof r.deletedMaterials === 'number' ? r.deletedMaterials : null;
+        if (n === null) {
+          // 旧版服务端（未重启）：只删了批次、没有联动删材料 —— 明确告知，避免误以为已经清干净
+          ElementPlus.ElMessage.warning('批次已删除，但服务端未联动删除材料：请重启服务后再试（重启会自动补全历史批次与材料的关联）');
+        } else {
+          ElementPlus.ElMessage.success('已删除批次「' + (row.fileName || '') + '」及 ' + n + ' 条材料');
+        }
+        await load();
+        window.dispatchEvent(new CustomEvent('materials-changed'));
+      } catch (e) {
+        // 嵌套校验：批次内材料被领料单/出库单引用时，整批拒绝并列出引用
+        const refs = e && e.data && e.data.refs;
+        if (Array.isArray(refs) && refs.length) {
+          const html = '<div style="line-height:1.8">该批次中有 <b>' + ((e.data && e.data.blockedMaterials) || '') + '</b> 条材料已被以下业务数据引用，无法整批删除：</div>'
+            + '<div style="margin-top:10px;line-height:2">'
+            + refs.map(r => '· ' + r.label + '：<b>' + r.count + '</b> 条').join('<br>')
+            + '</div>'
+            + '<div style="margin-top:10px;color:#909399;font-size:12px;line-height:1.7">请先在「领料单 / 出库管理」中清理相关单据，或在「材料明细」中逐条删除未被引用的物料。</div>';
+          ElementPlus.ElMessageBox.alert(html, '该批次存在被引用的材料，无法删除', {
+            dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning'
+          });
+        } else {
+          ElementPlus.ElMessage.error(e.message || '删除失败');
+        }
+      }
+    }
     onMounted(load);
-    return { list, loading, filters, page, pageSize, projects, filtered, paged, load, doSearch };
+    return { list, loading, filters, page, pageSize, projects, filtered, paged, load, doSearch, removeBatch };
   },
   template: `
   <div>
@@ -3476,7 +4358,7 @@ app.component('Imports', {
     <el-table :data="paged" v-loading="loading" border style="width:100%">
       <el-table-column type="expand">
         <template #default="{row}">
-          <div style="padding:12px 24px 16px;background:#fafbfc">
+          <div style="padding:12px 24px 16px;background:var(--surface-2)">
             <template v-if="(row.adjusted || 0) > 0 && (row.adjustments || []).length">
               <div style="font-weight:600;margin-bottom:8px">调整明细</div>
               <el-table :data="row.adjustments" size="small" border>
@@ -3487,7 +4369,7 @@ app.component('Imports', {
               </el-table>
             </template>
             <template v-else>
-              <span style="color:#666">该次导入已读取完成，确认没有调整明细。</span>
+              <span style="color:var(--text-2)">该次导入已读取完成，确认没有调整明细。</span>
             </template>
           </div>
         </template>
@@ -3505,9 +4387,14 @@ app.component('Imports', {
       <el-table-column label="备注" min-width="100">
         <template #default="{row}">{{ row.remark || '—' }}</template>
       </el-table-column>
+      <el-table-column v-if="canAdmin()" label="操作" width="90" fixed="right">
+        <template #default="{row}">
+          <el-button link type="danger" size="small" @click="removeBatch(row)">删除</el-button>
+        </template>
+      </el-table-column>
     </el-table>
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:12px">
-      <span style="color:#606266;font-size:13px">共 {{ filtered.length }} 个批次</span>
+      <span style="color:var(--text-2);font-size:13px">共 {{ filtered.length }} 个批次</span>
       <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length"
         :page-sizes="[30, 50, 100]" layout="prev, pager, next, sizes" background />
     </div>
@@ -3721,8 +4608,8 @@ app.component('Outbounds', {
       doc.write('<html><head><meta charset="utf8"><title>材料出库单</title><style>' +
         'body{margin:0;padding:24px;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}' +
         '.obp-title{text-align:center;font-size:20px;font-weight:700;margin-bottom:16px}' +
-        'table{width:100%;border-collapse:collapse}td,th{border:1px solid #666;padding:8px 10px;font-size:13px;text-align:left}' +
-        '.obp-th{background:#f5f7fa;font-weight:600;text-align:center}' +
+        'table{width:100%;border-collapse:collapse}td,th{border:1px solid var(--text-2);padding:8px 10px;font-size:13px;text-align:left}' +
+        '.obp-th{background:var(--surface-3);font-weight:600;text-align:center}' +
         '@page{size:A4;margin:12mm}</style></head><body>' + el.innerHTML + '</body></html>');
       doc.close();
       iframe.contentWindow.focus();
@@ -3737,7 +4624,7 @@ app.component('Outbounds', {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div style="font-size:17px;font-weight:600">请选择项目</div>
       <div>
-        <el-button type="primary" :disabled="!selection.length" @click="openDlg">登记出库（{{ selection.length }}）</el-button>
+        <el-button v-if="canWrite('materials')" type="primary" :disabled="!selection.length" @click="openDlg">登记出库（{{ selection.length }}）</el-button>
         <el-button @click="load">{{ tab === 'orders' ? '刷新出库记录' : '刷新库存' }}</el-button>
       </div>
     </div>
@@ -3750,7 +4637,7 @@ app.component('Outbounds', {
       <el-select v-model="project" placeholder="选择工程" filterable clearable style="width:260px" @change="onProjectChange">
         <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
       </el-select>
-      <el-button v-if="tab==='orders'" type="danger" plain style="margin-left:auto" @click="deleteVoided">删除出库记录</el-button>
+      <el-button v-if="tab==='orders' && canWrite('materials')" type="danger" plain style="margin-left:auto" @click="deleteVoided">删除出库记录</el-button>
     </div>
 
     <el-tabs v-model="tab">
@@ -3767,7 +4654,7 @@ app.component('Outbounds', {
               <template #default="{row}">
                 <div style="font-weight:600">{{ row.description }}</div>
                 <div v-if="row.hasRecords" style="margin-top:4px;display:flex;align-items:center;gap:10px">
-                  <span :style="chip('#909399')">有出库记录</span>
+                  <span :style="chip('var(--text-3)')">有出库记录</span>
                   <el-link type="primary" :underline="false" style="font-size:12px" @click="showMatOrders(row)">查看出库单</el-link>
                 </div>
               </template>
@@ -3789,7 +4676,7 @@ app.component('Outbounds', {
             </el-table-column>
           </el-table>
           <div style="display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:12px">
-            <span style="color:#606266;font-size:13px">共 {{ filtered.length }} 行</span>
+            <span style="color:var(--text-2);font-size:13px">共 {{ filtered.length }} 行</span>
             <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length"
               :page-sizes="[100, 200]" layout="prev, pager, next, sizes" background />
           </div>
@@ -3820,15 +4707,15 @@ app.component('Outbounds', {
             <el-table-column label="操作" width="230" fixed="right">
               <template #default="{row}">
                 <el-button link type="primary" size="small" @click="openOrder(row)">查看</el-button>
-                <el-button v-if="row.status === '有效'" link type="primary" size="small" @click="openReturn(row)">登记归还</el-button>
-                <el-button v-if="row.status === '有效'" link type="danger" size="small" @click="openVoid(row)">作废</el-button>
-                <el-button v-if="row.status === '已作废'" link type="danger" size="small" @click="deleteOrder(row)">删除</el-button>
+                <el-button v-if="row.status === '有效' && canWrite('materials')" link type="primary" size="small" @click="openReturn(row)">登记归还</el-button>
+                <el-button v-if="row.status === '有效' && canWrite('materials')" link type="danger" size="small" @click="openVoid(row)">作废</el-button>
+                <el-button v-if="row.status === '已作废' && canWrite('materials')" link type="danger" size="small" @click="deleteOrder(row)">删除</el-button>
                 <el-button link type="primary" size="small" @click="printRow(row)">打印</el-button>
               </template>
             </el-table-column>
           </el-table>
           <div style="display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:12px">
-            <span style="color:#606266;font-size:13px">共 {{ ofiltered.length }} 个出库单</span>
+            <span style="color:var(--text-2);font-size:13px">共 {{ ofiltered.length }} 个出库单</span>
             <el-pagination v-model:current-page="opage" v-model:page-size="opageSize" :total="ofiltered.length"
               :page-sizes="[30, 50, 100]" layout="prev, pager, next, sizes" background />
           </div>
@@ -3847,7 +4734,7 @@ app.component('Outbounds', {
           </el-select>
         </el-form-item>
       </el-form>
-      <div style="color:#666;font-size:13px;margin:-6px 0 10px">已选择 {{ dlg.rows.length }} 种材料，提交时会再次核对当前可用库存。</div>
+      <div style="color:var(--text-2);font-size:13px;margin:-6px 0 10px">已选择 {{ dlg.rows.length }} 种材料，提交时会再次核对当前可用库存。</div>
       <el-table :data="dlg.rows" size="small" border style="width:100%">
         <el-table-column prop="description" label="材料" min-width="180" />
         <el-table-column label="可用库存" width="110" align="right"><template #default="{row}">{{ fmt4(row.available) }}</template></el-table-column>
@@ -3882,8 +4769,8 @@ app.component('Outbounds', {
         <el-table-column label="净出库" width="100" align="right"><template #default="{row}">{{ fmt4(row.qty - row.returned) }}</template></el-table-column>
       </el-table>
       <template #footer>
-        <el-button v-if="od.rec.status === '有效'" @click="openReturn()">登记归还</el-button>
-        <el-button v-if="od.rec.status === '有效'" type="danger" plain @click="openVoid()">作废并补回</el-button>
+        <el-button v-if="od.rec.status === '有效' && canWrite('materials')" @click="openReturn()">登记归还</el-button>
+        <el-button v-if="od.rec.status === '有效' && canWrite('materials')" type="danger" plain @click="openVoid()">作废并补回</el-button>
         <el-button @click="printOrder">打 印</el-button>
         <el-button type="primary" @click="od.visible=false">关 闭</el-button>
       </template>
@@ -3905,7 +4792,7 @@ app.component('Outbounds', {
           </template>
         </el-table-column>
       </el-table>
-      <div v-if="rdlg.rec" style="color:#909399;font-size:13px;margin-top:12px">领取人固定为原记录中的 {{ rdlg.rec.receiver }}。</div>
+      <div v-if="rdlg.rec" style="color:var(--text-3);font-size:13px;margin-top:12px">领取人固定为原记录中的 {{ rdlg.rec.receiver }}。</div>
       <template #footer>
         <el-button @click="rdlg.visible=false">取 消</el-button>
         <el-button type="primary" @click="submitReturn">确认归还</el-button>
@@ -3918,9 +4805,9 @@ app.component('Outbounds', {
         <span style="font-weight:600">{{ vdlg.rec.outNo }}</span>
         作废后该单未归还数量将补回可用库存，作废后的出库单可删除。
       </div>
-      <div style="background:#f5f7fa;border-radius:6px;padding:14px 18px;margin:14px 0">
-        <div style="color:#999;font-size:13px">将补回可用库存</div>
-        <div style="font-size:24px;font-weight:700;color:#222;margin-top:4px">{{ oNet(vdlg.rec || {}) }}</div>
+      <div style="background:var(--surface-3);border-radius:6px;padding:14px 18px;margin:14px 0">
+        <div style="color:var(--text-3);font-size:13px">将补回可用库存</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text-1);margin-top:4px">{{ oNet(vdlg.rec || {}) }}</div>
       </div>
       <el-input v-model="vdlg.reason" type="textarea" :rows="3" placeholder="请输入作废原因" />
       <template #footer>
@@ -3934,35 +4821,35 @@ app.component('Outbounds', {
         <div style="text-align:center;font-size:20px;font-weight:700;margin-bottom:16px">材料出库单</div>
         <table style="width:100%;border-collapse:collapse;margin-bottom:14px">
           <tr>
-            <td style="width:90px;background:#f5f7fa;font-weight:600;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">出库批次</td>
-            <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">{{ pdlg.rec.outNo }}</td>
-            <td style="width:90px;background:#f5f7fa;font-weight:600;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">登记时间</td>
-            <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">{{ pdlg.rec.createdAt }}</td>
+            <td style="width:90px;background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">出库批次</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.outNo }}</td>
+            <td style="width:90px;background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">登记时间</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.createdAt }}</td>
           </tr>
           <tr>
-            <td style="background:#f5f7fa;font-weight:600;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">工程</td>
-            <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">{{ pdlg.rec.project }}</td>
-            <td style="background:#f5f7fa;font-weight:600;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">领取人</td>
-            <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">{{ pdlg.rec.receiver }}</td>
+            <td style="background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">工程</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.project }}</td>
+            <td style="background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">领取人</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.receiver }}</td>
           </tr>
         </table>
         <table style="width:100%;border-collapse:collapse">
           <thead>
             <tr>
-              <th style="width:60px;background:#f5f7fa;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">序号</th>
-              <th style="background:#f5f7fa;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">材料名称</th>
-              <th style="background:#f5f7fa;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">材料编码</th>
-              <th style="width:70px;background:#f5f7fa;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">单位</th>
-              <th style="width:100px;background:#f5f7fa;border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">数量</th>
+              <th style="width:60px;background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">序号</th>
+              <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">材料名称</th>
+              <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">材料编码</th>
+              <th style="width:70px;background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">单位</th>
+              <th style="width:100px;background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">数量</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(it, i) in pdlg.rec.items" :key="i">
-              <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">{{ i + 1 }}</td>
-              <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">{{ it.description }}</td>
-              <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px">{{ it.code }}</td>
-              <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:center">{{ it.unit }}</td>
-              <td style="border:1px solid #dcdfe6;padding:8px 10px;font-size:13px;text-align:right">{{ fmt(it.qty) }}</td>
+              <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">{{ i + 1 }}</td>
+              <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ it.description }}</td>
+              <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ it.code }}</td>
+              <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">{{ it.unit }}</td>
+              <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:right">{{ fmt(it.qty) }}</td>
             </tr>
           </tbody>
         </table>
@@ -3981,11 +4868,10 @@ const PlansView = {
     const { ref, reactive, computed, onMounted, onUnmounted } = Vue;
     const TABS = [
       { key: 'week', label: '周计划管理' }, { key: 'month', label: '月计划管理' }, { key: 'archived', label: '已归档月计划' },
-      { key: 'executed', label: '已执行' }, { key: 'settled', label: '已结算零计划' }, { key: 'canceled', label: '已取消周计划' }
+      { key: 'executed', label: '已执行' }, { key: 'settled', label: '已结算零星计划' }, { key: 'canceled', label: '已取消周计划' }
     ];
     const TICKET_TYPES = ['配电：配电第一种工作票', '配电：配电第二种工作票', '低压：低压工作票', '线路：线路第一种工作票', '线路：线路第二种工作票', '配电：低压工作票'];
     const VOLTAGE_LEVELS = ['0.4kV', '10kV', '20kV', '35kV', '110kV', '220kV'];
-    const PLAN_STATUS = ['未执行', '已执行', '已归档', '已取消', '已结算'];
     const WORK_TYPES = ['配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程', '借工'];
     const SPECIALTIES = ['运检', '营销'];
     const DEPTS = ['设备部', '产业部'];
@@ -4042,7 +4928,7 @@ const PlansView = {
     const list = ref([]);
     const loading = ref(false);
     const projects = ref([]); const projectsFull = ref([]); const teams = ref([]); const workers = ref([]);
-    const filters = reactive({ startDate: '', endDate: '', name: '', content: '', keyword: '', noProject: false, team: '', leader: '', ticketType: '' });
+    const filters = reactive({ startDate: '', endDate: '', name: '', content: '', noProject: false, team: '', leader: '', ticketType: '', projectScope: [] });
     const page = ref(1); const pageSize = ref(20);
     const dlg = reactive({ visible: false, editingId: null, form: null });
     const emptyForm = () => ({
@@ -4120,14 +5006,12 @@ const PlansView = {
       return true;
     }));
     const filtered = computed(() => tabList.value.filter(p => {
+      // 项目详情跳转带入的项目范围（项目名 + 其子项目名），精确匹配，不受关键词模糊匹配影响
+      if (filters.projectScope.length && !filters.projectScope.includes(p.project)) return false;
       if (filters.startDate && p.startDate < filters.startDate) return false;
       if (filters.endDate && p.endDate > filters.endDate) return false;
       if (filters.name && !String(p.name || '').includes(filters.name)) return false;
-      if (filters.keyword) {
-        const k = filters.keyword;
-        const hit = [p.name, p.content, p.team, p.leader, p.chargePerson, p.project, p.station].some(v => String(v || '').includes(k));
-        if (!hit) return false;
-      }
+      if (filters.content && !String(p.content || '').includes(filters.content)) return false;
       if (filters.noProject && p.project) return false;
       if (filters.team && p.team !== filters.team) return false;
       if (filters.leader && p.leader !== filters.leader) return false;
@@ -4141,10 +5025,6 @@ const PlansView = {
       const today = fmtDate(new Date());
       const end21 = fmtDate(new Date(Date.now() + 21 * 86400000));
       return list.value.filter(p => !['已取消', '已归档'].includes(p.status) && p.startDate && p.endDate && daySlice(p.endDate) >= today && daySlice(p.startDate) <= end21);
-    });
-    const todayPlans = computed(() => {
-      const t = fmtDate(new Date());
-      return upcoming.value.filter(p => daySlice(p.startDate) <= t && daySlice(p.endDate) >= t);
     });
     // 日历卡片：按有安排的日期展示（10月16日 周五 / 条数徽标 / 班组长 / 时间+计划名）
     const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -4198,7 +5078,6 @@ const PlansView = {
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
     function addMaterialFor(row) { ElementPlus.ElMessage.info('请在「项目列表」对应项目详情中上传该计划的施工资料'); }
-    function statusType(s) { return s === '已执行' ? 'success' : s === '已取消' ? 'danger' : s === '未执行' ? 'warning' : 'info'; }
     // ---------- 人员安排：从作业人员名单勾选（按班组/身份分组，全选支持） ----------
     const workersFull = ref([]);
     const contacts = ref([]);
@@ -4255,6 +5134,8 @@ const PlansView = {
       dlg.editingId = null; dlg.form = emptyForm();
       // 计划类型跟随当前所在 tab：月计划管理 tab 新增存为月计划，其余存周计划
       dlg.form.planType = tab.value === 'month' ? '月计划' : '周计划';
+      // 从项目详情跳转过来时，关联项目默认带入（避免新增后因项目筛选而"消失"）
+      if (filters.projectScope.length) dlg.form.project = filters.projectScope[0];
       // 作业单位联动：分包与监理默认排序第一条，抄送默认排序前两条；建管/实施单位留空由用户自行编辑
       const fb = unitsByType('分包单位'); if (fb.length) dlg.form.subcontractors = [fb[0].name];
       const sj = unitsByType('监理单位'); if (sj.length) dlg.form.supervisor = sj[0].name;
@@ -4274,6 +5155,9 @@ const PlansView = {
     }
     async function submit() {
       const f = dlg.form;
+      // 统一为 YYYY-MM-DD HH:mm:ss（历史数据为 HH:mm），保证下面的字符串比较与导出稳定
+      const normDT = v => (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(String(v || '').trim()) ? String(v).trim() + ':00' : v);
+      f.startDate = normDT(f.startDate); f.endDate = normDT(f.endDate);
       if (!String(f.name || '').trim()) { ElementPlus.ElMessage.warning('请填写作业计划名称'); return; }
       if (!f.startDate || !f.endDate) { ElementPlus.ElMessage.warning('请选择计划开始/结束日期'); return; }
       if (f.endDate < f.startDate) { ElementPlus.ElMessage.warning('计划结束日期不能早于开始日期'); return; }
@@ -4339,98 +5223,137 @@ const PlansView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     function onTab() { page.value = 1; }
-    // 项目详情「查看月/周计划」：带入项目关键词筛选
-    function onFilterProject(e) {
-      const name = e.detail && e.detail.project;
-      if (!name) return;
-      filters.keyword = name;
+    // 项目详情「查看月/周计划」：切到对应页签，并把列表限定在该项目（含其子项目）
+    const scopeLabel = ref('');
+    function clearProjectScope() { filters.projectScope = []; scopeLabel.value = ''; page.value = 1; }
+    function applyProjectNav(nav) {
+      if (!nav) return;
+      if (nav.tab && TABS.some(t => t.key === nav.tab)) tab.value = nav.tab;
+      // 清掉可能把目标计划筛掉的其它条件，保证跳转后一定看得到本项目的计划
+      Object.assign(filters, { startDate: '', endDate: '', name: '', content: '', noProject: false, team: '', leader: '', ticketType: '' });
+      filters.projectScope = (Array.isArray(nav.names) ? nav.names : []).filter(Boolean);
+      scopeLabel.value = nav.label || filters.projectScope[0] || '';
       page.value = 1;
     }
+    function onFilterProject(e) {
+      const d = e.detail || {};
+      applyProjectNav({ tab: d.tab, label: d.project, names: d.project ? [d.project] : [] });
+    }
+    // 计划管理为懒挂载：跳转前暂存的意图在本次 setup 中消费（首次挂载即可落到正确页签与范围）
+    if (window.__pendingPlansNav) { applyProjectNav(window.__pendingPlansNav); window.__pendingPlansNav = null; }
     window.addEventListener('plans-filter-project', onFilterProject);
     onUnmounted(() => window.removeEventListener('plans-filter-project', onFilterProject));
     onMounted(() => { loadMeta(); load(); });
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, dlg, upcoming, todayPlans, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, PLAN_STATUS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, substations, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, statusType, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans };
+    const qtyDlg = reactive({ visible: false, id: '', name: '', busy: false, form: {} });
+    const QTY_FIELDS = [
+      { key: 'wlPole', label: '杆塔（基）' },
+      { key: 'wlLine1035', label: '10kV/35kV线路（km/单线）' },
+      { key: 'wlCable', label: '电缆（千米）' },
+      { key: 'wlRing', label: '环网柜（个）' },
+      { key: 'wlVacuum', label: '真空开关（个）' },
+      { key: 'wlTransformer', label: '变压器（个）' },
+      { key: 'wlLine04', label: '0.4/0.22kV线路（km/单线）' }
+    ];
+    function openQuantities(row) {
+      const f = {};
+      QTY_FIELDS.forEach(x => { f[x.key] = row[x.key] || ''; });
+      Object.assign(qtyDlg, { visible: true, id: row.id, name: row.name || '', busy: false, form: f });
+    }
+    async function submitQuantities() {
+      qtyDlg.busy = true;
+      try {
+        await api.put('/api/workPlans/' + qtyDlg.id + '/quantities', qtyDlg.form);
+        ElementPlus.ElMessage.success('施工量已保存');
+        qtyDlg.visible = false; load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { qtyDlg.busy = false; }
+    }
+
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, substations, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities };
   },
   template: `
   <div>
-    <div style="background:#fff;border:1px solid #ebeef5;border-radius:4px;padding:16px 18px;margin-bottom:14px">
+    <div style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:17px;font-weight:600">日计划日历</div>
       </div>
-      <div style="color:#909399;font-size:12px;margin-top:6px">未来 21 天共 {{ upcoming.length }} 个日历安排，跨日计划按覆盖日期展示</div>
-      <div v-if="!calendarDays.length" style="margin-top:12px;background:#f7f8fa;border:1px solid #ebeef5;border-radius:6px;padding:16px;font-size:13px;color:#909399">未来 21 天暂无施工计划</div>
+      <div style="color:var(--text-3);font-size:12px;margin-top:6px">未来 21 天共 {{ upcoming.length }} 个日历安排，跨日计划按覆盖日期展示</div>
+      <div v-if="!calendarDays.length" style="margin-top:12px;background:var(--surface-3);border:1px solid var(--line);border-radius:6px;padding:16px;font-size:13px;color:var(--text-3)">未来 21 天暂无施工计划</div>
       <div v-else style="display:flex;gap:12px;overflow-x:auto;padding:12px 2px 4px">
-        <div v-for="d in calendarDays" :key="d.ds" style="min-width:250px;max-width:280px;flex:0 0 auto;background:#fff;border:1px solid #ebeef5;border-radius:6px;padding:12px 14px">
+        <div v-for="d in calendarDays" :key="d.ds" style="min-width:250px;max-width:280px;flex:0 0 auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:12px 14px">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <b style="font-size:14px">{{ d.label }}</b>
             <span style="background:#3370ff;color:#fff;border-radius:10px;font-size:12px;padding:1px 9px">{{ d.plans.length }} 条</span>
           </div>
-          <div style="color:#606266;font-size:13px;margin-top:8px">班组长：{{ d.plans[0].leader || d.plans[0].team || '-' }}</div>
-          <div v-for="p in d.plans" :key="p.id" style="color:#606266;font-size:13px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          <div style="color:var(--text-2);font-size:13px;margin-top:8px">班组长：{{ d.plans[0].leader || d.plans[0].team || '-' }}</div>
+          <div v-for="p in d.plans" :key="p.id" style="color:var(--text-2);font-size:13px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
             <span v-if="(p.startDate || '').length > 10" style="margin-right:4px">{{ p.startDate.slice(11, 16) }}</span>{{ p.name }}
           </div>
         </div>
       </div>
     </div>
 
-    <el-tabs v-model="tab" @tab-change="onTab">
-      <el-tab-pane v-for="t in TABS" :key="t.key" :label="t.label" :name="t.key" />
-    </el-tabs>
+    <div class="plan-card">
+      <el-tabs v-model="tab" class="plan-tabs" @tab-change="onTab">
+        <el-tab-pane v-for="t in TABS" :key="t.key" :label="t.label" :name="t.key" />
+      </el-tabs>
 
-    <div style="background:#fff;border:1px solid #e7e9ec;border-radius:4px;padding:14px 16px">
-      <div style="display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:2px">
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">开始日期</span>
-          <el-date-picker v-model="filters.startDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:132px" size="default" @change="page=1" />
+      <div v-if="filters.projectScope.length" class="plan-scope">
+        <span class="pf-label">关联项目：</span>
+        <el-tag closable effect="plain" type="primary" @close="clearProjectScope">
+          {{ scopeLabel }}<template v-if="filters.projectScope.length > 1">（含 {{ filters.projectScope.length - 1 }} 个子项目）</template>
+        </el-tag>
+        <span class="plan-scope-tip">由项目详情「查看月计划 / 查看周计划」带入，关闭标签可查看全部计划</span>
+      </div>
+
+      <div class="plan-filters">
+        <el-date-picker v-model="filters.startDate" type="date" placeholder="开始日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
+        <el-date-picker v-model="filters.endDate" type="date" placeholder="结束日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
+        <div class="pf-item"><span class="pf-label">作业计划名称：</span>
+          <el-input v-model="filters.name" placeholder="关键词" clearable class="pf-input" @input="page=1" />
         </div>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">结束日期</span>
-          <el-date-picker v-model="filters.endDate" type="date" placeholder="选择日期" value-format="YYYY-MM-DD" style="width:132px" @change="page=1" />
+        <div class="pf-item"><span class="pf-label">工作内容：</span>
+          <el-input v-model="filters.content" placeholder="关键词" clearable class="pf-input" @input="page=1" />
         </div>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">作业计划名称</span>
-          <el-input v-model="filters.name" placeholder="关键词" clearable style="width:132px" />
-        </div>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">工作内容</span>
-          <el-input v-model="filters.content" placeholder="关键词" clearable style="width:132px" />
-        </div>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">关键词</span>
-          <el-input v-model="filters.keyword" placeholder="关键词" clearable style="width:120px" />
-        </div>
-        <el-checkbox v-model="filters.noProject">未关联项目</el-checkbox>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">作业班组</span>
-          <el-select v-model="filters.team" placeholder="全部" clearable style="width:116px">
+        <el-checkbox v-model="filters.noProject" class="pf-check" @change="page=1">未关联项目</el-checkbox>
+        <div class="pf-item"><span class="pf-label">作业班组：</span>
+          <el-select v-model="filters.team" placeholder="全部" clearable class="pf-select" @change="page=1">
             <el-option v-for="t in teams" :key="t" :label="t" :value="t" />
           </el-select>
         </div>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">班组长</span>
-          <el-select v-model="filters.leader" placeholder="全部" clearable style="width:116px">
+        <div class="pf-item"><span class="pf-label">班组长：</span>
+          <el-select v-model="filters.leader" placeholder="全部" clearable class="pf-select" @change="page=1">
             <el-option v-for="w in workers" :key="w" :label="w" :value="w" />
           </el-select>
         </div>
-        <div style="display:flex;align-items:center;gap:6px"><span class="f-label">工作票类型</span>
-          <el-select v-model="filters.ticketType" placeholder="全部" clearable style="width:168px">
+        <div class="pf-item"><span class="pf-label">工作票类型：</span>
+          <el-select v-model="filters.ticketType" placeholder="全部" clearable class="pf-select pf-select-wide" @change="page=1">
             <el-option v-for="t in TICKET_TYPES" :key="t" :label="t" :value="t" />
           </el-select>
         </div>
       </div>
-      <div style="display:flex;gap:8px;margin-bottom:14px">
-        <el-button type="primary" @click="openAdd">新增</el-button>
-        <el-button @click="importPlans">导入 xlsx</el-button>
-        <el-button @click="exportPlans">导出 xlsx</el-button>
+
+      <div class="plan-toolbar">
+        <el-button v-if="canWrite('plans')" type="primary" size="small" @click="openAdd">新增</el-button>
+        <el-button v-if="canWrite('plans')" size="small" @click="importPlans">导入 xlsx</el-button>
+        <el-button size="small" @click="exportPlans">导出 xlsx</el-button>
       </div>
 
-      <el-table :data="paged" v-loading="loading" border style="width:100%" :row-class-name="rowClass">
-        <el-table-column type="index" label="序号" width="60" align="center" />
-        <el-table-column prop="name" label="作业计划名称" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="team" label="作业班组" width="140" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="leader" label="班组长" width="100" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="startDate" label="计划开始" width="118" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="endDate" label="计划结束" width="118" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="ticketType" label="工作票类型" width="170" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="voltage" label="电压等级" width="100" align="center" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="station" label="变电站/线路" min-width="130" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePerson" label="工作负责人" width="110" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column label="操作" width="168" fixed="right">
+      <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
+        <el-table-column type="index" label="序号" width="50" align="center" />
+        <el-table-column prop="name" label="作业计划名称" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="team" label="作业班组" min-width="100" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="leader" label="班组长" width="84" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="startDate" label="计划开始" width="100" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="endDate" label="计划结束" width="100" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="ticketType" label="工作票类型" min-width="140" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="voltage" label="电压等级" width="84" align="center" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="station" label="变电站/线路" min-width="110" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePerson" label="工作负责人" width="96" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="142" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{row}">
-            <div style="line-height:1.7">
+            <div v-if="canWrite('plans')" class="plan-acts">
               <el-button link type="warning" size="small" @click="addMaterialFor(row)">添加资料</el-button>
               <el-button link type="warning" size="small" @click="openEdit(row)">编辑</el-button>
               <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
@@ -4438,14 +5361,42 @@ const PlansView = {
               <el-button link type="warning" size="small" @click="notePlan(row)">备注</el-button>
               <el-button link type="danger" size="small" @click="cancelPlan(row)">取消</el-button>
             </div>
+            <el-button v-else-if="canWrite('planQuantities')" link type="primary" size="small" @click="openQuantities(row)">填写施工量</el-button>
+            <span v-else style="color:var(--text-3)">-</span>
           </template>
         </el-table-column>
-        <template #empty><el-empty description="暂无数据" :image-size="70" /></template>
+        <template #empty>
+          <div class="plan-empty">
+            <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M11 38v9a5 5 0 0 0 5 5h32a5 5 0 0 0 5-5v-9" />
+              <path d="M11 38l7-21a5 5 0 0 1 4.7-3.4h18.6A5 5 0 0 1 46 17l7 21" />
+              <path d="M11 38h11l2.5 5h15L42 38h11" />
+            </svg>
+            <span>暂无数据</span>
+          </div>
+        </template>
       </el-table>
 
-      <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:12px">
-        <span style="color:#606266;font-size:13px">共 {{ filtered.length }} 条，第 {{ page }} 页</span>
-        <el-select v-model="pageSize" size="small" style="width:110px" @change="page=1">
+      <el-dialog title="填写工程实际施工量" v-model="qtyDlg.visible" width="620px" label-position="top">
+        <div style="color:var(--text-2);font-size:13px;margin-bottom:12px">计划：{{ qtyDlg.name }}</div>
+        <el-form label-position="top">
+          <el-row :gutter="20">
+            <el-col v-for="f in QTY_FIELDS" :key="f.key" :xs="24" :sm="12">
+              <el-form-item :label="f.label">
+                <el-input v-model="qtyDlg.form[f.key]" placeholder="选填" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </el-form>
+        <template #footer>
+          <el-button @click="qtyDlg.visible=false">取消</el-button>
+          <el-button type="primary" :loading="qtyDlg.busy" @click="submitQuantities">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <div class="plan-pager">
+        <span class="pp-total">共 {{ filtered.length }} 条，第 {{ page }} 页</span>
+        <el-select v-model="pageSize" size="small" class="pp-size" @change="page=1">
           <el-option v-for="s in [20, 50, 100]" :key="s" :label="s + ' 条/页'" :value="s" />
         </el-select>
         <el-button size="small" :disabled="page <= 1" @click="page = page - 1">上一页</el-button>
@@ -4455,7 +5406,7 @@ const PlansView = {
 
     <el-dialog :title="(dlg.editingId ? '编辑' : '新增') + (dlg.form && dlg.form.planType === '月计划' ? '月计划' : '周计划')" v-model="dlg.visible" width="min(1180px, 94%)" top="4vh">
       <el-form v-if="dlg.form" label-position="top" style="max-height:72vh;overflow:auto;padding-right:6px">
-        <div style="border:1px solid #e7e9ec;border-radius:6px;padding:16px 20px 2px;margin:2px 0 14px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:6px;padding:16px 20px 2px;margin:2px 0 14px;background:var(--surface)">
           <div style="font-size:15px;font-weight:600;margin-bottom:14px">项目与作业风险</div>
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12">
@@ -4487,10 +5438,10 @@ const PlansView = {
         </el-row>
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12">
-            <el-form-item label="计划开始时间"><el-date-picker v-model="dlg.form.startDate" type="datetime" placeholder="请选择日期时间" value-format="YYYY-MM-DD HH:mm" style="width:100%" /></el-form-item>
+            <el-form-item label="计划开始时间"><plan-date-time v-model="dlg.form.startDate" placeholder="请选择日期" /></el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
-            <el-form-item label="计划结束时间"><el-date-picker v-model="dlg.form.endDate" type="datetime" placeholder="请选择日期时间" value-format="YYYY-MM-DD HH:mm" style="width:100%" /></el-form-item>
+            <el-form-item label="计划结束时间"><plan-date-time v-model="dlg.form.endDate" placeholder="请选择日期" /></el-form-item>
           </el-col>
         </el-row>
         <el-row :gutter="20">
@@ -4593,7 +5544,7 @@ const PlansView = {
         </el-row>
         </div>
 
-        <div style="border:1px solid #e7e9ec;border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:var(--surface)">
           <div style="font-size:15px;font-weight:600;margin-bottom:14px">作业单位</div>
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12">
@@ -4647,7 +5598,7 @@ const PlansView = {
         </el-row>
         </div>
 
-        <div style="border:1px solid #e7e9ec;border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:var(--surface)">
           <div style="font-size:15px;font-weight:600;margin-bottom:14px">人员安排</div>
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12">
@@ -4706,7 +5657,7 @@ const PlansView = {
         </el-row>
         </div>
 
-        <div style="border:1px solid #e7e9ec;border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:#fff">
+        <div style="border:1px solid var(--line);border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:var(--surface)">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
             <span style="font-size:15px;font-weight:600">当日计划工作量</span>
             <el-link type="primary" :underline="false" @click="oneKeyFill">一键填入</el-link>
@@ -4781,14 +5732,14 @@ const PlansView = {
 
     <el-dialog v-model="staffPick.visible" title="从作业人员名单选择（作业实施人员，不包含工作负责人）" width="min(760px, 94%)">
       <div style="max-height:56vh;overflow:auto">
-        <div v-for="g in groupedTeams" :key="g.team" style="border:1px solid #e7e9ec;border-radius:6px;padding:12px 16px;margin-bottom:12px">
+        <div v-for="g in groupedTeams" :key="g.team" style="border:1px solid var(--line);border-radius:6px;padding:12px 16px;margin-bottom:12px">
           <div style="font-weight:600;margin-bottom:8px">班组：{{ g.team }}</div>
           <div v-for="it in g.identities" :key="it.identity" style="margin-bottom:8px">
             <div style="margin-bottom:4px">身份：{{ it.identity }}<el-link type="primary" :underline="false" style="margin-left:10px" @click="toggleIdentity(it)">全选</el-link></div>
             <el-checkbox v-for="w in it.list" :key="w.id" v-model="staffPick.checked[staffKey(w)]" style="margin-right:16px">{{ w.name }} / {{ w.phone || '-' }}</el-checkbox>
           </div>
         </div>
-        <div v-if="!groupedTeams.length" style="color:#909399;font-size:13px;text-align:center;padding:20px 0">暂无已准入的作业人员，请先在「用户管理-作业人员名单」中维护</div>
+        <div v-if="!groupedTeams.length" style="color:var(--text-3);font-size:13px;text-align:center;padding:20px 0">暂无已准入的作业人员，请先在「用户管理-作业人员名单」中维护</div>
       </div>
       <template #footer>
         <el-button @click="staffPick.visible=false">取 消</el-button>
@@ -4797,5 +5748,180 @@ const PlansView = {
     </el-dialog>
   </div>`
 };
+/* ===== 日期时间选择器：日历 + 时/分/秒三列 + 此刻/确定（对齐原系统截图，用于计划开始/结束时间） ===== */
+const PlanDateTime = {
+  props: {
+    modelValue: { type: String, default: '' },
+    placeholder: { type: String, default: '请选择日期' },
+    disabled: { type: Boolean, default: false }
+  },
+  emits: ['update:modelValue'],
+  setup(props, { emit }) {
+    const { ref, reactive, computed, nextTick, onBeforeUnmount } = Vue;
+    const pad = n => String(n).padStart(2, '0');
+    const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
+    const HOURS = Array.from({ length: 24 }, (_, i) => pad(i));
+    const MINUTES = Array.from({ length: 60 }, (_, i) => pad(i));
+    const SECONDS = Array.from({ length: 60 }, (_, i) => pad(i));
+    const open = ref(false);
+    const triggerEl = ref(null);
+    const panelEl = ref(null);
+    const colH = ref(null); const colM = ref(null); const colS = ref(null);
+    const pos = reactive({ top: 0, left: 0, width: 460 });
+    const now0 = new Date();
+    const view = reactive({ y: now0.getFullYear(), m: now0.getMonth() + 1 });
+    const sel = reactive({ y: 0, m: 0, d: 0, h: 0, mi: 0, s: 0, has: false });
+
+    function parse(v) {
+      const t = String(v == null ? '' : v).trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+      if (!t) return null;
+      return { y: +t[1], m: +t[2], d: +t[3], h: t[4] ? +t[4] : 0, mi: t[5] ? +t[5] : 0, s: t[6] ? +t[6] : 0 };
+    }
+    const text = computed(() => {
+      const p = parse(props.modelValue);
+      return p ? p.y + '-' + pad(p.m) + '-' + pad(p.d) + ' ' + pad(p.h) + ':' + pad(p.mi) + ':' + pad(p.s) : '';
+    });
+    const cells = computed(() => {
+      // 以周一为首日：把 getDay()(周日=0) 折算成 0..6
+      const lead = (new Date(view.y, view.m - 1, 1).getDay() + 6) % 7;
+      const list = [];
+      for (let i = 0; i < 42; i++) {
+        const d = new Date(view.y, view.m - 1, 1 - lead + i);
+        list.push({ y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate(), cur: d.getMonth() + 1 === view.m });
+      }
+      return list;
+    });
+    function isToday(c) {
+      const t = new Date();
+      return c.y === t.getFullYear() && c.m === t.getMonth() + 1 && c.d === t.getDate();
+    }
+    function isSel(c) { return sel.has && sel.y === c.y && sel.m === c.m && sel.d === c.d; }
+    function move(n) {
+      const d = new Date(view.y, view.m - 1 + n, 1);
+      view.y = d.getFullYear(); view.m = d.getMonth() + 1;
+    }
+    function applyPos() {
+      const el = triggerEl.value; if (!el) return;
+      const r = el.getBoundingClientRect();
+      const pw = Math.min(460, window.innerWidth - 24);
+      const ph = panelEl.value ? panelEl.value.offsetHeight : 338;
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+      let top = r.bottom + 6;
+      if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+      pos.width = pw; pos.left = left; pos.top = top;
+    }
+    function scrollCols() {
+      [[colH, sel.h], [colM, sel.mi], [colS, sel.s]].forEach(pair => {
+        const el = pair[0].value; if (!el) return;
+        const idx = sel.has ? Number(pair[1]) : 0;
+        el.scrollTop = Math.max(0, idx * 26 - 104);
+      });
+    }
+    function onDocDown(e) {
+      if (panelEl.value && panelEl.value.contains(e.target)) return;
+      if (triggerEl.value && triggerEl.value.contains(e.target)) return;
+      close();
+    }
+    function onKey(e) {
+      if (e.key !== 'Escape' || !open.value) return;
+      // 只关选择器，不要把整个弹窗一起关掉（ElDialog 的 Esc 监听在 document 冒泡阶段）
+      e.stopPropagation(); e.preventDefault();
+      close();
+    }
+    function bindEvents() {
+      document.addEventListener('mousedown', onDocDown, true);
+      document.addEventListener('keydown', onKey, true);
+      window.addEventListener('resize', applyPos);
+      window.addEventListener('scroll', applyPos, true);
+    }
+    function unbindEvents() {
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', applyPos);
+      window.removeEventListener('scroll', applyPos, true);
+    }
+    function doOpen() {
+      if (props.disabled) return;
+      const p = parse(props.modelValue);
+      if (p) Object.assign(sel, p, { has: true });
+      else Object.assign(sel, { y: 0, m: 0, d: 0, h: 0, mi: 0, s: 0, has: false });
+      const t = new Date();
+      view.y = p ? p.y : t.getFullYear();
+      view.m = p ? p.m : t.getMonth() + 1;
+      open.value = true;
+      applyPos(); bindEvents();
+      nextTick(() => { applyPos(); scrollCols(); });
+    }
+    function close() { open.value = false; unbindEvents(); }
+    function toggle() { open.value ? close() : doOpen(); }
+    function pickDay(c) {
+      sel.y = c.y; sel.m = c.m; sel.d = c.d; sel.has = true;
+      if (c.m !== view.m || c.y !== view.y) { view.y = c.y; view.m = c.m; }
+    }
+    function pickTime(key, v) {
+      sel[key] = Number(v);
+      if (!sel.has) {
+        const t = new Date();
+        sel.y = t.getFullYear(); sel.m = t.getMonth() + 1; sel.d = t.getDate(); sel.has = true;
+      }
+    }
+    function confirm() {
+      if (!sel.has) return;
+      emit('update:modelValue', sel.y + '-' + pad(sel.m) + '-' + pad(sel.d) + ' ' + pad(sel.h) + ':' + pad(sel.mi) + ':' + pad(sel.s));
+      close();
+    }
+    function pickNow() {
+      const t = new Date();
+      Object.assign(sel, { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate(), h: t.getHours(), mi: t.getMinutes(), s: t.getSeconds(), has: true });
+      view.y = sel.y; view.m = sel.m;
+      confirm();
+    }
+    function clear() { emit('update:modelValue', ''); }
+    onBeforeUnmount(unbindEvents);
+
+    return { pad, WEEK, HOURS, MINUTES, SECONDS, open, triggerEl, panelEl, colH, colM, colS, pos, view, sel, text, cells, isToday, isSel, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear };
+  },
+  template: `
+  <div class="pdt" :class="{ 'is-open': open }">
+    <div class="pdt-input" :class="{ 'is-empty': !text, 'is-disabled': disabled }" ref="triggerEl" tabindex="0" @click="toggle" @keydown.enter.prevent="toggle" @keydown.space.prevent="toggle">
+      <span class="pdt-text">{{ text || placeholder }}</span>
+      <span v-if="text && !disabled" class="pdt-clear" title="清空" @click.stop="clear">
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </span>
+      <span class="pdt-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16"><rect x="3.6" y="5.4" width="16.8" height="15" rx="2.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.6 10.2h16.8M8.2 3.4v3.6M15.8 3.4v3.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </span>
+    </div>
+    <teleport to="body">
+      <div v-if="open" class="pdt-panel" ref="panelEl" :style="{ top: pos.top + 'px', left: pos.left + 'px', width: pos.width + 'px' }">
+        <div class="pdt-body">
+          <div class="pdt-cal">
+            <div class="pdt-head">
+              <button type="button" class="pdt-nav" title="上一年" @click="move(-12)">«</button>
+              <button type="button" class="pdt-nav" title="上个月" @click="move(-1)">‹</button>
+              <div class="pdt-title"><span>{{ view.y }}年</span><span>{{ view.m }}月</span></div>
+              <button type="button" class="pdt-nav" title="下个月" @click="move(1)">›</button>
+              <button type="button" class="pdt-nav" title="下一年" @click="move(12)">»</button>
+            </div>
+            <div class="pdt-week"><span v-for="w in WEEK" :key="w">{{ w }}</span></div>
+            <div class="pdt-grid">
+              <div v-for="(c, i) in cells" :key="i" class="pdt-day" :class="{ out: !c.cur, today: isToday(c), on: isSel(c) }" @click="pickDay(c)">{{ c.d }}</div>
+            </div>
+          </div>
+          <div class="pdt-time">
+            <div class="pdt-col" ref="colH"><div v-for="h in HOURS" :key="h" class="pdt-cell" :class="{ on: sel.has && pad(sel.h) === h }" @click="pickTime('h', h)">{{ h }}</div></div>
+            <div class="pdt-col" ref="colM"><div v-for="m in MINUTES" :key="m" class="pdt-cell" :class="{ on: sel.has && pad(sel.mi) === m }" @click="pickTime('mi', m)">{{ m }}</div></div>
+            <div class="pdt-col" ref="colS"><div v-for="s in SECONDS" :key="s" class="pdt-cell" :class="{ on: sel.has && pad(sel.s) === s }" @click="pickTime('s', s)">{{ s }}</div></div>
+          </div>
+        </div>
+        <div class="pdt-foot">
+          <button type="button" class="pdt-now" @click="pickNow">此刻</button>
+          <button type="button" class="pdt-ok" :disabled="!sel.has" @click="confirm">确定</button>
+        </div>
+      </div>
+    </teleport>
+  </div>`
+};
+app.component('PlanDateTime', PlanDateTime);
 app.component('PlansView', PlansView);
 app.mount('#app');
