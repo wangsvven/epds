@@ -1,6 +1,6 @@
 {
   "name": "grid-production-erp",
-  "version": "2.10.1",
+  "version": "2.10.2",
   "description": "本地自托管版电网生产ERP管理系统。零构建，Node + Express + 本地 JSON 存储 + Vue3 + Element Plus。",
   "type": "commonjs",
   "main": "server.js",

@@ -38,12 +38,12 @@ function isAdmin(req) { return !!(req && req.user && req.user.role === ROLE_ADMI
 // ---------- 用户组与写权限 ----------
 // 仅超级用户可维护账号；用户组决定「哪些模块可写」，未列出的模块一律只读。
 const USER_GROUPS = ['超级用户', '资料员', '材料员', '班组长'];
-const MODULE_NAMES = { projects: '项目列表', materials: '材料台账', plans: '计划管理', borrow: '借工管理', completion: '竣工资料', documents: '文档中心', users: '用户管理', settings: '全局设置' };
+const MODULE_NAMES = { projects: '项目列表', materials: '材料台账', plans: '计划管理', borrow: '借工管理', completion: '竣工资料', actualWorks: '工程实际施工', documents: '文档中心', users: '用户管理', settings: '全局设置' };
 const ROLE_WRITE = {
   '超级用户': '*',
   '资料员': '*',
   '材料员': ['materials'],
-  '班组长': ['planQuantities']
+  '班组长': ['planQuantities', 'actualWorks']
 };
 // 旧用户组 → 现有四组的迁移映射
 const LEGACY_GROUP_MAP = { '管理员': '资料员' };
@@ -68,6 +68,7 @@ function moduleOfPath(fp) {
   if (/^\/api\/materials(\/|$)/.test(fp) || /^\/api\/materialRequisitions(\/|$)/.test(fp) || /^\/api\/materialImports(\/|$)/.test(fp) || /^\/api\/materialOutbound(\/|$)/.test(fp)) return 'materials';
   if (/^\/api\/borrowWorks(\/|$)/.test(fp)) return 'borrow';
   if (/^\/api\/completionDocuments(\/|$)/.test(fp)) return 'completion';
+  if (/^\/api\/actualWorks(\/|$)/.test(fp)) return 'actualWorks';
   if (/^\/api\/documents(\/|$)/.test(fp) || /^\/api\/workticket(\/|$)/.test(fp)) return 'documents';
   if (/^\/api\/users(\/|$)/.test(fp) || /^\/api\/workers(\/|$)/.test(fp) || /^\/api\/contacts(\/|$)/.test(fp)) return 'users';
   if (/^\/api\/settings(\/|$)/.test(fp) || /^\/api\/annualPlans(\/|$)/.test(fp) || /^\/api\/substations(\/|$)/.test(fp) || /^\/api\/teams(\/|$)/.test(fp) || /^\/api\/materialCatalog(\/|$)/.test(fp) || /^\/api\/units(\/|$)/.test(fp)) return 'settings';
@@ -104,7 +105,7 @@ function seedDB() {
     completionDocuments: [],
     // 文档中心：仅保留上传所需的分类结构（系统配置，非业务数据）；文件与危险点库全部为空
     documents: {
-      categories: ['规范文件', '工作票模板', '检查表', '奥维地图', '未分类'],
+      categories: ['规范文件', '工作票模板', '检查表', '奥维地图', '危险点'],
       hazardLibrary: [],
       files: []
     },
@@ -120,7 +121,9 @@ function seedDB() {
     wtRules: [],            // 作业内容匹配规则
     wtTechMeasures: [],     // 施工技术措施
     wtSafetyMeasures: [],   // 施工安全措施
+    wtDefaultMeasures: { tech: [], safety: [], savedAt: '' }, // 默认模板快照（「载入默认」用）
     wtHospitals: [],        // 医院联系方式
+    actualWorks: [],        // 工程实际施工量（日期 / 项目 / 工作类型 提交记录）
     // ---------- 全局设置（按真实系统 5 子项，截图 2026-10-12） ----------
     // 年度计划名称：名称自带年份，仅 名称+排序
     // ===== 全局设置字典：全部为空，由用户自行维护 =====
@@ -322,7 +325,15 @@ function migrateDB() {
     if (!Array.isArray(DB.documents.hazardLibrary)) DB.documents.hazardLibrary = [];
     // 兼容老字段：保留 hazardSeedCleared 标记，但不再用于「清空库」
     if (DB.documents.hazardSeedCleared === undefined) DB.documents.hazardSeedCleared = false;
+    // 文档资源分类：原「未分类」统一更名为「危险点」（该分类下的文件会自动解析入企业危险点库）
+    if (!Array.isArray(DB.documents.categories) || !DB.documents.categories.length) {
+      DB.documents.categories = ['规范文件', '工作票模板', '检查表', '奥维地图', '危险点'];
+    } else {
+      DB.documents.categories = DB.documents.categories.map(c => (c === '未分类' ? '危险点' : c));
+      if (!DB.documents.categories.includes('危险点')) DB.documents.categories.push('危险点');
+    }
     if (!Array.isArray(DB.documents.files)) DB.documents.files = [];
+    DB.documents.files.forEach(f => { if (f && f.category === '未分类') f.category = '危险点'; });
     DB.documents.files = DB.documents.files.filter(f => f && typeof f.path === 'string' && f.path);
     // 历史 surveyTemplate 若指向的文件已不存在，则清理引用（不再自动重建）
     if (DB.documents.surveyTemplate && DB.documents.surveyTemplate.path && !fs.existsSync(path.join(__dirname, DB.documents.surveyTemplate.path))) {
@@ -405,6 +416,14 @@ function migrateDB() {
   }
   // 3) 工作票自动化配置集合兜底
   WT_COLLECTIONS.forEach(k => { if (!Array.isArray(DB[k])) DB[k] = []; });
+  // 工程实际施工量集合兜底
+  if (!Array.isArray(DB.actualWorks)) DB.actualWorks = [];
+  // 默认模板快照结构兜底（施工技术/安全措施原文）
+  if (!DB.wtDefaultMeasures || typeof DB.wtDefaultMeasures !== 'object') DB.wtDefaultMeasures = { tech: [], safety: [], savedAt: '' };
+  if (!Array.isArray(DB.wtDefaultMeasures.tech)) DB.wtDefaultMeasures.tech = [];
+  if (!Array.isArray(DB.wtDefaultMeasures.safety)) DB.wtDefaultMeasures.safety = [];
+  if (DB.wtDefaultMeasures.savedAt === undefined) DB.wtDefaultMeasures.savedAt = '';
+  if (DB.wtDefaultMeasures.cleared === undefined) DB.wtDefaultMeasures.cleared = false;
   // 4) 修复历史上传文件名乱码（仅修展示名，磁盘 path 保持不变）
   if (DB.documents && Array.isArray(DB.documents.files)) {
     DB.documents.files.forEach(f => { const n = repairUploadName(f.name); if (n !== f.name) f.name = n; });
@@ -482,6 +501,52 @@ function categorize(hazard) {
     if (keys.some(k => h.includes(k))) return cat;
   }
   return '';
+}
+
+// 危险点库统一导入：首个工作表 A 列危险点、C 列控制措施；按「危险点+措施」去重
+function importHazardRows(rows) {
+  const list = (rows || []).slice(1)
+    .map(r => [String(r[0] || '').trim(), String(r[2] || '').trim()])
+    .filter(([a, b]) => a || b);
+  const existing = new Set(DB.documents.hazardLibrary.map(h => h.hazard + '||' + h.measure));
+  let maxSort = DB.documents.hazardLibrary.reduce((m, h) => Math.max(m, h.sort || 0), -1);
+  let added = 0, skipped = 0;
+  for (const [hazard, measure] of list) {
+    if (!hazard || !measure) { skipped++; continue; }
+    const key = hazard + '||' + measure;
+    if (existing.has(key)) { skipped++; continue; }
+    existing.add(key);
+    DB.documents.hazardLibrary.push({ id: genId('h'), hazard, measure, category: categorize(hazard), sort: ++maxSort });
+    added++;
+  }
+  return { added, skipped, total: list.length };
+}
+// 解析 Excel/CSV 缓冲区并入库（文档中心「危险点」分类上传/移入时自动解析）
+function parseHazardFromBuffer(buffer, name) {
+  const nm = String(name || '');
+  let rows;
+  if (/\.csv$/i.test(nm)) rows = parseCSVBuffer(buffer);
+  else if (/\.(xlsx|xls)$/i.test(nm)) {
+    const wb = xlsx.read(buffer, { type: 'buffer' });
+    rows = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: false });
+  } else {
+    return { unsupported: true, added: 0, skipped: 0, total: 0 };
+  }
+  const r = importHazardRows(rows);
+  saveDB();
+  return r;
+}
+function resolveDocPath(p) {
+  if (!p) return null;
+  if (p.startsWith('assets/')) return path.join(__dirname, p);
+  if (p.startsWith('uploads/')) return path.join(__dirname, 'data', p);
+  return null;
+}
+// 解析已上传的文档文件并入库
+function parseHazardFromFile(file) {
+  const abs = resolveDocPath(file && file.path);
+  if (!abs || !fs.existsSync(abs)) return { error: '文件不存在，无法解析', added: 0, skipped: 0 };
+  return parseHazardFromBuffer(fs.readFileSync(abs), (file && file.name) || '');
 }
 
 function seedHazardLibraryFromNorm() {
@@ -1806,12 +1871,18 @@ app.post('/api/documents/files', upload.single('file'), (req, res) => {
     const rel = 'uploads/' + id + '_' + safe;
     fs.writeFileSync(path.join(__dirname, 'data', rel), req.file.buffer);
     const file = {
-      id, category: req.body.category || '未分类', name: req.file.originalname,
+      id, category: req.body.category || '规范文件', name: req.file.originalname,
       size: req.file.size, uploader: req.user.name, uploadedAt: fmtNow(), path: rel
     };
     DB.documents.files.push(file);
     saveDB();
-    res.json(file);
+    // 上传到「危险点」分类：Excel/CSV 自动解析入企业危险点库（A列危险点、C列控制措施，去重）
+    let hazardImport = null;
+    if (file.category === '危险点') {
+      try { hazardImport = parseHazardFromBuffer(req.file.buffer, file.name); }
+      catch (e) { hazardImport = { error: e.message, added: 0, skipped: 0 }; }
+    }
+    res.json({ ...file, hazardImport });
   } catch (e) { res.status(500).json({ error: '上传失败：' + e.message }); }
 });
 
@@ -1843,9 +1914,17 @@ app.put('/api/documents/files/:id', (req, res) => {
   const idx = DB.documents.files.findIndex(f => f.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: '未找到' });
   if (DB.documents.files[idx].fixed) return res.status(400).json({ error: '固定系统文件不可移动' });
-  DB.documents.files[idx] = { ...DB.documents.files[idx], ...req.body, id: req.params.id };
+  const before = DB.documents.files[idx];
+  const updated = { ...before, ...req.body, id: req.params.id };
+  DB.documents.files[idx] = updated;
   saveDB();
-  res.json(DB.documents.files[idx]);
+  // 移入「危险点」分类：若为 Excel/CSV，自动解析入企业危险点库
+  let hazardImport = null;
+  if (updated.category === '危险点' && before.category !== '危险点') {
+    try { hazardImport = parseHazardFromFile(updated); }
+    catch (e) { hazardImport = { error: e.message, added: 0, skipped: 0 }; }
+  }
+  res.json({ ...updated, hazardImport });
 });
 
 app.delete('/api/documents/files/:id', (req, res) => {
@@ -1968,20 +2047,87 @@ app.post('/api/documents/hazard/import', upload.single('file'), (req, res) => {
       .map(r => [String(r[0] || '').trim(), String(r[2] || '').trim()])
       .filter(([a, b]) => a || b);
     if (data.length > 1000) return res.status(400).json({ error: '超过最多 1000 行的限制' });
-    const existing = new Set(DB.documents.hazardLibrary.map(h => h.hazard + '||' + h.measure));
-    let maxSort = DB.documents.hazardLibrary.reduce((m, h) => Math.max(m, h.sort || 0), -1);
-    let added = 0, skipped = 0;
-    for (const [hazard, measure] of data) {
-      if (!hazard || !measure) { skipped++; continue; }
-      const key = hazard + '||' + measure;
-      if (existing.has(key)) { skipped++; continue; }
-      existing.add(key);
-      DB.documents.hazardLibrary.push({ id: genId('h'), hazard, measure, category: categorize(hazard), sort: ++maxSort });
-      added++;
-    }
+    const { added, skipped } = importHazardRows(rows);
     saveDB();
     res.json({ ok: true, added, skipped });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
+});
+
+// ---------- 工程实际施工量 ----------
+const ACTUAL_WORK_TYPES = ['转运', '立杆', '放线和设备安装'];
+app.get('/api/actualWorks', (req, res) => {
+  const list = (DB.actualWorks || []).filter(r => !r.deleted)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) ||
+                    String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+  res.json(list);
+});
+app.post('/api/actualWorks', (req, res) => {
+  try {
+    const b = req.body || {};
+    const date = String(b.date || '').trim();
+    const project = String(b.project || '').trim();
+    // 工作类型 / 施工人员 均支持多选（数组），兼容旧版单值字符串
+    const workTypes = (Array.isArray(b.workTypes) ? b.workTypes : (b.workType ? [b.workType] : []))
+      .map(x => String(x || '').trim()).filter(Boolean);
+    const workers = (Array.isArray(b.workers) ? b.workers : (b.worker ? [b.worker] : []))
+      .map(x => String(x || '').trim()).filter(Boolean);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: '请选择日期' });
+    if (!project) return res.status(400).json({ error: '请选择项目名称（包）' });
+    if (!workTypes.length || workTypes.some(t => !ACTUAL_WORK_TYPES.includes(t))) return res.status(400).json({ error: '请选择工作类型' });
+    if (!workers.length) return res.status(400).json({ error: '请选择施工人员' });
+    // 材料实际施工量：只保留数量 > 0 的项
+    const items = Array.isArray(b.items) ? b.items.map(it => ({
+      materialId: String((it && it.materialId) || ''),
+      code: String((it && it.code) || ''),
+      description: String((it && it.description) || '').trim(),
+      unit: String((it && it.unit) || '').trim(),
+      qty: Number(it && it.qty) || 0
+    })).filter(it => it.description && it.qty > 0) : [];
+    const row = {
+      id: genId('aw'), date, project, workTypes, workers, items,
+      submitter: (req.user && (req.user.name || req.user.username)) || '',
+      submittedAt: fmtNow(), deleted: false
+    };
+    DB.actualWorks.push(row);
+    saveDB();
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: '提交失败：' + e.message }); }
+});
+app.put('/api/actualWorks/:id', (req, res) => {
+  try {
+    const row = (DB.actualWorks || []).find(r => r.id === req.params.id && !r.deleted);
+    if (!row) return res.status(404).json({ error: '未找到' });
+    const b = req.body || {};
+    const date = String(b.date || '').trim();
+    const project = String(b.project || '').trim();
+    const workTypes = (Array.isArray(b.workTypes) ? b.workTypes : (b.workType ? [b.workType] : []))
+      .map(x => String(x || '').trim()).filter(Boolean);
+    const workers = (Array.isArray(b.workers) ? b.workers : (b.worker ? [b.worker] : []))
+      .map(x => String(x || '').trim()).filter(Boolean);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: '请选择日期' });
+    if (!project) return res.status(400).json({ error: '请选择项目名称（包）' });
+    if (!workTypes.length || workTypes.some(t => !ACTUAL_WORK_TYPES.includes(t))) return res.status(400).json({ error: '请选择工作类型' });
+    if (!workers.length) return res.status(400).json({ error: '请选择施工人员' });
+    const items = Array.isArray(b.items) ? b.items.map(it => ({
+      materialId: String((it && it.materialId) || ''),
+      code: String((it && it.code) || ''),
+      description: String((it && it.description) || '').trim(),
+      unit: String((it && it.unit) || '').trim(),
+      qty: Number(it && it.qty) || 0
+    })).filter(it => it.description && it.qty > 0) : [];
+    row.date = date; row.project = project; row.workTypes = workTypes; row.workers = workers; row.items = items;
+    row.updatedAt = fmtNow();
+    row.updatedBy = (req.user && (req.user.name || req.user.username)) || '';
+    saveDB();
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: '保存失败：' + e.message }); }
+});
+app.delete('/api/actualWorks/:id', (req, res) => {
+  const idx = (DB.actualWorks || []).findIndex(r => r.id === req.params.id && !r.deleted);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  DB.actualWorks.splice(idx, 1);
+  saveDB();
+  res.json({ ok: true });
 });
 
 // ---------- 工作票自动化配置：配置状态 ----------
@@ -1992,11 +2138,37 @@ function fmtStamp(d) {
   return d.getFullYear() + '/' + p2(d.getMonth() + 1) + '/' + p2(d.getDate()) + ' ' +
          p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
 }
+// 从文档中心已上传的文件中识别「现场勘察（查勘）记录模板」，自动关联为 surveyTemplate
+function isSurveyTemplateName(name) {
+  const n = String(name || '');
+  return /(勘察|查勘)/.test(n) && /\.(docx|doc)$/i.test(n);
+}
+function resolveSurveyTemplate() {
+  const docs = DB.documents || {};
+  const cur = docs.surveyTemplate;
+  if (cur && cur.name) {
+    const abs = resolveDocPath(cur.path);
+    if (!abs || fs.existsSync(abs)) return cur; // 已关联且文件存在
+  }
+  const cands = (docs.files || [])
+    .filter(f => !f.deleted && f.path && isSurveyTemplateName(f.name))
+    .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')));
+  if (!cands.length) return null;
+  const f = cands[0];
+  const meta = {
+    name: f.name, path: f.path, size: f.size || null,
+    uploader: f.uploader || '', uploadedAt: f.uploadedAt || '',
+    sourceFileId: f.id, autoLinked: true
+  };
+  DB.documents.surveyTemplate = meta;
+  saveDB();
+  return meta;
+}
+
 app.get('/api/workticket/config-status', (req, res) => {
   const cnt = key => (DB[key] || []).filter(r => !r.deleted).length;
   const haz = (DB.documents && DB.documents.hazardLibrary) || [];
-  const survey = DB.documents && DB.documents.surveyTemplate && DB.documents.surveyTemplate.name
-    ? DB.documents.surveyTemplate : null;
+  const survey = resolveSurveyTemplate();
 
   const raw = [
     { key: 'rules',     title: '作业内容匹配规则', count: cnt('wtRules') },
@@ -2050,7 +2222,7 @@ function wtRulesOf(req) {
 }
 // 资料库分组（含各分组条目数）与下拉选项
 app.get('/api/workticket/library', (req, res) => {
-  const opt = key => wtAlive(key).map(r => ({ id: r.id, name: (r.title || r.name || r.content || '').slice(0, 80) })).filter(o => o.name);
+  const opt = key => wtAlive(key).map(r => ({ id: r.id, name: (r.title || r.name || r.content || '').slice(0, 80), sort: (Number(r.sort) || 0) })).filter(o => o.name);
   res.json({
     groups: [
       { key: 'rules', title: '作业内容匹配规则', count: wtAlive('wtRules').length, showCount: true },
@@ -2066,22 +2238,117 @@ app.get('/api/workticket/library', (req, res) => {
   });
 });
 
+// ---------- 默认模板（施工技术 / 安全措施原文 快照）----------
+function wtDefaultShape() {
+  if (!DB.wtDefaultMeasures || typeof DB.wtDefaultMeasures !== 'object') DB.wtDefaultMeasures = {};
+  if (!Array.isArray(DB.wtDefaultMeasures.tech)) DB.wtDefaultMeasures.tech = [];
+  if (!Array.isArray(DB.wtDefaultMeasures.safety)) DB.wtDefaultMeasures.safety = [];
+  if (DB.wtDefaultMeasures.savedAt === undefined) DB.wtDefaultMeasures.savedAt = '';
+  if (DB.wtDefaultMeasures.cleared === undefined) DB.wtDefaultMeasures.cleared = false;
+  return DB.wtDefaultMeasures;
+}
+const wtNormTitle = s => String(s || '').replace(/\s+/g, ' ').trim();
+// 把当前「施工技术/安全措施原文」冻结为默认模板（按当前顺序与序号）
+function wtSnapshotDefault() {
+  const d = wtDefaultShape();
+  const pick = key => wtAlive(key).slice()
+    .sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0))
+    .map(r => ({ sort: Number(r.sort) || 0, title: String(r.title || '').trim(), content: String(r.content || '').trim() }))
+    .filter(x => x.title && x.content);
+  d.tech = pick('wtTechMeasures');
+  d.safety = pick('wtSafetyMeasures');
+  d.savedAt = nowISO();
+  d.cleared = false;
+  saveDB();
+  return d;
+}
+// 默认配置初始快照：默认模板为空且有措施数据时，自动把当前数据冻结为默认
+// （「清除」只清空列表、不动默认模板，因此这里无需再考虑重复灌入）
+(function initDefaultMeasures() {
+  try {
+    const d = wtDefaultShape();
+    if (d.tech.length || d.safety.length) return;
+    if (wtAlive('wtTechMeasures').length || wtAlive('wtSafetyMeasures').length) wtSnapshotDefault();
+  } catch (e) { console.error('  ⚠ 默认模板初始化失败：', e.message); }
+})();
+
+app.get('/api/workticket/measures/default', (req, res) => {
+  const d = wtDefaultShape();
+  res.json({ tech: d.tech.length, safety: d.safety.length, savedAt: d.savedAt || '' });
+});
+
+// 清除全部措施原文：清空「施工技术措施原文」与「施工安全措施原文」两个列表；
+// 默认模板（默认配置）不受影响，之后可用「载入默认」把这些内容重新加载回来
+app.post('/api/workticket/measures/clear-all', (req, res) => {
+  try {
+    const tech = wtAlive('wtTechMeasures').length;
+    const safety = wtAlive('wtSafetyMeasures').length;
+    DB.wtTechMeasures = [];
+    DB.wtSafetyMeasures = [];
+    saveDB();
+    res.json({ ok: true, clearedTech: tech, clearedSafety: safety, tech: 0, safety: 0 });
+  } catch (e) { res.status(500).json({ error: '清除失败：' + e.message }); }
+});
+
+// 以当前数据覆盖默认模板
+app.post('/api/workticket/measures/default/save', (req, res) => {
+  try {
+    const d = wtSnapshotDefault();
+    res.json({ ok: true, tech: d.tech.length, safety: d.safety.length, savedAt: d.savedAt });
+  } catch (e) { res.status(500).json({ error: '保存默认模板失败：' + e.message }); }
+});
+
+// 载入默认：把默认配置补回当前列表——完全相同的条目跳过（按「标题+内容」去重，避免同名不同内容被吞），删除过的补回
+app.post('/api/workticket/measures/default/load', (req, res) => {
+  try {
+    const d = wtDefaultShape();
+    const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
+    const keyOf = (title, content) => norm(title) + '\u0001' + norm(content);
+    const result = {};
+    const merge = (kind, coll, list) => {
+      const alive = wtAlive(coll);
+      // 多重集匹配：按「标题+内容」统计列表里已有多少条；默认里有几条就补到几条（含完全相同的重复条目）
+      const remaining = new Map();
+      alive.forEach(r => { const k = keyOf(r.title, r.content); remaining.set(k, (remaining.get(k) || 0) + 1); });
+      let maxSort = alive.reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+      let added = 0, skipped = 0;
+      (list || []).forEach(item => {
+        const title = String(item.title || '').trim();
+        const content = String(item.content || '').trim();
+        if (!title || !content) { skipped++; return; }
+        const key = keyOf(title, content);
+        const n = remaining.get(key) || 0;
+        if (n > 0) { remaining.set(key, n - 1); skipped++; return; } // 已有同款，跳过
+        const s = Number(item.sort) > 0 ? Number(item.sort) : ++maxSort;
+        DB[coll].push({ id: genId('wt'), deleted: false, sort: s, createdAt: nowISO(), updatedAt: nowISO(), title, content });
+        added++;
+      });
+      result[kind] = { added, skipped };
+    };
+    merge('tech', 'wtTechMeasures', d.tech);
+    merge('safety', 'wtSafetyMeasures', d.safety);
+    saveDB();
+    res.json({ ok: true, result, tech: wtAlive('wtTechMeasures').length, safety: wtAlive('wtSafetyMeasures').length });
+  } catch (e) { res.status(500).json({ error: '载入默认失败：' + e.message }); }
+});
+
 app.get('/api/workticket/rules', (req, res) => res.json(wtRulesOf(req)));
 
 function wtRulePayload(b) {
   const workType = String(b.workType || '').trim();
+  const category = String(b.category || '').trim();
   const keywordsRaw = String(b.keywords || '').trim();
   if (!workType) return { error: '请填写作业类型名称' };
-  if (!keywordsRaw) return { error: '请填写自定义匹配词' };
+  if (!category && !keywordsRaw) return { error: '请选择匹配类别或填写自定义匹配词' };
   if (workType.length > 120) return { error: '作业类型名称不超过 120 字' };
   if (keywordsRaw.length > 2000) return { error: '自定义匹配词不超过 2000 字' };
-  // 匹配词统一成数组（逗号/顿号/换行分隔都为合法输入），同时保留原始文本便于回填
-  const keywords = keywordsRaw.split(/[,，、;；\n\r]+/).map(x => x.trim()).filter(Boolean);
+  // 选了固定活动类别时，以「类别」作为匹配规则；否则用自定义匹配词（逗号/顿号/换行分隔）
+  const keywords = category ? [category] : keywordsRaw.split(/[,，、;；\n\r]+/).map(x => x.trim()).filter(Boolean);
   if (!keywords.length) return { error: '请填写自定义匹配词' };
   return {
     workType,
-    category: String(b.category || '').trim(),
-    keywordsRaw,
+    category,
+    keywordsRaw: category ? '' : keywordsRaw,
     keywords,
     techId: String(b.techId || '').trim(),
     techName: String(b.techName || '').trim(),
@@ -2438,7 +2705,7 @@ app.get('/api/init-status', (req, res) => {
   const workersWithTeam = myWorkers.filter(w => !!(w.team && String(w.team).trim())).length;
   const contacts = (DB.contacts || []).filter(aliveFilter()).length;
   const haz = (DB.documents && DB.documents.hazardLibrary) || [];
-  const survey = !!(DB.documents && DB.documents.surveyTemplate && DB.documents.surveyTemplate.name);
+  const survey = !!resolveSurveyTemplate();
   res.json({
     initialized: !!(DB.settings && DB.settings.initialized),
     companyName: (DB.settings && DB.settings.companyName) || '',

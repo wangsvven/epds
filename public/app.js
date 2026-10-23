@@ -42,6 +42,43 @@ function tagType(val) {
   return 'info';
 }
 
+/* ---------------- 材料分桶（电杆 / 导线 / 设备 / 金具及铁附件）：项目页与工程实际施工共用 ---------------- */
+const MAT_POLE_RE = /电杆|预应力|方杆|水泥杆|钢管杆|等径杆|锥形杆|混凝土杆/;
+const MAT_CABLE_RE = new RegExp('\\b(?:' + [
+  'GJX?', 'LGJX?', 'LGJF', 'LJ', 'TJ', 'JL\\s*\\/\\s*G[1-3][AB]?',
+  'JKLYJ\\/B', 'JKLYJ', 'JKLGYJ', 'JKLY', 'JKLV', 'JKYJ',
+  'YJLV22', 'YJV22', 'YJLV32', 'YJV32', 'YJLV', 'YJV', 'YJLY', 'YJY',
+  'VLV', 'VV',
+  'BVV', 'BVVB', 'BLVV', 'BVR', 'BV', 'BLV', 'BXR', 'BLX', 'BX',
+  'RVVP', 'RVV', 'RVS', 'RV',
+  'KVVP', 'KVV', 'KYJV', 'OPGW', 'ADSS'
+].join('|') + ')', 'i');
+const MAT_DEVICE_RE = /变压器|JP\s*柜|配电箱|开关|熔断器|断路器|避雷器|互感器|集中器|环网柜|分支箱/;
+const MAT_FITTING_RE = /金具|铁附件|抱箍|托箍|横担|托担|挂环|挂板|碗头|球头|联板|线夹|并沟|楔形|耐张|悬垂|压接管|接续管|拉线棒|拉线盘|撑铁|垫铁|斜撑|撑脚|螺杆|螺丝|螺栓|穿钉|桩头|保护套|护套|绝缘罩|防盗锁|标识牌|标识管|相序牌|警示牌|标志|接线端子|接地环|接地线|接地体|接地铁|门型架|槽钢|夹铁|防震锤|绝缘子|瓷瓶|电缆头|脚钉|爬梯|卡盘|底盘|支架/;
+function matBucketOf(desc) {
+  const s = String(desc || '');
+  if (MAT_POLE_RE.test(s)) return 'pole';
+  if (MAT_CABLE_RE.test(s)) return 'cable';
+  if (MAT_FITTING_RE.test(s)) return 'fitting'; // 先于设备：避免被「熔断器 / 变压器 / JP柜 / 避雷器」字样误吞
+  if (MAT_DEVICE_RE.test(s)) return 'device';
+  return 'fitting'; // 其余统一归「金具及铁附件」
+}
+
+/* ---------------- 材料包名与单位换算 ----------------
+ * 电杆=根、导线=千米、设备=台、金具及铁附件=件（包口径）。
+ * 材料明细里导线类多以「m（米）」计量，而包口径是「千米」，展示/汇总时按 1 千米 = 1000 米 折算；
+ * 钢绞线等以 kg 计量的条目无法折算成千米，单独提示，不混进千米合计。 */
+const MAT_PKG_LABEL = { pole: '电杆', cable: '导线', device: '设备', fitting: '金具及铁附件' };
+const MAT_UNIT_TO_KM = { m: 0.001, '米': 0.001, km: 1, '千米': 1, '公里': 1 };
+function matUnitToKm(qty, unit) {
+  const f = MAT_UNIT_TO_KM[String(unit == null ? '' : unit).trim().toLowerCase()];
+  return f === undefined ? null : (Number(qty) || 0) * f;
+}
+function fmtKm(n) {
+  const v = Math.round((Number(n) || 0) * 1000) / 1000;
+  return String(v);
+}
+
 /* ---------------- 当前用户权限（由 /api/me 填充；全局 mixin 暴露 canWrite） ---------------- */
 const Auth = reactive({ loaded: false, isAdmin: false, group: '班组长', writeModules: [] });
 
@@ -192,7 +229,9 @@ const DocumentsView = {
     const hazPage = ref(1);
     const hazPageSize = ref(10);
     const hazDlg = reactive({ visible: false, editing: false, busy: false, id: '', hazard: '', measure: '', sort: null });
+    const hazView = reactive({ visible: false, hazard: '', measure: '' });
     const hazImportInput = ref(null);
+    function openHazView(row) { Object.assign(hazView, { visible: true, hazard: row.hazard || '', measure: row.measure || '' }); }
     const hazFiltered = computed(() => {
       const k = hazKeyword.value.trim();
       if (!k) return wtHazards.value;
@@ -266,11 +305,73 @@ const DocumentsView = {
     /* 各分组可独立展开（互不影响） */
     const libOpen = reactive({ rules: false, tech: false, safety: false, hospitals: false, emergency: false });
     const rules = ref([]);
-    const ruleDlg = reactive({ visible: false, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', safetyId: '', safetyName: '' });
+    const ruleDlg = reactive({ visible: false, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', techIds: [], safetyId: '', safetyName: '', safetyIds: [] });
     const ruleImportInput = ref(null);
     const rulePreview = reactive({ visible: false, busy: false, rows: [], errors: [] });
     /* 施工技术 / 安全措施原文（同结构，kind = tech | safety） */
     const measures = reactive({ tech: [], safety: [] });
+    /* 默认模板（载入默认 / 清除） */
+    const defaultMea = reactive({ tech: 0, safety: 0, savedAt: '', busy: false });
+    async function loadDefaultMeta() {
+      try {
+        const d = await api.get('/api/workticket/measures/default');
+        defaultMea.tech = d.tech || 0; defaultMea.safety = d.safety || 0; defaultMea.savedAt = d.savedAt || '';
+      } catch (e) { /* 忽略 */ }
+    }
+    // 清除：清空「施工技术措施原文」「施工安全措施原文」两个列表（默认配置保留，可用「载入默认」恢复）
+    const cntOfGroup = key => { const g = (lib.groups || []).find(x => x.key === key); return g ? (g.count || 0) : 0; };
+    async function clearAllMeasures() {
+      const tN = cntOfGroup('tech'), sN = cntOfGroup('safety');
+      if (!tN && !sN) { ElementPlus.ElMessage.info('当前没有可清除的措施原文'); return; }
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          `确定清除「施工技术措施原文」与「施工安全措施原文」的全部内容（技术 ${tN} 条 / 安全 ${sN} 条）？清除后可通过「载入默认」重新载入。`,
+          '清除措施原文', { type: 'warning', confirmButtonText: '确定清除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' });
+      } catch (e) { return; }
+      defaultMea.busy = true;
+      try {
+        const d = await api.post('/api/workticket/measures/clear-all');
+        ElementPlus.ElMessage.success(`已清除：技术 ${d.clearedTech} 条 / 安全 ${d.clearedSafety} 条`);
+        await loadMeasures('tech'); await loadMeasures('safety'); await loadLib(); await loadWt();
+        meaPage.tech = 1; meaPage.safety = 1;
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { defaultMea.busy = false; }
+    }
+    /* 措施原文分页：默认每页 10 条，可切换 10/20/50 */
+    const MEA_PAGE_SIZE = 10;
+    const meaPage = reactive({ tech: 1, safety: 1 });
+    const meaPageSize = reactive({ tech: 10, safety: 10 });
+    const meaTotal = kind => (measures[kind] || []).length;
+    const meaPaged = kind => {
+      const list = measures[kind] || [];
+      const size = meaPageSize[kind] || MEA_PAGE_SIZE;
+      const start = (meaPage[kind] - 1) * size;
+      return list.slice(start, start + size);
+    };
+    function meaSetPageSize(kind, n) { meaPageSize[kind] = n; meaPage[kind] = 1; }
+    watch(() => [measures.tech.length, measures.safety.length, meaPageSize.tech, meaPageSize.safety], () => {
+      ['tech', 'safety'].forEach(k => {
+        const size = meaPageSize[k] || MEA_PAGE_SIZE;
+        const maxP = Math.max(1, Math.ceil((measures[k] || []).length / size));
+        if (meaPage[k] > maxP) meaPage[k] = maxP;
+      });
+    });
+    async function loadDefaultMeasures() {
+      if (!defaultMea.tech && !defaultMea.safety) await loadDefaultMeta();
+      if (!defaultMea.tech && !defaultMea.safety) { ElementPlus.ElMessage.warning('默认配置为空，无内容可载入'); return; }
+      defaultMea.busy = true;
+      try {
+        const d = await api.post('/api/workticket/measures/default/load');
+        const r = d.result || {};
+        const t = r.tech || { added: 0, skipped: 0 }, s = r.safety || { added: 0, skipped: 0 };
+        const added = (t.added || 0) + (s.added || 0);
+        ElementPlus.ElMessage.success(added
+          ? `已载入默认：技术新增 ${t.added} / 跳过 ${t.skipped}，安全新增 ${s.added} / 跳过 ${s.skipped}`
+          : '默认内容已全部存在，无需载入');
+        await loadMeasures('tech'); await loadMeasures('safety'); await loadLib(); await loadWt(); await loadDefaultMeta();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { defaultMea.busy = false; }
+    }
     const meaDlg = reactive({ visible: false, editing: false, busy: false, kind: 'tech', id: '', sort: '', title: '', content: '' });
     /* 措施原文全文查看（二级页面） */
     const meaView = reactive({ visible: false, kind: 'tech', title: '', sort: '', content: '' });
@@ -282,6 +383,52 @@ const DocumentsView = {
         content: row.content || ''
       });
     }
+    /* 措施原文解析：原文中的表格以「制表符 Tab」分列（Excel 粘贴即带 Tab），
+       连续 ≥2 行且每行 ≥2 个非空单元格即识别为表格；散文里的 Tab 只是行首缩进（仅 1 个非空格），不会误判。 */
+    const meaViewBlocks = computed(() => {
+      const lines = String(meaView.content || '').split(/\r?\n/);
+      const splitTab = line => {
+        const raw = line.split('\t').map(s => s.trim());
+        while (raw.length && raw[raw.length - 1] === '') raw.pop(); // 去掉行尾空列
+        return raw;
+      };
+      const nonEmpty = cells => cells.filter(c => c !== '').length;
+      // 值单元格：含数字且不含中文（"800" / "450/600" / "＜1" / "1.9（2.2）" 视为值；"120及以下" 不是）
+      const valueLike = c => /[\d０-９]/.test(c) && !/[\u4e00-\u9fa5]/.test(c);
+      const blocks = [];
+      let textBuf = [];
+      const flushText = () => {
+        if (!textBuf.length) return;
+        const t = textBuf.join('\n');
+        if (t.trim()) blocks.push({ type: 'text', text: t });
+        textBuf = [];
+      };
+      let i = 0;
+      while (i < lines.length) {
+        if (nonEmpty(splitTab(lines[i])) < 2) { textBuf.push(lines[i]); i++; continue; }
+        // 收集连续的可表格化行
+        let j = i;
+        const rows = [];
+        while (j < lines.length) {
+          const c = splitTab(lines[j]);
+          if (nonEmpty(c) < 2) break;
+          rows.push(c); j++;
+        }
+        if (rows.length >= 2) {
+          flushText();
+          const cols = Math.max(...rows.map(r => r.length));
+          const grid = rows.map(r => { const c = r.slice(); while (c.length < cols) c.push(''); return c; });
+          // 首行全为文字、且后续行含数值 → 视作表头
+          const header = !grid[0].some(valueLike) && grid.slice(1).some(r => r.some(valueLike));
+          blocks.push({ type: 'table', header, cols, headCells: rows[0].slice(), rows: grid });
+          i = j;
+        } else {
+          textBuf.push(lines[i]); i++;
+        }
+      }
+      flushText();
+      return blocks;
+    });
     const measureLabel = kind => (kind === 'safety' ? '施工安全措施原文' : '施工技术措施原文');
     /* 医院联系方式 */
     const hospitals = ref([]);
@@ -330,6 +477,15 @@ const DocumentsView = {
         sort: row.sort === undefined || row.sort === null ? '' : String(row.sort),
         title: row.title || '', content: row.content || ''
       });
+    }
+    // 措施原文输入框：按 Tab 插入制表符（避免跳焦点），便于手工录入「Tab 分列」的表格
+    function meaInsertTab(e) {
+      const el = e && e.target;
+      if (!el || el.tagName !== 'TEXTAREA') return;
+      const start = el.selectionStart, end = el.selectionEnd, val = el.value;
+      el.value = val.slice(0, start) + '\t' + val.slice(end);
+      el.selectionStart = el.selectionEnd = start + 1;
+      el.dispatchEvent(new Event('input', { bubbles: true })); // 同步 v-model
     }
     async function submitMea() {
       if (!String(meaDlg.title || '').trim()) { ElementPlus.ElMessage.warning('请填写条文标题 / 关键字'); return; }
@@ -443,8 +599,25 @@ const DocumentsView = {
       finally { impPreview.busy = false; }
     }
 
+    // 规则里「关联措施」用多选：id ↔ 名称互转（兼容历史单值/分号拼接数据）
+    function ruleOptions(kind) { return (kind === 'tech' ? lib.techOptions : lib.safetyOptions) || []; }
+    function ruleIdsOfKind(kind, row) {
+      const opts = ruleOptions(kind);
+      const idStr = kind === 'tech' ? (row.techId || '') : (row.safetyId || '');
+      const nameStr = kind === 'tech' ? (row.techName || '') : (row.safetyName || '');
+      let ids = String(idStr).split(/[,，;；]/).map(s => s.trim()).filter(Boolean);
+      const names = String(nameStr).split(/[；;]/).map(s => s.trim()).filter(Boolean);
+      if (!ids.length || ids.length !== names.length) {
+        ids = names.map(n => { const o = opts.find(x => x.name === n); return o ? o.id : ''; }).filter(Boolean);
+      }
+      return ids;
+    }
+    function ruleNamesOfKind(kind, ids) {
+      const opts = ruleOptions(kind);
+      return (ids || []).map(id => { const o = opts.find(x => x.id === id); return o ? o.name : ''; }).filter(Boolean);
+    }
     function openRuleAdd() {
-      Object.assign(ruleDlg, { visible: true, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', safetyId: '', safetyName: '' });
+      Object.assign(ruleDlg, { visible: true, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', techIds: [], safetyId: '', safetyName: '', safetyIds: [] });
     }
     function openRuleEdit(row) {
       Object.assign(ruleDlg, {
@@ -452,19 +625,23 @@ const DocumentsView = {
         workType: row.workType || '', category: row.category || '',
         keywords: row.keywordsRaw || (row.keywords || []).join('、'),
         techId: row.techId || '', techName: row.techName || '',
-        safetyId: row.safetyId || '', safetyName: row.safetyName || ''
+        techIds: ruleIdsOfKind('tech', row),
+        safetyId: row.safetyId || '', safetyName: row.safetyName || '',
+        safetyIds: ruleIdsOfKind('safety', row)
       });
     }
     async function submitRule() {
       if (!ruleDlg.workType.trim()) { ElementPlus.ElMessage.warning('请填写作业类型名称'); return; }
-      if (!ruleDlg.keywords.trim()) { ElementPlus.ElMessage.warning('请填写自定义匹配词'); return; }
+      if (!ruleDlg.category && !ruleDlg.keywords.trim()) { ElementPlus.ElMessage.warning('请选择匹配类别或填写自定义匹配词'); return; }
       ruleDlg.busy = true;
       try {
+        const techNames = ruleNamesOfKind('tech', ruleDlg.techIds);
+        const safetyNames = ruleNamesOfKind('safety', ruleDlg.safetyIds);
         const payload = {
           workType: ruleDlg.workType.trim(), category: ruleDlg.category || '',
           keywords: ruleDlg.keywords.trim(),
-          techId: ruleDlg.techId || '', techName: ruleDlg.techName || '',
-          safetyId: ruleDlg.safetyId || '', safetyName: ruleDlg.safetyName || ''
+          techId: (ruleDlg.techIds || []).join(','), techName: techNames.join('；'),
+          safetyId: (ruleDlg.safetyIds || []).join(','), safetyName: safetyNames.join('；')
         };
         if (ruleDlg.editing) await api.put('/api/workticket/rules/' + ruleDlg.id, payload);
         else await api.post('/api/workticket/rules', payload);
@@ -532,8 +709,18 @@ const DocumentsView = {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '上传失败');
-        ElementPlus.ElMessage.success('上传成功');
         load();
+        const hi = data.hazardImport;
+        if (hi && hi.error) {
+          ElementPlus.ElMessage.warning('上传成功，但危险点解析失败：' + hi.error);
+        } else if (hi && hi.unsupported) {
+          ElementPlus.ElMessage.success('上传成功（非 Excel/CSV 文件，未解析入库）');
+        } else if (hi) {
+          ElementPlus.ElMessage.success(`上传成功，已解析入危险点库：新增 ${hi.added} 条，跳过 ${hi.skipped} 条`);
+          loadHazards(); loadWt();
+        } else {
+          ElementPlus.ElMessage.success('上传成功');
+        }
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     function download(f) {
@@ -589,25 +776,37 @@ const DocumentsView = {
     }
     async function moveFile(f, cat) {
       try {
-        await api.put('/api/documents/files/' + f.id, { category: cat });
-        ElementPlus.ElMessage.success(`已移动到「${cat}」`);
+        const data = await api.put('/api/documents/files/' + f.id, { category: cat });
+        const hi = data && data.hazardImport;
+        if (hi && hi.error) {
+          ElementPlus.ElMessage.warning(`已移动到「${cat}」，但危险点解析失败：${hi.error}`);
+        } else if (hi && hi.unsupported) {
+          ElementPlus.ElMessage.success(`已移动到「${cat}」（非 Excel/CSV 文件，未解析入库）`);
+        } else if (hi) {
+          ElementPlus.ElMessage.success(`已移动到「${cat}」，已解析入危险点库：新增 ${hi.added} 条，跳过 ${hi.skipped} 条`);
+        } else {
+          ElementPlus.ElMessage.success(`已移动到「${cat}」`);
+        }
         load();
+        if (cat === '危险点') { loadHazards(); loadWt(); }
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
-    onMounted(() => { load(); loadWt(); loadLib(); });
+    onMounted(() => { load(); loadWt(); loadLib(); loadDefaultMeta(); });
     return {
       docs, docTab, activeCat, catCount,
       wt, wtHazardOpen, wtHazards, loadWt, toggleWtHazards,
       lib, libOpen, rules, ruleDlg, ruleImportInput, rulePreview,
       loadLib, loadRules, toggleLib, openRuleAdd, openRuleEdit, submitRule, removeRule,
-      measures, meaDlg, measureLabel, openMeaAdd, openMeaEdit, submitMea, removeMea, meaView, openMeaView,
+      measures, meaDlg, measureLabel, openMeaAdd, openMeaEdit, submitMea, removeMea, meaView, openMeaView, meaViewBlocks, meaInsertTab,
+      defaultMea, loadDefaultMeta, clearAllMeasures, loadDefaultMeasures,
+      meaPaged, meaTotal, meaPage, meaPageSize, meaSetPageSize, MEA_PAGE_SIZE,
       hospitals, hosDlg, openHosAdd, openHosEdit, submitHos, removeHos,
       emergency, saveEmergency,
       impPreview, impInput, triggerImp, onImp, confirmImp,
       triggerRuleImport, onRuleImport, confirmRuleImport,
-      hazLoading, hazSearch, hazPage, hazPageSize, hazFiltered, hazPaged, hazDlg, hazImportInput,
-      loadHazards, applyHazSearch, reloadHazards, openHazAdd, openHazEdit, submitHaz, removeHaz,
+      hazLoading, hazSearch, hazPage, hazPageSize, hazFiltered, hazPaged, hazDlg, hazView, hazImportInput,
+      loadHazards, applyHazSearch, reloadHazards, openHazAdd, openHazEdit, submitHaz, removeHaz, openHazView,
       triggerHazImport, onHazImport,
       filePage, filePageSize, catFiles, pagedFiles,
       uploadInput, previewVisible, previewData,
@@ -623,6 +822,9 @@ const DocumentsView = {
       <el-tabs v-model="docTab" class="doc-tabs">
         <el-tab-pane label="文档资源" name="resources">
           <div class="doc-hint">支持上传任意文件，单文件不超过 20MB。xlsx、xls、docx 可预览，PDF 可在浏览器中打开。</div>
+          <div v-if="activeCat === '危险点'" class="doc-hint" style="color:var(--brand)">
+            上传到此分类的 Excel / CSV 会自动解析入「企业危险点库」：首个工作表 A 列为危险点、C 列为控制措施，相同条目自动跳过；也可把已有文件「移动到」本分类触发解析。
+          </div>
 
           <el-tabs v-model="activeCat" class="doc-cats">
             <el-tab-pane v-for="c in docs.categories" :key="c" :label="c + ' (' + catCount(c) + ')'" :name="c" />
@@ -633,18 +835,24 @@ const DocumentsView = {
             <input ref="uploadInput" type="file" style="display:none" @change="onUpload" />
           </div>
 
-          <el-table class="flat-table" :data="pagedFiles" empty-text="暂无数据" style="width:100%">
-            <el-table-column prop="name" label="文件名" min-width="240" show-overflow-tooltip />
-            <el-table-column prop="uploader" label="上传人" width="120" />
-            <el-table-column prop="uploadedAt" label="上传时间" width="160" />
-            <el-table-column label="移动到" width="140">
+          <el-table class="flat-table doc-file-table" :data="pagedFiles" empty-text="暂无数据" style="width:100%">
+            <el-table-column label="文件名" min-width="260" show-overflow-tooltip>
+              <template #default="{row}"><span class="doc-fname">{{ row.name }}</span></template>
+            </el-table-column>
+            <el-table-column prop="uploader" label="上传人" width="110">
+              <template #default="{row}"><span class="doc-meta">{{ row.uploader }}</span></template>
+            </el-table-column>
+            <el-table-column prop="uploadedAt" label="上传时间" width="152">
+              <template #default="{row}"><span class="doc-meta">{{ row.uploadedAt }}</span></template>
+            </el-table-column>
+            <el-table-column label="移动到" width="152">
               <template #default="{row}">
-                <el-select :model-value="row.category" size="small" style="width:118px" :disabled="!!row.fixed || !canWrite('documents')" @change="v=>moveFile(row,v)">
+                <el-select class="doc-move" :model-value="row.category" size="small" :disabled="!!row.fixed || !canWrite('documents')" @change="v=>moveFile(row,v)">
                   <el-option v-for="c in docs.categories" :key="c" :label="c" :value="c" />
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180">
+            <el-table-column label="操作" width="168">
               <template #default="{row}">
                 <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
                 <el-button link type="primary" size="small" @click="preview(row)">预览</el-button>
@@ -693,6 +901,10 @@ const DocumentsView = {
           <div class="lib-card">
             <div class="lib-head">
               <span class="lib-title">资料库</span>
+              <div class="lib-head-actions">
+                <el-button v-if="canWrite('documents')" link type="danger" @click="clearAllMeasures">清除</el-button>
+                <el-button v-if="canWrite('documents')" size="small" type="primary" :loading="defaultMea.busy" @click="loadDefaultMeasures">载入默认</el-button>
+              </div>
             </div>
 
             <div class="lib-list">
@@ -725,14 +937,15 @@ const DocumentsView = {
                         <el-table-column label="规则" min-width="170">
                           <template #default="{row}">
                             <span v-if="row.category" class="lib-cat">{{ row.category }}</span>
-                            <span>{{ row.keywordsRaw || (row.keywords || []).join('、') || '—' }}</span>
+                            <span v-if="row.keywordsRaw">{{ row.keywordsRaw }}</span>
+                            <span v-if="!row.category && !row.keywordsRaw">—</span>
                           </template>
                         </el-table-column>
-                        <el-table-column label="施工技术措施" min-width="160" show-overflow-tooltip>
-                          <template #default="{row}">{{ row.techName || '—' }}</template>
+                        <el-table-column label="施工技术措施" min-width="220">
+                          <template #default="{row}"><span class="rule-names">{{ row.techName || '—' }}</span></template>
                         </el-table-column>
-                        <el-table-column label="安全措施" min-width="160" show-overflow-tooltip>
-                          <template #default="{row}">{{ row.safetyName || '—' }}</template>
+                        <el-table-column label="安全措施" min-width="220">
+                          <template #default="{row}"><span class="rule-names">{{ row.safetyName || '—' }}</span></template>
                         </el-table-column>
                         <el-table-column label="操作" width="110">
                           <template #default="{row}">
@@ -769,7 +982,7 @@ const DocumentsView = {
                         </div>
                       </div>
 
-                      <el-table class="flat-table" :data="measures[g.key] || []" empty-text="暂无数据" style="width:100%">
+                      <el-table class="flat-table" :data="meaPaged(g.key)" empty-text="暂无数据" style="width:100%">
                         <el-table-column prop="sort" label="序号" width="90" />
                         <el-table-column prop="title" label="条文" min-width="200" show-overflow-tooltip />
                         <el-table-column label="措施原文预览" min-width="340">
@@ -794,6 +1007,15 @@ const DocumentsView = {
                           </div>
                         </template>
                       </el-table>
+                      <div v-if="meaTotal(g.key)" class="mea-pager">
+                        <span class="mea-total">共 {{ meaTotal(g.key) }} 条</span>
+                        <el-pagination background layout="prev, pager, next"
+                          :total="meaTotal(g.key)" :page-size="meaPageSize[g.key]" :current-page="meaPage[g.key]"
+                          @current-change="p=>meaPage[g.key]=p" />
+                        <el-select :model-value="meaPageSize[g.key]" size="small" style="width:104px" @change="n=>meaSetPageSize(g.key,n)">
+                          <el-option v-for="n in [10,20,50]" :key="n" :label="n + ' 条/页'" :value="n" />
+                        </el-select>
+                      </div>
                     </div>
                   </template>
 
@@ -878,11 +1100,20 @@ const DocumentsView = {
               </div>
 
               <el-table class="flat-table" :data="hazPaged" v-loading="hazLoading" empty-text="暂无数据" style="width:100%">
-                <el-table-column prop="sort" label="排序" width="80" />
-                <el-table-column prop="hazard" label="危险点" min-width="200" show-overflow-tooltip />
-                <el-table-column prop="measure" label="控制措施" min-width="300" show-overflow-tooltip />
-                <el-table-column label="操作" width="130">
+                <el-table-column prop="sort" label="排序" width="72" align="center" />
+                <el-table-column prop="hazard" label="危险点" min-width="180">
                   <template #default="{row}">
+                    <span class="hz-hazard">{{ row.hazard || '-' }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="measure" label="控制措施" min-width="400">
+                  <template #default="{row}">
+                    <div class="hz-measure" @click="openHazView(row)">{{ row.measure || '-' }}</div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="168">
+                  <template #default="{row}">
+                    <el-button link type="primary" size="small" @click="openHazView(row)">查看</el-button>
                     <el-button v-if="canWrite('documents')" link type="primary" size="small" @click="openHazEdit(row)">编辑</el-button>
                     <el-button v-if="canWrite('documents')" link type="danger" size="small" @click="removeHaz(row)">删除</el-button>
                   </template>
@@ -922,19 +1153,17 @@ const DocumentsView = {
             <el-option v-for="c in lib.categories" :key="c" :label="c" :value="c" />
           </el-select>
         </el-form-item>
-        <el-form-item label="自定义匹配词（逗号或换行分隔）" required>
+        <el-form-item v-if="!ruleDlg.category" label="自定义匹配词（逗号或换行分隔）" required>
           <el-input v-model="ruleDlg.keywords" type="textarea" :rows="4" maxlength="2000" />
         </el-form-item>
         <el-form-item label="关联施工技术措施">
-          <el-select v-model="ruleDlg.techId" clearable filterable style="width:100%" placeholder="选填"
-            @change="id => { const o = lib.techOptions.find(x => x.id === id); ruleDlg.techName = o ? o.name : ''; }">
-            <el-option v-for="o in lib.techOptions" :key="o.id" :label="o.name" :value="o.id" />
+          <el-select v-model="ruleDlg.techIds" multiple filterable clearable style="width:100%" class="rule-measure-select" placeholder="选填，可多选">
+            <el-option v-for="o in lib.techOptions" :key="o.id" :label="(o.sort ? o.sort + ' · ' : '') + o.name" :value="o.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="关联施工安全措施">
-          <el-select v-model="ruleDlg.safetyId" clearable filterable style="width:100%" placeholder="选填"
-            @change="id => { const o = lib.safetyOptions.find(x => x.id === id); ruleDlg.safetyName = o ? o.name : ''; }">
-            <el-option v-for="o in lib.safetyOptions" :key="o.id" :label="o.name" :value="o.id" />
+          <el-select v-model="ruleDlg.safetyIds" multiple filterable clearable style="width:100%" class="rule-measure-select" placeholder="选填，可多选">
+            <el-option v-for="o in lib.safetyOptions" :key="o.id" :label="(o.sort ? o.sort + ' · ' : '') + o.name" :value="o.id" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -975,7 +1204,12 @@ const DocumentsView = {
           <el-input v-model="meaDlg.title" type="textarea" :rows="3" maxlength="200" />
         </el-form-item>
         <el-form-item label="措施原文" required>
-          <el-input v-model="meaDlg.content" type="textarea" :rows="8" maxlength="20000" show-word-limit />
+          <div style="width:100%" @keydown.tab.prevent="meaInsertTab">
+            <el-input v-model="meaDlg.content" type="textarea" :rows="8" maxlength="20000" show-word-limit />
+          </div>
+          <div class="mea-input-hint">
+            表格请用 <b>Tab 键</b>分列（或直接从 Excel 复制粘贴）：<b>一行一条记录</b>、至少两行、每行不少于两列，即可在「查看原文」中显示为表格；第一行可作表头。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -986,7 +1220,27 @@ const DocumentsView = {
 
     <!-- 措施原文全文（二级页面） -->
     <el-dialog :title="'措施原文 · ' + (meaView.title || '未命名条文')" v-model="meaView.visible" width="620px" top="8vh" class="mea-view-dlg">
-      <div class="mea-view-body">{{ meaView.content }}</div>
+      <div class="mea-view-body">
+        <template v-for="(b, bi) in meaViewBlocks" :key="bi">
+          <div v-if="b.type === 'text'" class="mea-view-text">{{ b.text }}</div>
+          <div v-else class="mea-view-tablewrap">
+            <table class="mea-view-table">
+              <thead v-if="b.header">
+                <tr>
+                  <th v-for="(c, ci) in b.headCells" :key="ci" class="mea-cell-head"
+                    :colspan="(ci === b.headCells.length - 1 && b.headCells.length < b.cols) ? (b.cols - b.headCells.length + 1) : 1">{{ c }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(r, ri) in (b.header ? b.rows.slice(1) : b.rows)" :key="ri">
+                  <th scope="row" class="mea-cell-label" :class="{ 'is-blank': r[0] === '' }">{{ r[0] }}</th>
+                  <td v-for="(c, ci) in r.slice(1)" :key="ci" class="mea-cell-num">{{ c }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+      </div>
     </el-dialog>
 
     <!-- 新增/编辑配置行（医院联系方式） -->
@@ -1058,6 +1312,19 @@ const DocumentsView = {
       <template #footer>
         <el-button @click="hazDlg.visible=false">取消</el-button>
         <el-button type="primary" :loading="hazDlg.busy" @click="submitHaz">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 查看危险点全文 -->
+    <el-dialog v-model="hazView.visible" title="危险点详情" width="720px" top="8vh">
+      <div class="hz-view">
+        <div class="hz-view-label">危险点</div>
+        <div class="hz-view-hazard">{{ hazView.hazard || '-' }}</div>
+        <div class="hz-view-label">控制措施</div>
+        <div class="hz-view-measure">{{ hazView.measure || '-' }}</div>
+      </div>
+      <template #footer>
+        <el-button @click="hazView.visible=false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -3082,6 +3349,35 @@ const ProjectsView = {
       const names = projNames.value;
       return workPlans.value.filter(p => names.includes(p.project));
     });
+    // 项目信息：字段键值对（响应式网格渲染）
+    const projInfoFields = computed(() => {
+      const d = detail.value;
+      if (!d) return [];
+      return [
+        ['项目名称（包）', d.name || '-'],
+        ['项目名称(自定义)', d.customName || '-'],
+        ['年度计划', d.annualPlan || '-'],
+        ['批次', d.batch || '-'],
+        ['分包单位', d.subcontractor || '-'],
+        ['合同编号', d.contractNo || '-'],
+        ['作业类型', d.workType || '-'],
+        ['作业专业', d.specialty || '-'],
+        ['省专业管理部门', d.provincialDept || '-'],
+        ['子项目列表', (d.subProjects && d.subProjects.length) ? d.subProjects.map(s => s.name).join('、') : '无'],
+        ['属地供电所', d.substation || '-'],
+        ['班组长', d.leader || '-'],
+        ['开工日期', d.startDate || '-'],
+        ['预期竣工日期', d.endDate || '-'],
+        ['创建时间', fmtDT(d.createdAt)]
+      ];
+    });
+    // 周计划进度芯片（复用列表口径）
+    const projProgressChips = computed(() => detail.value ? progressChips(detail.value) : []);
+    const projProgressHasData = computed(() => {
+      const p = detail.value && detail.value.progress;
+      if (!p) return false;
+      return !!(p.pole && p.pole.total) || !!(p.cable && p.cable.total) || !!(p.device && p.device.total);
+    });
     // 材料归类（按包汇总）：电杆 / 导线 / 设备 / 金具及铁附件
     // 电杆：混凝土电杆 / 预应力 / 方杆 / 电杆 / 水泥杆 / 钢管杆 / 等径杆 / 锥形杆
     // 导线：按国标型号命名匹配（忽略大小写）——
@@ -3094,36 +3390,33 @@ const ProjectsView = {
     //       避雷器、互感器、集中器、环网柜、分支箱
     // 金具及铁附件：抱箍 / 横担 / 线夹 / 挂环 / 接线端子 / 接地材料 / 绝缘子 / 护套 / 标识牌等；未匹配项也归此类，不再回落设备
     // 注意：金具关键词必须先于设备判断——「熔断器横担」「变压器抱箍」「JP柜固定螺杆」「避雷器绝缘护套」实际是铁附件而非设备
-    const POLE_RE = /电杆|预应力|方杆|水泥杆|钢管杆|等径杆|锥形杆|混凝土杆/;
-    const CABLE_RE = new RegExp('\\b(?:' + [
-      'GJX?', 'LGJX?', 'LGJF', 'LJ', 'TJ', 'JL\\s*\\/\\s*G[1-3][AB]?',
-      'JKLYJ\\/B', 'JKLYJ', 'JKLGYJ', 'JKLY', 'JKLV', 'JKYJ',
-      'YJLV22', 'YJV22', 'YJLV32', 'YJV32', 'YJLV', 'YJV', 'YJLY', 'YJY',
-      'VLV', 'VV',
-      'BVV', 'BVVB', 'BLVV', 'BVR', 'BV', 'BLV', 'BXR', 'BLX', 'BX',
-      'RVVP', 'RVV', 'RVS', 'RV',
-      'KVVP', 'KVV', 'KYJV', 'OPGW', 'ADSS'
-    ].join('|') + ')', 'i');
-    const DEVICE_RE = /变压器|JP\s*柜|配电箱|开关|熔断器|断路器|避雷器|互感器|集中器|环网柜|分支箱/;
-    const FITTING_RE = /金具|铁附件|抱箍|托箍|横担|托担|挂环|挂板|碗头|球头|联板|线夹|并沟|楔形|耐张|悬垂|压接管|接续管|拉线棒|拉线盘|撑铁|垫铁|斜撑|撑脚|螺杆|螺丝|螺栓|穿钉|桩头|保护套|护套|绝缘罩|防盗锁|标识牌|标识管|相序牌|警示牌|标志|接线端子|接地环|接地线|接地体|接地铁|门型架|槽钢|夹铁|防震锤|绝缘子|瓷瓶|电缆头|脚钉|爬梯|卡盘|底盘|支架/;
-    function matType(desc) {
-      const s = String(desc || '');
-      if (POLE_RE.test(s)) return 'pole';
-      if (CABLE_RE.test(s)) return 'cable';
-      if (FITTING_RE.test(s)) return 'fitting'; // 先于设备：避免被「熔断器 / 变压器 / JP柜 / 避雷器」字样误吞
-      if (DEVICE_RE.test(s)) return 'device';
-      return 'fitting'; // 其余统一归「金具及铁附件」，不再回落设备
-    }
+    const matType = matBucketOf; // 与全局材料分桶同口径（电杆/导线/设备/金具及铁附件）
     // 按包汇总：电杆 / 导线 / 设备 / 金具及铁附件
+    // 单位换算：导线包口径为「千米」，而材料明细里的导线多以「米(m)」计量（钢绞线为 kg），
+    // 汇总时把可折算项（m/米/km/千米/公里）统一折算为千米，不可折算项（如 kg）不进千米合计、单独提示。
     const ledger = computed(() => {
       const ms = projMaterials.value;
       const sum = (k) => ms.reduce((s, m) => s + (Number(m[k]) || 0), 0);
       const rows = LEDGER_CONF.map(([k, label, unit]) => {
         const typed = ms.filter(m => matType(m.description) === k);
-        const erp = typed.reduce((s, m) => s + (Number(m.qtyRequired) || 0), 0);
-        const planned = typed.reduce((s, m) => s + (Number(m.qtyGenerated) || 0), 0);
+        let erp, planned, extra = '';
+        if (k === 'cable') {
+          let erpKm = 0, planKm = 0, otherQty = 0, otherUnit = '';
+          typed.forEach(m => {
+            const rq = matUnitToKm(m.qtyRequired, m.unit);
+            const pg = matUnitToKm(m.qtyGenerated, m.unit);
+            if (rq === null) { otherQty += Number(m.qtyRequired) || 0; otherUnit = otherUnit || String(m.unit || ''); }
+            else { erpKm += rq; planKm += pg === null ? 0 : pg; }
+          });
+          erp = Math.round(erpKm * 1000) / 1000;
+          planned = Math.round(planKm * 1000) / 1000;
+          if (otherQty > 0) extra = `另有 ${otherQty} ${otherUnit}（不折算）`;
+        } else {
+          erp = typed.reduce((s, m) => s + (Number(m.qtyRequired) || 0), 0);
+          planned = typed.reduce((s, m) => s + (Number(m.qtyGenerated) || 0), 0);
+        }
         const pct = erp > 0 ? Math.min(100, Math.floor(planned / erp * 100)) : 0;
-        return { key: k, label, unit, erp, planned, pct, need: Math.max(0, erp - planned), items: typed };
+        return { key: k, label, unit, erp, planned, pct, need: Math.max(0, Math.round((erp - planned) * 1000) / 1000), items: typed, extra };
       });
       return {
         count: ms.length,
@@ -3345,7 +3638,8 @@ const ProjectsView = {
       openAdd, openEdit, addSub, removeSub, submit,
       detail, showDetail, backToList, completeProject, removeProject,
       projFileInput, projFiles, triggerProjUpload, onProjUpload, delProjFile, packProjDownload, fmtDT,
-      projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, pkgColor, statusTagType
+      projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, pkgColor, statusTagType,
+      projInfoFields, projProgressChips, projProgressHasData
     };
   },
   template: `
@@ -3423,35 +3717,32 @@ const ProjectsView = {
     <!-- 项目信息 -->
     <el-card shadow="never" style="margin-bottom:14px">
       <template #header>
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <span style="font-weight:600">项目信息</span>
-          <div v-if="canWrite('projects')" style="display:flex;align-items:center;gap:4px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <div style="min-width:0;display:flex;align-items:baseline;gap:8px">
+            <span style="font-weight:600;flex-shrink:0">项目信息</span>
+            <span style="color:var(--text-3);font-size:13px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ detail.name }}</span>
+          </div>
+          <div v-if="canWrite('projects')" style="display:flex;align-items:center;gap:4px;flex-shrink:0">
             <el-button type="primary" size="small" @click="completeProject">竣工</el-button>
             <el-button size="small" @click="openEdit(detail)">编辑</el-button>
             <el-button link type="danger" size="small" @click="removeProject" style="margin-left:8px">删除项目</el-button>
           </div>
         </div>
       </template>
-      <div v-for="r in [
-        ['项目名称（包）', detail.name || '-'],
-        ['项目名称(自定义)', detail.customName || '-'],
-        ['年度计划', detail.annualPlan || '-'],
-        ['批次', detail.batch || '-'],
-        ['分包单位', detail.subcontractor || '-'],
-        ['合同编号', detail.contractNo || '-'],
-        ['作业类型', detail.workType || '-'],
-        ['作业专业', detail.specialty || '-'],
-        ['省专业管理部门', detail.provincialDept || '-'],
-        ['子项目列表', (detail.subProjects && detail.subProjects.length) ? detail.subProjects.map(s => s.name).join('、') : '无'],
-        ['属地供电所', detail.substation || '-'],
-        ['班组长', detail.leader || '-'],
-        ['开工日期', detail.startDate || '-'],
-        ['预期竣工日期', detail.endDate || '-'],
-        ['创建时间', fmtDT(detail.createdAt)],
-        ['周计划进度', '-']
-      ]" :key="r[0]" style="display:flex;border-bottom:1px solid var(--line);font-size:14px;line-height:22px">
-        <div style="width:280px;flex-shrink:0;background:var(--surface-2);padding:10px 16px;color:var(--text-2)">{{ r[0] }}</div>
-        <div style="flex:1;padding:10px 16px;color:var(--text-1)">{{ r[1] }}</div>
+      <div class="proj-info-grid">
+        <div class="pi-cell" v-for="f in projInfoFields" :key="f[0]">
+          <div class="pi-label">{{ f[0] }}</div>
+          <div class="pi-value">{{ f[1] }}</div>
+        </div>
+        <div class="pi-cell">
+          <div class="pi-label">周计划进度</div>
+          <div class="pi-value">
+            <template v-if="projProgressChips.length">
+              <span v-for="(c,ci) in projProgressChips" :key="ci" class="pi-chip" :style="{ color: c.color }">{{ c.text }}</span>
+            </template>
+            <span v-else class="pi-muted">{{ projProgressHasData ? '已全部完成' : '暂无进度数据' }}</span>
+          </div>
+        </div>
       </div>
     </el-card>
 
@@ -3628,7 +3919,12 @@ const ProjectsView = {
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="unit" label="单位" width="90" align="center" />
+        <el-table-column label="单位" width="110" align="center">
+          <template #default="{row}">
+            <div>{{ row.unit }}</div>
+            <div v-if="row.extra" class="ledger-unit-extra">{{ row.extra }}</div>
+          </template>
+        </el-table-column>
         <el-table-column label="ERP应到" width="140" align="right"><template #default="{row}"><span style="font-weight:600">{{ fmtQty(row.erp) }}</span></template></el-table-column>
         <el-table-column label="已报计划量（周计划）" min-width="240">
           <template #default="{row}">
@@ -3755,6 +4051,7 @@ const MENU_ICONS = {
   plans: _ico('<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M8 3v4M16 3v4M3.5 10h17"/>'),
   borrow: _ico('<path d="M4 8h13l-3-3M20 16H7l3 3"/>'),
   completion: _ico('<path d="M14 3.5H7A2 2 0 0 0 5 5.5v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-9z"/><path d="M14 3.5v5h5"/><path d="m9 14.5 2 2 4-4.5"/>'),
+  actualWorks: _ico('<path d="M4 20h16"/><rect x="6" y="11" width="3" height="6" rx=".6"/><rect x="10.5" y="7" width="3" height="10" rx=".6"/><rect x="15" y="13" width="3" height="4" rx=".6"/>'),
   documents: _ico('<path d="M6 3.5h8l4 4v13H6z"/><path d="M14 3.5v4h4M9 12h6M9 16h4.5"/>'),
   settings: _ico('<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'),
   users: _ico('<circle cx="12" cy="8" r="3.4"/><path d="M4.8 20a7.2 7.2 0 0 1 14.4 0"/>'),
@@ -3802,6 +4099,7 @@ const App = {
       { key: 'plans', label: '计划管理', sub: '周计划 / 月计划 / 当日施工量', comp: 'PlansView' },
       { key: 'borrow', label: '借工管理', sub: '借工登记与用工台账', comp: 'CrudView', cfg: borrowCfg },
       { key: 'completion', label: '竣工资料（开发中）', sub: '竣工资料归档', comp: 'CrudView', cfg: completionCfg },
+      { key: 'actualWorks', label: '工程实际施工量', comp: 'ActualConstructionView', hideTitle: true },
       { key: 'documents', label: '文档中心', comp: 'DocumentsView', hideTitle: true },
       { key: 'settings', label: '全局设置', sub: '系统参数 · 单位与字典维护', comp: 'SettingsView' },
       { key: 'users', label: '用户管理', sub: '登录账号 · 作业人员 · 外部通讯录', comp: 'UsersView' },
@@ -4130,18 +4428,17 @@ app.component('Requisitions', {
 
     function stockInfo(rec, it) {
       if (rec.status === '待入库') return { text: '待入库', type: 'primary' };
-      if (rec.status === '已作废') return { text: '异常 0', type: 'danger' };
+      if (rec.status === '已作废') return { text: '已作废', type: 'info' };
       const cr = (rec.confirmRows || []).find(x => x.materialId === it.materialId);
       if (cr && cr.abnormal) return { text: '异常', type: 'danger' };
       if (cr) return { text: '已到 ' + (Math.round((Number(cr.thisQty) || 0) * 10000) / 10000), type: 'success' };
       return { text: '已入库', type: 'success' };
     }
     function stockReason(rec, it) {
-      if (rec.status === '已作废') return '领料单作废冲销: ' + (rec.voidReason || '');
+      if (rec.status === '已作废') return '作废冲销 · ' + (rec.voidReason || '未填写原因');
       const cr = (rec.confirmRows || []).find(x => x.materialId === it.materialId);
       return (cr && cr.reason) || '-';
     }
-    function expRowClass(req) { return () => (req.status === '已作废' ? 'rq-ab-row' : ''); }
     // 某物料在领料单内的全部入库/补入库操作记录（按时间顺序，N 次操作 N 条）
     function itemHistory(rec, materialId) {
       const out = [];
@@ -4150,7 +4447,7 @@ app.component('Requisitions', {
       }));
       return out;
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, expRowClass, itemHistory };
+    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory };
   },
   template: `
   <div>
@@ -4172,16 +4469,23 @@ app.component('Requisitions', {
     <el-table :data="filtered" v-loading="loading" border style="width:100%" class="rq-main" :row-class-name="rowClass">
       <el-table-column type="expand">
         <template #default="{row}">
-          <div style="padding:6px 18px 14px 48px">
-            <el-table :data="row.items" size="small" border :row-class-name="expRowClass(row)">
-              <el-table-column type="expand" width="40">
+          <div class="rq-exp">
+            <div class="rq-exp-head">
+              <span class="rq-exp-dot" :class="{ 'is-void': row.status==='已作废' }"></span>
+              <span class="rq-exp-title">领料明细</span>
+              <span class="rq-exp-count">{{ row.items.length }} 项 · 合计 {{ sumQty(row) }}</span>
+              <span v-if="row.status==='已作废'" class="rq-exp-chip">已作废 · 数量已冲销</span>
+              <span class="rq-exp-hint">点击行首 + 查看入库记录</span>
+            </div>
+            <el-table :data="row.items" size="small" border class="rq-detail">
+              <el-table-column type="expand" width="46" label="记录">
                 <template #default="{ row: it }">
-                  <div style="padding:8px 14px 10px 48px;background:var(--surface-2)">
-                    <div style="font-size:12px;color:var(--text-3);margin-bottom:8px">入库记录（共 {{ itemHistory(row, it.materialId).length }} 次）</div>
-                    <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border style="max-width:860px">
-                      <el-table-column prop="at" label="入库时间" width="150" />
+                  <div class="rq-hist">
+                    <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ itemHistory(row, it.materialId).length }} 次</span></div>
+                    <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border class="rq-hist-table">
+                      <el-table-column prop="at" label="入库时间" width="160" />
                       <el-table-column prop="thisQty" label="本次入库数量" width="120" align="right" />
-                      <el-table-column label="入库情况" width="100">
+                      <el-table-column label="入库情况" width="100" align="center">
                         <template #default="{ row: h }">
                           <el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag>
                         </template>
@@ -4190,24 +4494,36 @@ app.component('Requisitions', {
                         <template #default="{ row: h }">{{ h.reason || '-' }}</template>
                       </el-table-column>
                     </el-table>
-                    <div v-else style="color:var(--text-3);font-size:12px">暂无入库记录（确认入库/补入库后按次记录）</div>
+                    <div v-else class="rq-hist-empty">暂无入库记录（确认入库 / 补入库后按次记录）</div>
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column prop="project" label="项目名称" min-width="220" show-overflow-tooltip />
-              <el-table-column prop="description" label="物料描述" min-width="200" show-overflow-tooltip />
-              <el-table-column prop="qty" label="数量" width="90" align="right" />
-              <el-table-column label="入库情况" width="110">
-                <template #default="{ $index }">
-                  <el-tag size="small" :type="stockInfo(row, row.items[$index]).type">{{ stockInfo(row, row.items[$index]).text }}</el-tag>
+              <el-table-column prop="project" label="项目名称" min-width="160">
+                <template #default="{ row: it }"><span class="rq-wrap">{{ it.project }}</span></template>
+              </el-table-column>
+              <el-table-column prop="description" label="物料描述" min-width="210">
+                <template #default="{ row: it }"><span class="rq-wrap">{{ it.description }}</span></template>
+              </el-table-column>
+              <el-table-column label="数量" width="74" align="right">
+                <template #default="{ row: it }"><span class="rq-num">{{ it.qty }}</span></template>
+              </el-table-column>
+              <el-table-column label="入库情况" width="96" align="center">
+                <template #default="{ row: it }"><el-tag size="small" :type="stockInfo(row, it).type">{{ stockInfo(row, it).text }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="异常原因" min-width="140">
+                <template #default="{ row: it }">
+                  <span class="rq-reason" :class="{ 'is-empty': !stockReason(row, it) || stockReason(row, it) === '-' }">{{ stockReason(row, it) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="异常原因" width="150">
-                <template #default="{ $index }">{{ stockReason(row, row.items[$index]) }}</template>
+              <el-table-column label="单位" width="52" align="center">
+                <template #default="{ row: it }"><span class="rq-sub">{{ it.unit || '—' }}</span></template>
               </el-table-column>
-              <el-table-column prop="unit" label="单位" width="70" />
-              <el-table-column prop="code" label="物料编码" width="130" />
-              <el-table-column prop="orderNo" label="采购订单号" width="120" />
+              <el-table-column label="物料编码" width="116">
+                <template #default="{ row: it }"><span class="rq-code">{{ it.code || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="采购订单号" width="106">
+                <template #default="{ row: it }"><span class="rq-code">{{ it.orderNo || '—' }}</span></template>
+              </el-table-column>
             </el-table>
           </div>
         </template>
@@ -4618,6 +4934,9 @@ app.component('Outbounds', {
     function printOrder() { pdlg.rec = od.rec; pdlg.visible = true; }
     function printRow(o) { pdlg.rec = o; pdlg.visible = true; }
     // 本页打印：把预览区 DOM 写入隐藏 iframe 后调起系统打印（不新开页面）
+    // 注意：预览区用的是站内 CSS 变量（--line-strong / --surface-3 …），iframe 里没有这套变量，
+    // 会导致 `border:1px solid var(--line-strong)` 整条声明失效 → 打印出来没有表格线。
+    // 因此这里显式给出打印色值（黑线 / 浅灰表头），并用 !important 兜底覆盖内联样式。
     function doPrint() {
       const el = document.getElementById('ob-print-area');
       if (!el) return;
@@ -4625,17 +4944,40 @@ app.component('Outbounds', {
       iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
       document.body.appendChild(iframe);
       const doc = iframe.contentWindow.document;
+      const css = ''
+        + ':root{--line-strong:#000;--surface-3:#eef1f5;--surface-2:#fff;--text-1:#000;--text-2:#000;--text-3:#222}'
+        + '*{box-sizing:border-box}'
+        + 'html,body{margin:0;padding:0;background:#fff;color:#000;'
+        + '-webkit-print-color-adjust:exact;print-color-adjust:exact;'
+        + 'font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:13px}'
+        + '.obp-title{text-align:center;font-size:20px;font-weight:700;margin:0 0 14px;letter-spacing:2px}'
+        + 'table{width:100%;border-collapse:collapse;margin:0 0 12px}'
+        + 'td,th{border:1px solid #000 !important;padding:7px 9px;font-size:13px;text-align:left;'
+        + 'color:#000;word-break:break-word;line-height:1.5}'
+        + 'th{background:#eef1f5 !important;font-weight:600;text-align:center}'
+        + 'td[style*="surface-3"]{background:#eef1f5 !important;font-weight:600}'
+        + '.obp-sign{display:flex;justify-content:space-between;gap:48px;margin-top:34px;font-size:14px}'
+        + '.obp-sign>div{flex:1;display:flex;align-items:flex-end;gap:6px;white-space:nowrap}'
+        + '.obp-sign .obp-line{flex:1;border-bottom:1px solid #000;height:24px}'
+        + 'tr,td,th,.obp-sign{page-break-inside:avoid;break-inside:avoid}'
+        + 'thead{display:table-header-group}'
+        + '@page{size:A4 portrait;margin:14mm}';
+      const signBlock = ''
+        + '<div class="obp-sign">'
+        + '<div>出库人签字：<span class="obp-line"></span></div>'
+        + '<div>领料人签字：<span class="obp-line"></span></div>'
+        + '</div>';
       doc.open();
-      doc.write('<html><head><meta charset="utf8"><title>材料出库单</title><style>' +
-        'body{margin:0;padding:24px;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}' +
-        '.obp-title{text-align:center;font-size:20px;font-weight:700;margin-bottom:16px}' +
-        'table{width:100%;border-collapse:collapse}td,th{border:1px solid var(--text-2);padding:8px 10px;font-size:13px;text-align:left}' +
-        '.obp-th{background:var(--surface-3);font-weight:600;text-align:center}' +
-        '@page{size:A4;margin:12mm}</style></head><body>' + el.innerHTML + '</body></html>');
+      doc.write('<!DOCTYPE html><html><head><meta charset="utf8"><title>材料出库单</title><style>' + css +
+        '</style></head><body>' + el.innerHTML + signBlock + '</body></html>');
       doc.close();
-      iframe.contentWindow.focus();
-      iframe.contentWindow.print();
-      setTimeout(() => iframe.remove(), 1500);
+      const fire = () => {
+        try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { /* 用户取消/浏览器拦截 */ }
+      };
+      // 等一帧布局完成再调起打印，避免首帧拿到未完成的表格
+      setTimeout(fire, 120);
+      iframe.contentWindow.addEventListener('afterprint', () => iframe.remove());
+      setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
     return { tab, f1, f2, f3, project, keyword, projects, workers, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM };
@@ -5943,6 +6285,406 @@ const PlanDateTime = {
     </teleport>
   </div>`
 };
+/* ---------------- 工程实际施工量 ---------------- */
+const ACTUAL_WORK_TYPES = ['转运', '立杆', '放线和设备安装'];
+// 工作类型 → 材料包：转运/立杆 对应 电杆；放线和设备安装 对应 导线 + 设备
+const ACTUAL_WORK_BUCKETS = {
+  '转运': ['pole'],
+  '立杆': ['pole'],
+  '放线和设备安装': ['cable', 'device']
+};
+const ActualConstructionView = {
+  setup() {
+    const pad2 = n => String(n).padStart(2, '0');
+    const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); };
+    const tab = ref('fill');
+    const form = reactive({ date: todayStr(), project: '', workTypes: [], workers: [] });
+    // 工作类型 / 施工人员：默认单选，打开「多选」开关才支持多选
+    const multi = reactive({ workTypes: false, workers: false });
+    const projectsFull = ref([]);
+    const materialsAll = ref([]);
+    const usersAll = ref([]);
+    const qtyMap = reactive({});
+    const materialSearch = ref('');
+    const records = ref([]);
+    const loading = ref(false);
+    const busy = ref(false);
+    // 报表筛选
+    const dateRange = ref(null);
+    const fProject = ref('');
+    const fWorkType = ref('');
+    const fWorker = ref('');
+    const fSubmitter = ref('');
+    const page = ref(1);
+    const pageSize = ref(20);
+    const editingId = ref('');
+
+    const projects = computed(() => projectsFull.value.map(p => p.name || p.projectName).filter(Boolean));
+    const currentProject = computed(() => projectsFull.value.find(p => (p.name || p.projectName) === form.project) || null);
+    const projectNames = computed(() => {
+      const p = currentProject.value;
+      if (!p) return [];
+      return [p.name, ...((p.subProjects || []).map(s => s.name).filter(Boolean))];
+    });
+    // 施工人员：优先取该项目的班组长（含子项目），无则回退到「班组长」账号
+    const leaders = computed(() => {
+      const p = currentProject.value;
+      const arr = [];
+      if (p) { if (p.leader) arr.push(p.leader); (p.subProjects || []).forEach(s => { if (s.leader) arr.push(s.leader); }); }
+      let uniq = [...new Set(arr.filter(Boolean))];
+      if (!uniq.length) uniq = usersAll.value.filter(u => (u.userGroup || u.role) === '班组长').map(u => u.name).filter(Boolean);
+      return [...new Set(uniq)];
+    });
+    // 所选工作类型对应的材料桶
+    const selectedBuckets = computed(() => {
+      const set = new Set();
+      (form.workTypes || []).forEach(t => (ACTUAL_WORK_BUCKETS[t] || []).forEach(b => set.add(b)));
+      return set;
+    });
+    // 材料：本项目（含子项目）中，按所选工作类型对应的包过滤；并标注所属包 / 包口径单位
+    const projectMaterials = computed(() => {
+      const names = projectNames.value;
+      if (!names.length) return [];
+      const buckets = selectedBuckets.value;
+      if (!buckets.size) return [];
+      return materialsAll.value
+        .filter(m => !m.deleted && names.includes(m.project) && buckets.has(matBucketOf(m.description)))
+        .map(m => {
+          const pkg = matBucketOf(m.description);
+          return { ...m, pkg, pkgLabel: MAT_PKG_LABEL[pkg] || pkg, unitKm: pkg === 'cable' && matUnitToKm(0, m.unit) !== null };
+        });
+    });
+    const filteredMaterials = computed(() => {
+      const k = materialSearch.value.trim();
+      if (!k) return projectMaterials.value;
+      return projectMaterials.value.filter(m => String(m.description || '').includes(k) || String(m.code || '').includes(k));
+    });
+    const reportRows = computed(() => {
+      let list = records.value.slice();
+      if (fProject.value) list = list.filter(r => r.project === fProject.value);
+      if (fWorkType.value) list = list.filter(r => rowTypes(r).includes(fWorkType.value));
+      if (fWorker.value) list = list.filter(r => rowWorkers(r).includes(fWorker.value));
+      if (fSubmitter.value) list = list.filter(r => String(r.submitter || '') === fSubmitter.value);
+      const dr = dateRange.value;
+      if (Array.isArray(dr) && dr.length === 2 && dr[0] && dr[1]) list = list.filter(r => r.date >= dr[0] && r.date <= dr[1]);
+      return list;
+    });
+    // 班组长 / 实施人员 筛选项（来自已有记录）
+    const workerOptions = computed(() => [...new Set(records.value.flatMap(r => rowWorkers(r)).filter(Boolean))].sort());
+    const submitterOptions = computed(() => [...new Set(records.value.map(r => String(r.submitter || '')).filter(Boolean))].sort());
+    const paged = computed(() => reportRows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
+    watch(() => [reportRows.value.length, pageSize.value], () => {
+      const maxP = Math.max(1, Math.ceil(reportRows.value.length / pageSize.value));
+      if (page.value > maxP) page.value = maxP;
+    });
+    watch(() => form.project, () => {
+      form.workers = (form.workers || []).filter(w => leaders.value.includes(w));
+      materialSearch.value = '';
+    });
+    // 多选 → 单选时只保留第一个已选项，避免残留多个值
+    watch(() => multi.workTypes, on => { if (!on && form.workTypes.length > 1) form.workTypes = form.workTypes.slice(0, 1); });
+    watch(() => multi.workers, on => { if (!on && form.workers.length > 1) form.workers = form.workers.slice(0, 1); });
+    // 项目或工作类型变化时，剔除已不在当前材料清单中的已填数量（保留仍可见的）
+    watch(() => [form.project, form.workTypes.join('|')], () => {
+      const ids = new Set(projectMaterials.value.map(m => m.id));
+      Object.keys(qtyMap).forEach(k => { if (!ids.has(k)) delete qtyMap[k]; });
+    });
+
+    function rowTypes(r) { return Array.isArray(r.workTypes) ? r.workTypes : (r.workType ? [r.workType] : []); }
+    function rowWorkers(r) { return Array.isArray(r.workers) ? r.workers : (r.worker ? [r.worker] : []); }
+
+    async function loadMeta() {
+      try { const r = await api.get('/api/projects'); projectsFull.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
+      try { const r = await api.get('/api/materials'); materialsAll.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
+      try { const r = await api.get('/api/users'); usersAll.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
+    }
+    async function loadRecords() {
+      loading.value = true;
+      try { const r = await api.get('/api/actualWorks'); records.value = Array.isArray(r) ? r : (r.data || []); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { loading.value = false; }
+    }
+    function matQty(id) { const n = Number(qtyMap[id]); return Number.isFinite(n) && n > 0 ? n : 0; }
+    // 导线类材料按「千米」折算显示（材料明细单位为米时）——返回 null 表示无需/无法折算
+    function kmOf(row) {
+      if (!row || row.pkg !== 'cable') return null;
+      const q = matQty(row.id);
+      if (!q) return null;
+      const km = matUnitToKm(q, row.unit);
+      return km === null ? null : fmtKm(km);
+    }
+    const filledCount = computed(() => projectMaterials.value.filter(m => matQty(m.id) > 0).length);
+    function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }
+    async function submit() {
+      if (!form.date) return ElementPlus.ElMessage.warning('请选择日期');
+      if (!form.project) return ElementPlus.ElMessage.warning('请选择项目名称（包）');
+      if (!form.workTypes.length) return ElementPlus.ElMessage.warning('请选择工作类型');
+      if (!form.workers.length) return ElementPlus.ElMessage.warning('请选择施工人员');
+      const items = projectMaterials.value.filter(m => matQty(m.id) > 0)
+        .map(m => ({ materialId: m.id, code: m.code || '', description: m.description || '', unit: m.unit || '', qty: matQty(m.id) }));
+      if (projectMaterials.value.length && !items.length) return ElementPlus.ElMessage.warning('请至少填写一项材料实际施工量');
+      busy.value = true;
+      try {
+        const payload = { date: form.date, project: form.project, workTypes: form.workTypes.slice(), workers: form.workers.slice(), items };
+        if (editingId.value) {
+          await api.put('/api/actualWorks/' + editingId.value, payload);
+          ElementPlus.ElMessage.success('已保存');
+        } else {
+          await api.post('/api/actualWorks', payload);
+          ElementPlus.ElMessage.success('已提交');
+        }
+        editingId.value = '';
+        form.workTypes = [];
+        form.workers = [];
+        Object.keys(qtyMap).forEach(k => { delete qtyMap[k]; });
+        await loadRecords();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { busy.value = false; }
+    }
+    // 编辑报表行：带回填写页
+    function editRecord(row) {
+      editingId.value = row.id;
+      form.date = row.date || todayStr();
+      form.project = row.project || '';
+      const wt = rowTypes(row).slice(); form.workTypes = wt;
+      const wk = rowWorkers(row).slice(); form.workers = wk;
+      multi.workTypes = wt.length > 1;
+      multi.workers = wk.length > 1;
+      Object.keys(qtyMap).forEach(k => { delete qtyMap[k]; });
+      (row.items || []).forEach(it => { if (it.materialId) qtyMap[it.materialId] = it.qty; });
+      materialSearch.value = '';
+      tab.value = 'fill';
+      ElementPlus.ElMessage.info('已载入该条记录，修改后点「保存」');
+    }
+    function cancelEdit() {
+      editingId.value = '';
+      form.workTypes = []; form.workers = [];
+      Object.keys(qtyMap).forEach(k => { delete qtyMap[k]; });
+      ElementPlus.ElMessage.info('已取消编辑');
+    }
+    async function remove(row) {
+      try {
+        await ElementPlus.ElMessageBox.confirm(`确认删除「${row.date} · ${row.project} · ${rowTypes(row).join('、')}」？`, '删除记录',
+          { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try { await api.del('/api/actualWorks/' + row.id); ElementPlus.ElMessage.success('已删除'); await loadRecords(); }
+      catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    function itemsText(row) {
+      const arr = row.items || [];
+      if (!arr.length) return '—';
+      return arr.map(it => {
+        const base = `${it.description}×${it.qty}${it.unit || ''}`;
+        const km = matUnitToKm(it.qty, it.unit);
+        return km === null ? base : `${base}（${fmtKm(km)}千米）`;
+      }).join('；');
+    }
+    function resetFilters() { dateRange.value = null; fProject.value = ''; fWorkType.value = ''; fWorker.value = ''; fSubmitter.value = ''; page.value = 1; }
+    function pkgLabelOf(it) { const b = matBucketOf(it && it.description); return MAT_PKG_LABEL[b] || ''; }
+    // 导出为真正的 Excel(.xlsx)：一条记录 → 材料按条数占多行，其余列按记录纵向合并
+    function exportExcel() {
+      const rows = reportRows.value;
+      if (!rows.length) return ElementPlus.ElMessage.warning('没有可导出的数据');
+      if (typeof XLSX === 'undefined') return ElementPlus.ElMessage.error('Excel 组件未加载，请刷新页面重试');
+      const head = ['日期', '工作类型', '项目名称（包）', '班组长/实施人员', '材料', '提交人', '提交时间'];
+      const aoa = [head];
+      const merges = [];
+      rows.forEach(r => {
+        const types = rowTypes(r).join('、');
+        const workers = rowWorkers(r).join('、');
+        const items = (r.items || []);
+        const lines = items.length
+          ? items.map(it => `${pkgLabelOf(it) ? pkgLabelOf(it) + '-' : ''}${it.description || ''}；${it.qty} ${it.unit || ''}`.trim())
+          : ['—'];
+        const start = aoa.length;
+        lines.forEach(ln => aoa.push([r.date, types, r.project, workers, ln, r.submitter || '', r.submittedAt || '']));
+        const end = aoa.length - 1;
+        if (end > start) {
+          [0, 1, 2, 3, 5, 6].forEach(c => merges.push({ s: { r: start, c }, e: { r: end, c } }));
+        }
+      });
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!merges'] = merges;
+      ws['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 38 }, { wch: 16 }, { wch: 62 }, { wch: 10 }, { wch: 19 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '工程实际施工量');
+      XLSX.writeFile(wb, '工程实际施工量报表_' + todayStr() + '.xlsx');
+    }
+    onMounted(() => { loadMeta(); loadRecords(); });
+    return {
+      tab, form, multi, projects, leaders, projectMaterials, filteredMaterials, materialSearch, qtyMap, matQty, kmOf, filledCount, fmtQty,
+      records, loading, busy, dateRange, fProject, fWorkType, fWorker, fSubmitter, workerOptions, submitterOptions,
+      page, pageSize, paged, reportRows, editingId, editRecord, cancelEdit,
+      workTypes: ACTUAL_WORK_TYPES, submit, remove, itemsText, pkgLabelOf, resetFilters, exportExcel, todayStr, rowTypes, rowWorkers
+    };
+  },
+  template: `
+  <div class="ac-page">
+    <div class="ac-tabs">
+      <div class="ac-tab" :class="{ on: tab === 'fill' }" @click="tab = 'fill'">填写</div>
+      <div class="ac-tab" :class="{ on: tab === 'report' }" @click="tab = 'report'">工程实际施工量报表</div>
+    </div>
+
+    <div v-show="tab === 'fill'" class="ac-pane">
+      <h2 class="ac-h2">工程实际施工量</h2>
+      <div v-if="editingId" class="ac-edit-banner">
+        <span>正在编辑 <b>{{ form.date }}</b>{{ form.project ? ' · ' + form.project : '' }} 的记录</span>
+        <el-button link type="primary" size="small" @click="cancelEdit">取消编辑</el-button>
+      </div>
+      <el-form :model="form" label-position="top" class="ac-form">
+        <el-form-item label="日期" required style="max-width:460px">
+          <el-date-picker v-model="form.date" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" style="width:100%"
+            popper-class="ac-date-pop" :clearable="false" />
+        </el-form-item>
+        <el-form-item label="项目名称（包）" required style="max-width:460px">
+          <el-select v-model="form.project" filterable clearable placeholder="请选择项目" style="width:100%">
+            <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
+          </el-select>
+        </el-form-item>
+        <el-form-item required class="ac-multi-item">
+          <template #label>
+            <span class="ac-lb">工作类型</span>
+            <span class="ac-multi-sw">
+              <el-switch v-model="multi.workTypes" size="small" />
+              <span class="ac-multi-txt">{{ multi.workTypes ? '可多选' : '多选' }}</span>
+            </span>
+          </template>
+          <el-radio-group v-if="!multi.workTypes" v-model="form.workTypes[0]">
+            <el-radio v-for="t in workTypes" :key="t" :label="t" :value="t">{{ t }}</el-radio>
+          </el-radio-group>
+          <el-checkbox-group v-else v-model="form.workTypes">
+            <el-checkbox v-for="t in workTypes" :key="t" :label="t" :value="t">{{ t }}</el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+        <el-form-item required class="ac-multi-item">
+          <template #label>
+            <span class="ac-lb">施工人员</span>
+            <span class="ac-multi-sw">
+              <el-switch v-model="multi.workers" size="small" />
+              <span class="ac-multi-txt">{{ multi.workers ? '可多选' : '多选' }}</span>
+            </span>
+          </template>
+          <div class="ac-worker-row">
+            <span class="ac-worker-key">班组长：</span>
+            <template v-if="leaders.length">
+              <el-radio-group v-if="!multi.workers" v-model="form.workers[0]">
+                <el-radio v-for="w in leaders" :key="w" :label="w" :value="w">{{ w }}</el-radio>
+              </el-radio-group>
+              <el-checkbox-group v-else v-model="form.workers">
+                <el-checkbox v-for="w in leaders" :key="w" :label="w" :value="w">{{ w }}</el-checkbox>
+              </el-checkbox-group>
+            </template>
+            <span v-else class="ac-worker-empty">该项目包未设置班组长，请先在「项目列表」中维护班组长。</span>
+          </div>
+        </el-form-item>
+
+        <div class="ac-sec">
+          <div class="ac-sec-head">
+            <span class="ac-sec-title">材料及数量</span>
+            <span v-if="projectMaterials.length" class="ac-sec-meta">已填 {{ filledCount }} / {{ projectMaterials.length }} 项</span>
+            <el-input v-if="projectMaterials.length > 8" v-model="materialSearch" class="ac-sec-search"
+              placeholder="搜索物料描述或编码" clearable />
+          </div>
+          <div v-if="!form.project" class="ac-hint">请先选择项目名称（包），选择后可填报该项目的材料及数量。</div>
+          <div v-else-if="!form.workTypes.length" class="ac-hint">请选择工作类型：转运 / 立杆 匹配电杆；放线和设备安装 匹配导线、设备。</div>
+          <div v-else-if="!projectMaterials.length" class="ac-hint">该项目包在当前工作类型下没有可填报的材料。</div>
+          <div v-else class="ac-mlist">
+            <div v-for="m in filteredMaterials" :key="m.id" class="ac-mrow">
+              <div class="ac-mname">
+                <span class="ac-mpkg">{{ m.pkgLabel }}</span>
+                <span class="ac-msep">·</span>
+                <span class="ac-mdesc">{{ m.description }}</span>
+              </div>
+              <el-input v-model="qtyMap[m.id]" class="ac-mqty" placeholder="数量" />
+              <span class="ac-munit">{{ m.unit || '' }}</span>
+              <span class="ac-merp">ERP应到 {{ fmtQty(m.qtyRequired) }}</span>
+              <span v-if="kmOf(m) !== null" class="ac-mkm">≈ {{ kmOf(m) }} 千米</span>
+            </div>
+            <div v-if="!filteredMaterials.length" class="ac-mempty">没有匹配的材料</div>
+          </div>
+        </div>
+        <el-form-item style="margin-top:22px">
+          <el-button v-if="canWrite('actualWorks')" type="primary" :loading="busy" @click="submit">{{ editingId ? '保存' : '提交' }}</el-button>
+          <el-button v-if="editingId" @click="cancelEdit">取消</el-button>
+        </el-form-item>
+      </el-form>
+    </div>
+
+    <div v-show="tab === 'report'" class="ac-pane">
+      <h2 class="ac-h2">工程实际施工量报表</h2>
+      <div class="ac-filters">
+        <el-button class="ac-export" @click="exportExcel">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true" style="margin-right:6px">
+            <path d="M8 2v8m0 0 2.6-2.6M8 10 5.4 7.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2.5 11.5v1.2c0 .7.5 1.3 1.2 1.3h8.6c.7 0 1.2-.6 1.2-1.3v-1.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>导出 Excel
+        </el-button>
+        <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
+          start-placeholder="开始日期" end-placeholder="结束日期" style="width:236px" popper-class="ac-date-pop" />
+        <el-select v-model="fProject" placeholder="项目名称（包）" clearable filterable style="width:212px">
+          <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
+        </el-select>
+        <el-select v-model="fWorkType" placeholder="工作类型" clearable style="width:150px">
+          <el-option v-for="t in workTypes" :key="t" :label="t" :value="t" />
+        </el-select>
+        <el-select v-model="fWorker" placeholder="班组长" clearable style="width:126px">
+          <el-option v-for="w in workerOptions" :key="w" :label="w" :value="w" />
+        </el-select>
+        <el-select v-model="fSubmitter" placeholder="实施人员" clearable style="width:126px">
+          <el-option v-for="s in submitterOptions" :key="s" :label="s" :value="s" />
+        </el-select>
+      </div>
+      <el-table class="ac-rep" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无数据">
+        <el-table-column prop="date" label="日期" width="100" class-name="ac-mid" />
+        <el-table-column label="工作类型" width="96" class-name="ac-mid">
+          <template #default="{row}">{{ rowTypes(row).join('、') || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="项目名称（包）" min-width="220" class-name="ac-mid">
+          <template #default="{row}"><span class="ac-rep-proj">{{ row.project }}</span></template>
+        </el-table-column>
+        <el-table-column label="班组长/实施人员" width="116" class-name="ac-mid">
+          <template #default="{row}"><span class="rule-names">{{ rowWorkers(row).join('、') || '—' }}</span></template>
+        </el-table-column>
+        <el-table-column label="材料" min-width="280">
+          <template #default="{row}">
+            <div v-if="row.items && row.items.length" class="ac-rep-lines">
+              <div v-for="(it,i) in row.items" :key="i" class="ac-rep-line" :title="pkgLabelOf(it) + '-' + (it.description || '')">
+                <span class="ac-rep-pkg">{{ pkgLabelOf(it) }}</span>
+                <span class="ac-rep-desc">{{ it.description }}</span>
+              </div>
+            </div>
+            <span v-else class="ac-rep-none">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="数量" width="92" align="right">
+          <template #default="{row}">
+            <div v-if="row.items && row.items.length" class="ac-rep-lines">
+              <div v-for="(it,i) in row.items" :key="i" class="ac-rep-line ac-rep-q">
+                <b>{{ it.qty }}</b><span class="ac-rep-unit">{{ it.unit || '' }}</span>
+              </div>
+            </div>
+            <span v-else class="ac-rep-none">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="108" align="center" class-name="ac-mid">
+          <template #default="{row}">
+            <el-button v-if="canWrite('actualWorks')" link type="primary" size="small" @click="editRecord(row)">编辑</el-button>
+            <el-button v-if="canWrite('actualWorks')" link type="danger" size="small" @click="remove(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="ac-pager">
+        <span class="ac-total">共 {{ reportRows.length }} 条</span>
+        <el-pagination background layout="prev, pager, next" :total="reportRows.length" :page-size="pageSize" :current-page="page" @current-change="p=>page=p" />
+        <el-select :model-value="pageSize" size="small" style="width:104px" @change="n=>{pageSize=n;page=1}">
+          <el-option v-for="n in [10,20,50]" :key="n" :label="n + ' 条/页'" :value="n" />
+        </el-select>
+      </div>
+    </div>
+  </div>`
+};
+
 app.component('PlanDateTime', PlanDateTime);
 app.component('PlansView', PlansView);
+app.component('ActualConstructionView', ActualConstructionView);
 app.mount('#app');
