@@ -11,3 +11,7 @@ uploads
 # 日志与系统文件
 *.log
 .DS_Store
+
+# 本地备份 / 截图（回滚快照与调试产物，不进仓库）
+_backup
+_shots
