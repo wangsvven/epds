@@ -219,11 +219,13 @@ docker compose up -d --build
 
 ## 九、版本
 
-- **按功能区重组（纯结构重构，未发版）**：`server.js`（约 2900 行）与 `public/app.js`（约 6700 行）按功能区拆分，`server.js` 只保留入口（50 行），前端改为 `public/js/` 下 15 个脚本。
+- **v2.11.0**：按功能区重组（纯结构重构，只搬不改）。
+  - `server.js`（约 2900 行）与 `public/app.js`（约 6700 行）按功能区拆分，`server.js` 只保留入口（50 行），前端改为 `public/js/` 下 15 个脚本。
   - 只搬不改：API 路径、请求/响应结构、`db.json` 数据结构全部未变，不引入新依赖，仍为零构建离线运行、启动入口仍为 `node server.js`。
   - 后端：`server/core/`（app / db / auth / crud / upload / util / material-calc / doc-templates / risk-category）+ `server/routes/`（system / projects / documents / plans / materials / workticket）。
   - 前端：`public/js/`（api / utils / auth / main + views 11 个），`index.html` 按依赖顺序引入，`main.js` 最后加载。
-  - 回归标准：`node scripts/smoke.js`（临时 DATA_DIR 起服务，覆盖 9 个功能区 44 项断言），重构过程中每步均全绿。详见 `docs/REFACTOR_PLAN.md`。
+  - 回归标准：`node scripts/smoke.js`（临时 DATA_DIR 起服务，覆盖 9 个功能区 44 项断言），重构过程中每步均全绿。详见 `docs/REFACTOR_PLAN.md`、`docs/REFACTOR_RESULT.md`。
+  - 业务口径确认：金具及铁附件材料包不出现在「工程实际施工量」为正确口径（非缺陷）。
 - **v2.10.3**：修复全新实例（含 Docker 空卷首启）「载入默认」提示默认配置为空的问题。
   - 原因：默认模板原来是运行时从当前库里的措施数据「冻结」出来的快照，全新实例库里没有任何措施，快照自然为空，镜像我部署后点「载入默认」只能得到「默认配置为空」。
   - 现在把 49 条施工技术措施 + 19 条施工安全措施**随代码内置**在 `assets/ct-standard.json`：默认模板为空且用户没保存过快照时，自动以该内置内容兜底，全新实例开箱即可「载入默认」；内置文件同时是「一键载入 CT 标准」的数据源（此前缺文件会报「尚未内置 CT 标准资料」）。
