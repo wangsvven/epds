@@ -2239,12 +2239,36 @@ app.get('/api/workticket/library', (req, res) => {
 });
 
 // ---------- 默认模板（施工技术 / 安全措施原文 快照）----------
+/* 内置标准资料：assets/ct-standard.json 随代码分发（技术 49 条 / 安全 19 条通用措施原文）。
+ * 全新实例（含 Docker 空卷首次启动）库里没有任何措施数据，此时「默认模板」直接回落为内置内容，
+ * 保证「载入默认」开箱可用；用户一旦用「保存为默认」自行冻结过快照（savedAt 有值），则以用户快照为准。 */
+const CT_STANDARD_FILE = path.join(__dirname, 'assets', 'ct-standard.json');
+let CT_STANDARD_CACHE;
+function builtinStandard() {
+  if (CT_STANDARD_CACHE !== undefined) return CT_STANDARD_CACHE;
+  CT_STANDARD_CACHE = null;
+  try {
+    if (!fs.existsSync(CT_STANDARD_FILE)) return null;
+    const d = JSON.parse(fs.readFileSync(CT_STANDARD_FILE, 'utf8'));
+    const norm = arr => (Array.isArray(arr) ? arr : [])
+      .map(x => ({ sort: Number(x.sort) || 0, title: String(x.title || '').trim(), content: String(x.content || '').trim() }))
+      .filter(x => x.title && x.content);
+    const tech = norm(d.techMeasures), safety = norm(d.safetyMeasures);
+    if (tech.length || safety.length) CT_STANDARD_CACHE = { tech, safety };
+  } catch (e) { console.error('  ⚠ 内置标准资料读取失败：', e.message); }
+  return CT_STANDARD_CACHE;
+}
 function wtDefaultShape() {
   if (!DB.wtDefaultMeasures || typeof DB.wtDefaultMeasures !== 'object') DB.wtDefaultMeasures = {};
   if (!Array.isArray(DB.wtDefaultMeasures.tech)) DB.wtDefaultMeasures.tech = [];
   if (!Array.isArray(DB.wtDefaultMeasures.safety)) DB.wtDefaultMeasures.safety = [];
   if (DB.wtDefaultMeasures.savedAt === undefined) DB.wtDefaultMeasures.savedAt = '';
   if (DB.wtDefaultMeasures.cleared === undefined) DB.wtDefaultMeasures.cleared = false;
+  // 未自行冻结过快照、且快照为空 → 回落内置标准资料（全新实例也能「载入默认」）
+  if (!DB.wtDefaultMeasures.tech.length && !DB.wtDefaultMeasures.safety.length && !DB.wtDefaultMeasures.savedAt) {
+    const b = builtinStandard();
+    if (b) { DB.wtDefaultMeasures.tech = b.tech.slice(); DB.wtDefaultMeasures.safety = b.safety.slice(); }
+  }
   return DB.wtDefaultMeasures;
 }
 const wtNormTitle = s => String(s || '').replace(/\s+/g, ' ').trim();
@@ -2274,7 +2298,8 @@ function wtSnapshotDefault() {
 
 app.get('/api/workticket/measures/default', (req, res) => {
   const d = wtDefaultShape();
-  res.json({ tech: d.tech.length, safety: d.safety.length, savedAt: d.savedAt || '' });
+  // builtin=true 表示用的是随代码分发的内置标准资料（尚未被用户「保存为默认」覆盖）
+  res.json({ tech: d.tech.length, safety: d.safety.length, savedAt: d.savedAt || '', builtin: !d.savedAt });
 });
 
 // 清除全部措施原文：清空「施工技术措施原文」与「施工安全措施原文」两个列表；

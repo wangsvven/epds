@@ -311,13 +311,18 @@ const DocumentsView = {
     /* 施工技术 / 安全措施原文（同结构，kind = tech | safety） */
     const measures = reactive({ tech: [], safety: [] });
     /* 默认模板（载入默认 / 清除） */
-    const defaultMea = reactive({ tech: 0, safety: 0, savedAt: '', busy: false });
+    const defaultMea = reactive({ tech: 0, safety: 0, savedAt: '', builtin: false, busy: false });
     async function loadDefaultMeta() {
       try {
         const d = await api.get('/api/workticket/measures/default');
-        defaultMea.tech = d.tech || 0; defaultMea.safety = d.safety || 0; defaultMea.savedAt = d.savedAt || '';
+        defaultMea.tech = d.tech || 0; defaultMea.safety = d.safety || 0;
+        defaultMea.savedAt = d.savedAt || ''; defaultMea.builtin = !!d.builtin;
       } catch (e) { /* 忽略 */ }
     }
+    const defaultMeaTip = computed(() => {
+      if (!defaultMea.tech && !defaultMea.safety) return '暂无默认模板';
+      return `默认模板：技术 ${defaultMea.tech} 条 · 安全 ${defaultMea.safety} 条（${defaultMea.builtin ? '内置标准资料' : '已保存快照'}）`;
+    });
     // 清除：清空「施工技术措施原文」「施工安全措施原文」两个列表（默认配置保留，可用「载入默认」恢复）
     const cntOfGroup = key => { const g = (lib.groups || []).find(x => x.key === key); return g ? (g.count || 0) : 0; };
     async function clearAllMeasures() {
@@ -358,7 +363,7 @@ const DocumentsView = {
     });
     async function loadDefaultMeasures() {
       if (!defaultMea.tech && !defaultMea.safety) await loadDefaultMeta();
-      if (!defaultMea.tech && !defaultMea.safety) { ElementPlus.ElMessage.warning('默认配置为空，无内容可载入'); return; }
+      if (!defaultMea.tech && !defaultMea.safety) { ElementPlus.ElMessage.warning('默认模板为空：既无内置标准资料，也未保存过默认配置'); return; }
       defaultMea.busy = true;
       try {
         const d = await api.post('/api/workticket/measures/default/load');
@@ -799,7 +804,7 @@ const DocumentsView = {
       lib, libOpen, rules, ruleDlg, ruleImportInput, rulePreview,
       loadLib, loadRules, toggleLib, openRuleAdd, openRuleEdit, submitRule, removeRule,
       measures, meaDlg, measureLabel, openMeaAdd, openMeaEdit, submitMea, removeMea, meaView, openMeaView, meaViewBlocks, meaInsertTab,
-      defaultMea, loadDefaultMeta, clearAllMeasures, loadDefaultMeasures,
+      defaultMea, loadDefaultMeta, clearAllMeasures, loadDefaultMeasures, defaultMeaTip,
       meaPaged, meaTotal, meaPage, meaPageSize, meaSetPageSize, MEA_PAGE_SIZE,
       hospitals, hosDlg, openHosAdd, openHosEdit, submitHos, removeHos,
       emergency, saveEmergency,
@@ -903,7 +908,8 @@ const DocumentsView = {
               <span class="lib-title">资料库</span>
               <div class="lib-head-actions">
                 <el-button v-if="canWrite('documents')" link type="danger" @click="clearAllMeasures">清除</el-button>
-                <el-button v-if="canWrite('documents')" size="small" type="primary" :loading="defaultMea.busy" @click="loadDefaultMeasures">载入默认</el-button>
+                <el-button v-if="canWrite('documents')" size="small" type="primary" :loading="defaultMea.busy"
+                  :title="defaultMeaTip" @click="loadDefaultMeasures">载入默认</el-button>
               </div>
             </div>
 
