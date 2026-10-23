@@ -3082,22 +3082,39 @@ const ProjectsView = {
       const names = projNames.value;
       return workPlans.value.filter(p => names.includes(p.project));
     });
-    // 材料类型归类：电杆 / 线材 / 设备（用于核错汇总）
-    // 电杆：电杆 / 预应力 / 方杆
-    // 线材：按型号代码匹配 GJ、JL/G1A、JKLGYJ、YJLV、BLV、JKLYJ、YJV、BV（忽略大小写，兼容 JL / G1A 写法）
-    // 设备：变压器、JP柜、开关、熔断器、真空开关、一二次融合断路器（断路器已覆盖真空/一二次融合）
-    // 其余（铁附件 / 金具）暂计入设备桶，后续如需单列再加「铁附件」桶
-    const POLE_RE = /电杆|预应力|方杆/;
-    const CABLE_RE = /GJ|JL\s*\/\s*G1A|JKLGYJ|YJLV|BLV|JKLYJ|YJV|BV/i;
-    const DEVICE_RE = /变压器|JP\s*柜|开关|熔断器|断路器/;
+    // 材料归类（按包汇总）：电杆 / 导线 / 设备 / 金具及铁附件
+    // 电杆：混凝土电杆 / 预应力 / 方杆 / 电杆 / 水泥杆 / 钢管杆 / 等径杆 / 锥形杆
+    // 导线：按国标型号命名匹配（忽略大小写）——
+    //   裸导线 GJ(钢绞线)、GJX、LGJ(钢芯铝绞线)、LGJX、LGJF、LJ(铝绞线)、TJ(铜绞线)、JL/G1A~G3B
+    //   架空绝缘 JKLYJ、JKLGYJ、JKLY、JKLV、JKYJ
+    //   电力电缆 YJV、YJLV、YJY、YJLY、YJV22、YJLV22、VV、VLV
+    //   电线 BV、BLV、BVR、BVV、BVVB、BLVV、BX、BLX、BXR、RV、RVS、RVV、RVVP
+    //   控制电缆/光缆 KVV、KVVP、KYJV、OPGW、ADSS
+    // 设备：变压器、JP柜（配电箱）、开关（含真空开关、隔离开关、负荷开关）、熔断器、断路器（含一二次融合）、
+    //       避雷器、互感器、集中器、环网柜、分支箱
+    // 金具及铁附件：抱箍 / 横担 / 线夹 / 挂环 / 接线端子 / 接地材料 / 绝缘子 / 护套 / 标识牌等；未匹配项也归此类，不再回落设备
+    // 注意：金具关键词必须先于设备判断——「熔断器横担」「变压器抱箍」「JP柜固定螺杆」「避雷器绝缘护套」实际是铁附件而非设备
+    const POLE_RE = /电杆|预应力|方杆|水泥杆|钢管杆|等径杆|锥形杆|混凝土杆/;
+    const CABLE_RE = new RegExp('\\b(?:' + [
+      'GJX?', 'LGJX?', 'LGJF', 'LJ', 'TJ', 'JL\\s*\\/\\s*G[1-3][AB]?',
+      'JKLYJ\\/B', 'JKLYJ', 'JKLGYJ', 'JKLY', 'JKLV', 'JKYJ',
+      'YJLV22', 'YJV22', 'YJLV32', 'YJV32', 'YJLV', 'YJV', 'YJLY', 'YJY',
+      'VLV', 'VV',
+      'BVV', 'BVVB', 'BLVV', 'BVR', 'BV', 'BLV', 'BXR', 'BLX', 'BX',
+      'RVVP', 'RVV', 'RVS', 'RV',
+      'KVVP', 'KVV', 'KYJV', 'OPGW', 'ADSS'
+    ].join('|') + ')', 'i');
+    const DEVICE_RE = /变压器|JP\s*柜|配电箱|开关|熔断器|断路器|避雷器|互感器|集中器|环网柜|分支箱/;
+    const FITTING_RE = /金具|铁附件|抱箍|托箍|横担|托担|挂环|挂板|碗头|球头|联板|线夹|并沟|楔形|耐张|悬垂|压接管|接续管|拉线棒|拉线盘|撑铁|垫铁|斜撑|撑脚|螺杆|螺丝|螺栓|穿钉|桩头|保护套|护套|绝缘罩|防盗锁|标识牌|标识管|相序牌|警示牌|标志|接线端子|接地环|接地线|接地体|接地铁|门型架|槽钢|夹铁|防震锤|绝缘子|瓷瓶|电缆头|脚钉|爬梯|卡盘|底盘|支架/;
     function matType(desc) {
       const s = String(desc || '');
       if (POLE_RE.test(s)) return 'pole';
       if (CABLE_RE.test(s)) return 'cable';
+      if (FITTING_RE.test(s)) return 'fitting'; // 先于设备：避免被「熔断器 / 变压器 / JP柜 / 避雷器」字样误吞
       if (DEVICE_RE.test(s)) return 'device';
-      return 'device'; // 铁附件 / 金具等未匹配项（后续可单独建桶）
+      return 'fitting'; // 其余统一归「金具及铁附件」，不再回落设备
     }
-    // 按桶汇总：电杆 / 线材 / 设备（设备含变压器、隔离开关、一二次融合断路器等）
+    // 按包汇总：电杆 / 导线 / 设备 / 金具及铁附件
     const ledger = computed(() => {
       const ms = projMaterials.value;
       const sum = (k) => ms.reduce((s, m) => s + (Number(m[k]) || 0), 0);
@@ -3306,9 +3323,9 @@ const ProjectsView = {
       return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
     }
     // ---- 详情页材料台账汇总（材料台账/周计划模块完成前，按项目进度推导的占位数据） ----
-    const LEDGER_CONF = [['pole', '电杆', '根'], ['cable', '线材', '千米'], ['device', '设备', '台']];
-    // 桶配色（与项目列表局计划进度色一致：深蓝=电杆、浅蓝=线材、灰=设备）
-    function bucketColor(key) { return { pole: '#3370ff', cable: '#7aa7ff', device: 'var(--text-3)' }[key] || 'var(--text-3)'; }
+    const LEDGER_CONF = [['pole', '电杆', '根'], ['cable', '导线', '千米'], ['device', '设备', '台'], ['fitting', '金具及铁附件', '件']];
+    // 包配色（与项目列表局计划进度色一致：深蓝=电杆、浅蓝=导线、灰=设备；琥珀=金具及铁附件）
+    function pkgColor(key) { return { pole: '#3370ff', cable: '#7aa7ff', device: 'var(--text-3)', fitting: '#e6a23c' }[key] || 'var(--text-3)'; }
     // 材料状态 → 标签类型（扁平 plain 样式）
     function statusTagType(s) {
       if (s === '全部到库') return 'success';
@@ -3328,7 +3345,7 @@ const ProjectsView = {
       openAdd, openEdit, addSub, removeSub, submit,
       detail, showDetail, backToList, completeProject, removeProject,
       projFileInput, projFiles, triggerProjUpload, onProjUpload, delProjFile, packProjDownload, fmtDT,
-      projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, bucketColor, statusTagType
+      projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, pkgColor, statusTagType
     };
   },
   template: `
@@ -3579,7 +3596,7 @@ const ProjectsView = {
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <span style="font-weight:600;font-size:14px">按桶汇总</span>
+        <span style="font-weight:600;font-size:14px">按包汇总</span>
         <span style="color:var(--text-3);font-size:12px">台账应到 / 已报计划量 / 需补计划量</span>
       </div>
       <el-table :data="ledger.rows" border size="small">
@@ -3587,7 +3604,11 @@ const ProjectsView = {
           <template #default="{row}">
             <div style="padding:8px 16px 12px;background:var(--surface-2)">
               <el-table :data="row.items" size="small" border>
-                <el-table-column prop="description" label="物料描述" min-width="240" show-overflow-tooltip />
+                <el-table-column prop="description" label="物料描述" min-width="300">
+                  <template #default="{row}">
+                    <div style="white-space:normal;word-break:break-all;line-height:1.5">{{ row.description }}</div>
+                  </template>
+                </el-table-column>
                 <el-table-column label="应到" width="120" align="right"><template #default="{row}">{{ fmtQty(row.qtyRequired) }}</template></el-table-column>
                 <el-table-column label="已到" width="120" align="right"><template #default="{row}">{{ fmtQty(row.qtyArrived) }}</template></el-table-column>
                 <el-table-column label="未到" width="120" align="right"><template #default="{row}">{{ fmtQty(row.qtyNotArrived) }}</template></el-table-column>
@@ -3595,15 +3616,15 @@ const ProjectsView = {
                 <el-table-column label="状态" width="110" align="center">
                   <template #default="{row}"><el-tag size="small" effect="plain" :type="statusTagType(row.status)">{{ row.status }}</el-tag></template>
                 </el-table-column>
-                <template #empty><span style="color:var(--text-3);font-size:12px">该类暂无材料</span></template>
+                <template #empty><span style="color:var(--text-3);font-size:12px">该包暂无材料</span></template>
               </el-table>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="桶" width="90" align="center">
+        <el-table-column label="包" width="120" align="center">
           <template #default="{row}">
             <span style="display:inline-flex;align-items:center;gap:6px;font-weight:600">
-              <span :style="{width:'8px',height:'8px',borderRadius:'2px',background:bucketColor(row.key),display:'inline-block'}"></span>{{ row.label }}
+              <span :style="{width:'8px',height:'8px',borderRadius:'2px',background:pkgColor(row.key),display:'inline-block'}"></span>{{ row.label }}
             </span>
           </template>
         </el-table-column>
