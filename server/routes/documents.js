@@ -53,29 +53,6 @@ function parseHazardFromFile(file) {
   return parseHazardFromBuffer(fs.readFileSync(abs), (file && file.name) || '');
 }
 
-function seedHazardLibraryFromNorm() {
-  try {
-    const f = path.join(__dirname, 'assets', '危险点.xlsx');
-    if (!fs.existsSync(f)) return;
-    const wb = xlsx.readFile(f);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false }).slice(1);
-    const existing = new Set(DB.documents.hazardLibrary.map(h => h.hazard + '||' + h.measure));
-    let maxSort = DB.documents.hazardLibrary.reduce((m, h) => Math.max(m, h.sort || 0), -1);
-    let n = 0;
-    for (const r of rows) {
-      const hazard = String(r[0] || '').trim();
-      const measure = String(r[2] || '').trim();
-      if (!hazard || !measure) continue;
-      const key = hazard + '||' + measure;
-      if (existing.has(key)) continue;
-      existing.add(key);
-      DB.documents.hazardLibrary.push({ id: genId('h'), hazard, measure, category: categorize(hazard), sort: ++maxSort });
-      n++;
-    }
-    if (n) console.log(`  ➜  已从规范文件灌入企业危险点库 ${n} 条`);
-  } catch (e) { console.error('  ⚠ 危险点库从规范文件灌入失败：', e.message); }
-}
 if (DB.documents && DB.documents.hazardLibrary) {
   // 危险点库不再自动从「assets/危险点.xlsx」灌入：全新实例保持为空，由用户手动录入或 Excel 导入
   // 仅补填老数据缺失的 category 字段
