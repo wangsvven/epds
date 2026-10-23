@@ -107,6 +107,5 @@ init → contacts → users → projects → plans → actualWorks → main`
 
 ## 6. 遗留事项（需另行确认，本次未做）
 
-1. `seedHazardLibraryFromNorm()`（`server/routes/documents.js`）定义了但从未被调用，疑似死代码，按「只搬不改」原样保留。
-2. 金具及铁附件材料包在「工程实际施工量」中不出现，业务口径待确认。
-3. 本次重构不变更版本号；发版与推送 GitHub 需由使用者单独下指令。
+1. `seedHazardLibraryFromNorm()`（`server/routes/documents.js`）定义了但从未被调用，疑似死代码，按「只搬不改」原样保留，本次不动。
+2. ~~金具及铁附件材料包在「工程实际施工量」中不出现，业务口径待确认。~~ **已关闭（2026-10-24 验收确认）**：金具及铁附件包不出现在「工程实际施工量」是正确的业务口径，属正常行为而非缺陷。
