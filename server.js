@@ -8,8 +8,8 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const multer = require('multer');
 const xlsx = require('xlsx');
+const app = require('./server/core/app');
 const {
   aliveFilter, repairUploadName, genId, nowISO, fmtNow, fmtStamp,
   parseCNDate, parseCSVBuffer, decodeXmlEntities, unzipEntry, extractDocxText,
@@ -26,9 +26,8 @@ const {
   isAdmin, userGroupOf, writeModulesOf, canWriteModule, moduleOfPath, passwordStrong,
   fullPath, authMiddleware
 } = require('./server/core/auth');
-
-// 材料 Excel 导入：内存暂存，单文件上限 20MB
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 }, defParamCharset: 'utf8' });
+const upload = require('./server/core/upload');
+const { crud } = require('./server/core/crud');
 
 const PORT = process.env.PORT || 5173;
 
@@ -139,9 +138,6 @@ if (DB.documents && DB.documents.hazardLibrary) {
 
 
 // ---------- 认证 ----------
-const app = express();
-app.use(express.json());
-
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
   const id = String(username || '').trim();
@@ -256,52 +252,6 @@ app.delete('/api/users/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- 通用 CRUD 工厂 ----------
-// opts.biz：true=业务集合（列表/读取仅返回未逻辑删除的行）；false=全局字典（字典/设置等）
-// opts.soft：true=删除走逻辑删除（置 deleted）；false=物理删除（默认对全局字典）
-function crud(collection, prefix, opts) {
-  opts = opts || {};
-  const biz = opts.biz !== false;
-  const soft = opts.soft !== false ? true : false;
-  const base = '/api/' + prefix;
-  app.get(base, (req, res) => {
-    const data = biz ? DB[collection].filter(aliveFilter()) : DB[collection];
-    res.json(data);
-  });
-  app.get(base + '/:id', (req, res) => {
-    const item = DB[collection].find(x => x.id === req.params.id);
-    if (!item) return res.status(404).json({ error: '未找到' });
-    if (biz && item.deleted) return res.status(404).json({ error: '未找到' });
-    res.json(item);
-  });
-  app.post(base, (req, res) => {
-    const item = { id: genId(prefix.slice(0, 2)), createdAt: nowISO(), ...req.body };
-    if (biz) { item.deleted = false; }
-    DB[collection].push(item);
-    saveDB();
-    res.json(item);
-  });
-  app.put(base + '/:id', (req, res) => {
-    const idx = DB[collection].findIndex(x => x.id === req.params.id);
-    if (idx < 0) return res.status(404).json({ error: '未找到' });
-    const cur = DB[collection][idx];
-    if (biz && cur.deleted) return res.status(404).json({ error: '未找到' });
-    const merged = { ...cur, ...req.body, id: req.params.id };
-    if (biz) { merged.deleted = cur.deleted; }
-    DB[collection][idx] = merged;
-    saveDB();
-    res.json(merged);
-  });
-  app.delete(base + '/:id', (req, res) => {
-    const idx = DB[collection].findIndex(x => x.id === req.params.id);
-    if (idx < 0) return res.status(404).json({ error: '未找到' });
-    const cur = DB[collection][idx];
-    if (biz && cur.deleted) return res.status(404).json({ error: '未找到' });
-    if (soft) { cur.deleted = true; } else { DB[collection].splice(idx, 1); }
-    saveDB();
-    res.json({ ok: true });
-  });
-}
 
 // ---------- 作业人员：导入/导出（需在通用 CRUD 之前注册，避免被 GET /:id 拦截） ----------
 // 模板列（按位置）：0 姓名 / 1 身份证号 / 2 电话号码 / 3 身份 / 4 班组 / 5 证件类型 / 6 准入有效期
