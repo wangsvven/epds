@@ -1,0 +1,486 @@
+#!/usr/bin/env node
+/* ========== 冒烟测试 ==========
+ * 用临时 DATA_DIR（把项目复制到系统临时目录，data/ 为空 → 服务自动播种空实例）启动服务，
+ * 逐功能区验证核心接口：健康检查 / 登录 / 各模块列表 GET / 新增 POST / 详情 GET / 权限 403。
+ * 用途：重构（按功能区拆分）每一步的回归标准。
+ *
+ * 用法：
+ *   node scripts/smoke.js               正常跑，结束后清理临时目录
+ *   node scripts/smoke.js --keep        保留临时目录（排查失败用），末尾打印路径
+ *   node scripts/smoke.js --port 5399   指定端口（默认自动挑空闲端口）
+ */
+const fs = require('fs');
+const os = require('os');
+const net = require('net');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const KEEP = process.argv.includes('--keep');
+const PORT_ARG = (() => {
+  const i = process.argv.indexOf('--port');
+  return i > -1 ? Number(process.argv[i + 1]) : 0;
+})();
+// 复制到临时目录时跳过的顶层项（node_modules 用软链接复用，避免每次复制几十 MB）
+const SKIP_TOP = new Set(['node_modules', 'data', 'uploads', '.git', '.workbuddy', '_backup', '_shots']);
+
+const results = [];
+let base = '';
+let child = null;
+let TMP = '';
+let serverLog = '';
+
+function log(s) { process.stdout.write(s + '\n'); }
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+function prepareTmp() {
+  TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-smoke-'));
+  fs.cpSync(ROOT, TMP, {
+    recursive: true,
+    filter: (src) => {
+      const rel = path.relative(ROOT, src);
+      if (!rel) return true;
+      const top = rel.split(path.sep)[0];
+      if (SKIP_TOP.has(top)) return false;
+      if (/\.log$/i.test(rel)) return false;
+      return true;
+    }
+  });
+  // node_modules 复用项目里的那份（只读依赖，软链接即可）
+  const nm = path.join(ROOT, 'node_modules');
+  if (fs.existsSync(nm)) fs.symlinkSync(nm, path.join(TMP, 'node_modules'), 'dir');
+  fs.mkdirSync(path.join(TMP, 'data'), { recursive: true }); // 空 data → 自动 seed 空实例
+  return TMP;
+}
+
+async function startServer(port) {
+  child = spawn(process.execPath, ['server.js'], {
+    cwd: TMP,
+    env: { ...process.env, PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  child.stdout.on('data', d => { serverLog += d.toString(); });
+  child.stderr.on('data', d => { serverLog += d.toString(); });
+  base = 'http://127.0.0.1:' + port;
+  for (let i = 0; i < 250; i++) {
+    if (child.exitCode !== null) throw new Error('服务启动即退出（exit ' + child.exitCode + '）：\n' + serverLog);
+    try {
+      const r = await fetch(base + '/api/health', { signal: AbortSignal.timeout(800) });
+      if (r.ok) return;
+    } catch (e) { /* 还没起来 */ }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  throw new Error('服务 25s 内未就绪：\n' + serverLog);
+}
+
+async function stopServer() {
+  if (!child) return;
+  const c = child;
+  child = null;
+  if (c.exitCode === null) {
+    c.kill('SIGTERM');
+    await new Promise(r => {
+      const t = setTimeout(() => { try { c.kill('SIGKILL'); } catch (e) { } r(); }, 2500);
+      c.on('exit', () => { clearTimeout(t); r(); });
+    });
+  }
+}
+
+async function api(method, p, opt) {
+  opt = opt || {};
+  const headers = {};
+  if (opt.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (opt.token) headers.Authorization = 'Bearer ' + opt.token;
+  const res = await fetch(base + p, {
+    method,
+    headers,
+    body: opt.body === undefined ? undefined : JSON.stringify(opt.body),
+    signal: AbortSignal.timeout(10000)
+  });
+  const txt = await res.text();
+  let data = null;
+  try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = txt; }
+  return { status: res.status, data };
+}
+
+async function step(group, name, fn) {
+  try {
+    const info = await fn();
+    results.push({ group, name, ok: true, info: info || '' });
+    log('PASS  [' + group + '] ' + name + (info ? '  → ' + info : ''));
+  } catch (e) {
+    results.push({ group, name, ok: false, info: e.message });
+    log('FAIL  [' + group + '] ' + name + '\n      ' + String(e.message).replace(/\n/g, '\n      '));
+  }
+}
+
+function need(cond, msg) { if (!cond) throw new Error(msg); }
+function brief(data) { return JSON.stringify(data).slice(0, 220); }
+function needOk(r, label) {
+  need(r.status >= 200 && r.status < 300, (label || '') + ' 期望 2xx，实际 ' + r.status + ' ' + brief(r.data));
+  return r.data;
+}
+async function listOk(p, token) {
+  const r = await api('GET', p, { token });
+  needOk(r, 'GET ' + p);
+  need(Array.isArray(r.data), 'GET ' + p + ' 应返回数组，实际 ' + brief(r.data));
+  return r.data;
+}
+
+(async () => {
+  const t0 = Date.now();
+  log('=== 电网ERP 冒烟测试（临时 DATA_DIR）===');
+  try {
+    prepareTmp();
+    log('临时目录：' + TMP);
+    const port = PORT_ARG || await freePort();
+    await startServer(port);
+    log('服务已就绪：' + base + '\n');
+  } catch (e) {
+    log('启动失败：' + e.message);
+    await stopServer();
+    if (TMP && !KEEP) { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (err) { } }
+    process.exit(1);
+  }
+
+  /* ---------- 基础 / 静态资源 / 鉴权 ---------- */
+  await step('基础', '健康检查 GET /api/health', async () => {
+    const d = needOk(await api('GET', '/api/health'), 'health');
+    need(d && d.ok === true, 'health.ok 应为 true：' + brief(d));
+    return d.name;
+  });
+  await step('基础', '首页 GET /', async () => {
+    const r = await fetch(base + '/');
+    need(r.status === 200, 'GET / 期望 200，实际 ' + r.status);
+    const html = await r.text();
+    need(html.indexOf('id="app"') > -1, '首页 HTML 缺少 #app 挂载点');
+    return 'HTML ' + html.length + ' 字节';
+  });
+  await step('基础', '离线依赖 GET /vendor/vue.global.prod.js', async () => {
+    const r = await fetch(base + '/vendor/vue.global.prod.js');
+    need(r.status === 200, '期望 200，实际 ' + r.status);
+    const t = await r.text();
+    need(t.length > 1000, 'vendor 文件内容异常（' + t.length + ' 字节）');
+    return t.length + ' 字节';
+  });
+  await step('基础', '内置模板 GET /assets/materials_import_template.xlsx', async () => {
+    const r = await fetch(base + '/assets/materials_import_template.xlsx');
+    need(r.status === 200, '期望 200，实际 ' + r.status);
+    return 'OK';
+  });
+  await step('鉴权', '未登录访问业务接口应 401', async () => {
+    const r = await api('GET', '/api/projects');
+    need(r.status === 401, '期望 401，实际 ' + r.status + ' ' + brief(r.data));
+    return '401';
+  });
+
+  /* ---------- system：登录 / 用户 / 设置 / 人员 / 通讯录 ---------- */
+  let token = '';
+  let adminId = '';
+  let clyToken = '';
+  await step('system', '登录 POST /api/login（admin）', async () => {
+    const d = needOk(await api('POST', '/api/login', { body: { username: 'admin', password: 'admin123' } }), 'login');
+    need(d.token && d.user, '登录响应缺少 token/user：' + brief(d));
+    token = d.token;
+    adminId = d.user.id;
+    return 'token ' + String(token).slice(0, 8) + '… / ' + d.user.role;
+  });
+  await step('system', '当前用户 GET /api/me', async () => {
+    const d = needOk(await api('GET', '/api/me', { token }), 'me');
+    need(d.user && d.user.username === 'admin', 'user.username 应为 admin：' + brief(d.user));
+    need(d.user.isAdmin === true, 'admin 的 isAdmin 应为 true');
+    return d.user.name + ' / ' + d.user.role + ' / write=' + JSON.stringify(d.user.permissions.writeModules);
+  });
+  await step('system', '设置 GET /api/settings', async () => {
+    const d = needOk(await api('GET', '/api/settings', { token }), 'settings');
+    need(d && typeof d === 'object' && 'systemName' in d, 'settings 缺少 systemName：' + brief(d));
+    return 'systemName=' + d.systemName;
+  });
+  await step('system', '初始化状态 GET /api/init-status', async () => {
+    const d = needOk(await api('GET', '/api/init-status', { token }), 'init-status');
+    need('initialized' in d, '缺少 initialized：' + brief(d));
+    return 'initialized=' + d.initialized;
+  });
+  await step('system', '账号列表 GET /api/users', async () => {
+    const d = needOk(await api('GET', '/api/users', { token }), 'users');
+    need(Array.isArray(d) && d.length >= 1, '应为非空数组：' + brief(d));
+    need(d.some(u => u.username === 'admin'), '列表缺少 admin');
+    return d.length + ' 个账号';
+  });
+  await step('system', '新建账号 POST /api/users（材料员）+ 列表详情校验', async () => {
+    const d = needOk(await api('POST', '/api/users', {
+      token, body: { loginName: 'smoke_cly', email: 'smoke_cly@example.com', name: '冒烟材料员', password: 'Smoke@2026', userGroup: '材料员' }
+    }), 'users POST');
+    need(d && d.id, '响应缺少 id：' + brief(d));
+    const list = needOk(await api('GET', '/api/users', { token }), 'users list');
+    const got = list.find(u => u.id === d.id);
+    need(got, '新建账号未出现在列表');
+    need(got.userGroup === '材料员', 'userGroup 应为材料员，实际 ' + got.userGroup);
+    return 'id=' + d.id;
+  });
+  await step('system', '作业人员 新增 → 详情', async () => {
+    const d = needOk(await api('POST', '/api/workers', {
+      token, body: { name: '张三', idNumber: '110101199001011234', phone: '13800138000', role: '技工（计入高处作业人员）', team: '冒烟班组' }
+    }), 'workers POST');
+    need(d && d.id, '响应缺少 id');
+    const one = needOk(await api('GET', '/api/workers/' + d.id, { token }), 'workers detail');
+    need(one.name === '张三', 'detail.name 应为 张三，实际 ' + one.name);
+    return 'id=' + d.id;
+  });
+  await step('system', '通讯录 新增 → 详情', async () => {
+    const d = needOk(await api('POST', '/api/contacts', { token, body: { name: '李四', phone: '13900139000', unit: '冒烟单位' } }), 'contacts POST');
+    need(d && d.id, '响应缺少 id');
+    const one = needOk(await api('GET', '/api/contacts/' + d.id, { token }), 'contacts detail');
+    need(one.name === '李四', 'detail.name 应为 李四');
+    return 'id=' + d.id;
+  });
+  await step('system', '设置字典 年度计划/供电所/班组/单位/材料目录 新增 → 详情', async () => {
+    const out = [];
+    const defs = [
+      ['annualPlans', { name: '2026年度计划' }],
+      ['substations', { name: '冒烟供电所' }],
+      ['teams', { name: '冒烟班组' }],
+      ['units', { name: '冒烟分包单位', type: '分包单位' }],
+      ['materialCatalog', { name: '冒烟材料目录' }]
+    ];
+    for (const [coll, body] of defs) {
+      const c = needOk(await api('POST', '/api/' + coll, { token, body }), coll + ' POST');
+      need(c && c.id, coll + ' 响应缺少 id');
+      const one = needOk(await api('GET', '/api/' + coll + '/' + c.id, { token }), coll + ' detail');
+      need(one.name === body.name, coll + ' detail.name 不匹配：' + one.name);
+      out.push(coll);
+    }
+    return out.join(' / ');
+  });
+
+  /* ---------- projects ---------- */
+  let projectId = '';
+  await step('projects', '新增项目 POST /api/projects', async () => {
+    const d = needOk(await api('POST', '/api/projects', {
+      token,
+      body: { name: '冒烟测试项目', batch: '2026-01', substation: '冒烟供电所', workType: '配网', projectType: '自有工程', manager: '张三', status: '进行中' }
+    }), 'projects POST');
+    need(d && d.id, '响应缺少 id');
+    projectId = d.id;
+    return 'id=' + projectId;
+  });
+  await step('projects', '项目列表 GET /api/projects 含新项目', async () => {
+    const d = needOk(await api('GET', '/api/projects', { token }), 'projects list');
+    need(Array.isArray(d) && d.some(p => p.id === projectId), '列表未包含新建项目');
+    return d.length + ' 个项目';
+  });
+  await step('projects', '项目详情 GET /api/projects/:id', async () => {
+    const d = needOk(await api('GET', '/api/projects/' + projectId, { token }), 'projects detail');
+    need(d.name === '冒烟测试项目', 'name 不匹配：' + d.name);
+    return d.name;
+  });
+
+  /* ---------- materials ---------- */
+  let materialId = '';
+  await step('materials', '新增材料 POST /api/materials', async () => {
+    const d = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目', source: 'ERP采购申请', description: '预应力混凝土电杆Φ150×10M', qtyRequired: 10, qtyArrived: 0, unit: '根', code: 'S01HDG1005' }
+    }), 'materials POST');
+    need(d && d.id, '响应缺少 id');
+    materialId = d.id;
+    return 'id=' + materialId;
+  });
+  await step('materials', '材料列表 GET /api/materials（含派生字段）', async () => {
+    const d = needOk(await api('GET', '/api/materials', { token }), 'materials list');
+    const it = d.find(m => m.id === materialId);
+    need(it, '列表未包含新建材料');
+    need(it.status === '未到库', 'status 应为 未到库，实际 ' + it.status);
+    need(it.qtyNotArrived === 10, 'qtyNotArrived 应为 10，实际 ' + it.qtyNotArrived);
+    return 'status=' + it.status + ' qtyNotArrived=' + it.qtyNotArrived;
+  });
+  await step('materials', '材料详情 GET /api/materials/:id', async () => {
+    const d = needOk(await api('GET', '/api/materials/' + materialId, { token }), 'materials detail');
+    need(d.description.indexOf('电杆') > -1, 'description 不匹配：' + d.description);
+    return d.description;
+  });
+  await step('materials', '导入批次 GET /api/materialImports', async () => listOk('/api/materialImports', token).then(d => d.length + ' 条'));
+  await step('materials', '出库管理 GET /api/materialOutbound', async () => listOk('/api/materialOutbound', token).then(d => d.length + ' 条'));
+  await step('materials', '出库库存 GET /api/materialOutbound/stock', async () => {
+    const d = needOk(await api('GET', '/api/materialOutbound/stock', { token }), 'stock');
+    need(Array.isArray(d), 'stock 应返回数组：' + brief(d));
+    return d.length + ' 行';
+  });
+  await step('materials', '领料单 GET /api/materialRequisitions', async () => listOk('/api/materialRequisitions', token).then(d => d.length + ' 条'));
+
+  /* ---------- plans / borrow ---------- */
+  await step('plans', '计划列表 GET /api/plans', async () => listOk('/api/plans', token).then(d => d.length + ' 条'));
+  await step('plans', '作业计划 新增 → 详情', async () => {
+    const d = needOk(await api('POST', '/api/workPlans', {
+      token, body: { project: '冒烟测试项目', workType: '立杆', planStart: '2026-10-24 08:00:00', planEnd: '2026-10-24 18:00:00', status: '未开始' }
+    }), 'workPlans POST');
+    need(d && d.id, '响应缺少 id');
+    const one = needOk(await api('GET', '/api/workPlans/' + d.id, { token }), 'workPlans detail');
+    need(one.project === '冒烟测试项目', 'detail.project 不匹配');
+    return 'id=' + d.id;
+  });
+  await step('plans', '借工 新增 → 详情', async () => {
+    const d = needOk(await api('POST', '/api/borrowWorks', {
+      token, body: { team: '冒烟班组', direction: '借出', reason: '冒烟测试', people: 2, status: '待审批' }
+    }), 'borrowWorks POST');
+    need(d && d.id, '响应缺少 id');
+    const one = needOk(await api('GET', '/api/borrowWorks/' + d.id, { token }), 'borrowWorks detail');
+    need(one.team === '冒烟班组', 'detail.team 不匹配');
+    return 'id=' + d.id;
+  });
+
+  /* ---------- completion ---------- */
+  await step('documents', '竣工资料 新增 → 详情', async () => {
+    const d = needOk(await api('POST', '/api/completionDocuments', {
+      token, body: { name: '竣工资料-冒烟', category: '施工记录', status: '编制中' }
+    }), 'completionDocuments POST');
+    need(d && d.id, '响应缺少 id');
+    const one = needOk(await api('GET', '/api/completionDocuments/' + d.id, { token }), 'completionDocuments detail');
+    need(one.name === '竣工资料-冒烟', 'detail.name 不匹配');
+    return 'id=' + d.id;
+  });
+
+  /* ---------- documents ---------- */
+  await step('documents', '文档中心 GET /api/documents', async () => {
+    const d = needOk(await api('GET', '/api/documents', { token }), 'documents');
+    need(Array.isArray(d.categories) && d.categories.indexOf('危险点') > -1, 'categories 缺少「危险点」：' + brief(d.categories));
+    need(Array.isArray(d.files), 'files 应为数组');
+    return '分类 ' + d.categories.length + ' 个 / 文件 ' + d.files.length + ' 个';
+  });
+  await step('documents', '危险点 新增 → 列表校验', async () => {
+    const d = needOk(await api('POST', '/api/documents/hazard', { token, body: { hazard: '冒烟危险点', measure: '冒烟控制措施' } }), 'hazard POST');
+    need(d && d.id, '响应缺少 id');
+    const list = needOk(await api('GET', '/api/workticket/hazards', { token }), 'hazards list');
+    need(Array.isArray(list) && list.some(h => h.id === d.id), '危险点库未包含新建条目');
+    return 'id=' + d.id;
+  });
+
+  /* ---------- workticket ---------- */
+  await step('workticket', '配置状态 GET /api/workticket/config-status', async () => {
+    const d = needOk(await api('GET', '/api/workticket/config-status', { token }), 'config-status');
+    need(d && typeof d === 'object', '响应应为对象：' + brief(d));
+    return Object.keys(d).slice(0, 6).join(',');
+  });
+  await step('workticket', '资料库 GET /api/workticket/library', async () => {
+    const d = needOk(await api('GET', '/api/workticket/library', { token }), 'library');
+    need(Array.isArray(d.groups) && d.groups.length === 5, 'groups 应为 5 组，实际 ' + (d.groups || []).length);
+    need(Array.isArray(d.categories) && d.categories.length > 0, 'categories 不应为空');
+    need(Array.isArray(d.techOptions) && Array.isArray(d.safetyOptions), 'techOptions/safetyOptions 应为数组');
+    return 'groups=' + d.groups.length + ' categories=' + d.categories.length;
+  });
+  await step('workticket', '匹配规则 新增 → 列表校验', async () => {
+    const d = needOk(await api('POST', '/api/workticket/rules', { token, body: { workType: '冒烟作业', category: '开挖坑洞' } }), 'rules POST');
+    need(d && d.id, '响应缺少 id');
+    const list = needOk(await api('GET', '/api/workticket/rules', { token }), 'rules list');
+    need(list.some(r => r.id === d.id), '规则列表未包含新建条目');
+    return 'id=' + d.id;
+  });
+  await step('workticket', '技术措施 列表 + 新增', async () => {
+    const before = needOk(await api('GET', '/api/workticket/measures/tech', { token }), 'tech list');
+    need(Array.isArray(before), 'tech 列表应为数组');
+    const d = needOk(await api('POST', '/api/workticket/measures/tech', { token, body: { title: '冒烟技术措施', content: '（1）冒烟内容' } }), 'tech POST');
+    need(d && d.id, '响应缺少 id');
+    const after = needOk(await api('GET', '/api/workticket/measures/tech', { token }), 'tech list 2');
+    need(after.length === before.length + 1, '新增后条数应 +1（' + before.length + ' → ' + after.length + '）');
+    return before.length + ' → ' + after.length;
+  });
+  await step('workticket', '安全措施 列表 GET', async () => listOk('/api/workticket/measures/safety', token).then(d => d.length + ' 条'));
+  await step('workticket', '医院联系方式 列表 GET', async () => listOk('/api/workticket/hospitals', token).then(d => d.length + ' 条'));
+  await step('workticket', '默认模板 元信息 GET（内置 49/19）', async () => {
+    const d = needOk(await api('GET', '/api/workticket/measures/default', { token }), 'default meta');
+    need(d.tech === 49 && d.safety === 19, '内置默认应为 技术49/安全19，实际 ' + d.tech + '/' + d.safety);
+    need(d.builtin === true, '空实例应为 builtin=true，实际 ' + d.builtin);
+    return 'tech=' + d.tech + ' safety=' + d.safety + ' builtin=' + d.builtin;
+  });
+  await step('workticket', '载入默认 POST → 技术/安全各 +49/+19', async () => {
+    const d = needOk(await api('POST', '/api/workticket/measures/default/load', { token }), 'default load');
+    need(d.result && d.result.tech && d.result.tech.added === 49, '技术应新增 49，实际 ' + brief(d.result));
+    need(d.result.safety && d.result.safety.added === 19, '安全应新增 19，实际 ' + brief(d.result));
+    return 'tech+' + d.result.tech.added + ' safety+' + d.result.safety.added;
+  });
+
+  /* ---------- actualWorks ---------- */
+  let awId = '';
+  await step('actualWorks', '施工量列表 GET /api/actualWorks', async () => listOk('/api/actualWorks', token).then(d => d.length + ' 条'));
+  await step('actualWorks', '新增施工量 POST /api/actualWorks', async () => {
+    const d = needOk(await api('POST', '/api/actualWorks', {
+      token,
+      body: {
+        date: '2026-10-24', project: '冒烟测试项目', workTypes: ['立杆'], workers: ['张三'],
+        items: [{ materialId, code: 'S01HDG1005', description: '预应力混凝土电杆Φ150×10M', unit: '根', qty: 2 }]
+      }
+    }), 'actualWorks POST');
+    need(d && d.id, '响应缺少 id');
+    need(d.items && d.items.length === 1 && d.items[0].qty === 2, 'items 落库不正确：' + brief(d.items));
+    awId = d.id;
+    return 'id=' + awId + ' qty=2';
+  });
+  await step('actualWorks', '施工量列表回查（材料数量/折算字段）', async () => {
+    const d = needOk(await api('GET', '/api/actualWorks', { token }), 'actualWorks list');
+    const row = d.find(r => r.id === awId);
+    need(row, '列表未包含新建记录');
+    need(row.items[0].qty === 2, 'qty 应为 2，实际 ' + row.items[0].qty);
+    need(row.submitter, 'submitter 应写入当前用户');
+    return 'submitter=' + row.submitter;
+  });
+  await step('actualWorks', '编辑施工量 PUT /api/actualWorks/:id', async () => {
+    const d = needOk(await api('PUT', '/api/actualWorks/' + awId, {
+      token,
+      body: {
+        date: '2026-10-24', project: '冒烟测试项目', workTypes: ['立杆'], workers: ['张三'],
+        items: [{ materialId, description: '预应力混凝土电杆Φ150×10M', unit: '根', qty: 3 }]
+      }
+    }), 'actualWorks PUT');
+    need(d.items[0].qty === 3, 'PUT 后 qty 应为 3，实际 ' + d.items[0].qty);
+    need(d.updatedAt, 'PUT 应写 updatedAt');
+    return 'qty 2 → 3';
+  });
+
+  /* ---------- 权限（RBAC） ---------- */
+  await step('权限', '材料员登录 POST /api/login（smoke_cly）', async () => {
+    const d = needOk(await api('POST', '/api/login', { body: { username: 'smoke_cly', password: 'Smoke@2026' } }), 'login cly');
+    need(d.token, '响应缺少 token');
+    clyToken = d.token;
+    return (d.user.userGroup || d.user.role) + ' 登录成功';
+  });
+  await step('权限', '材料员读业务接口允许 / 写项目应 403', async () => {
+    const cly = clyToken;
+    const g = await api('GET', '/api/projects', { token: cly });
+    need(g.status === 200, 'GET /api/projects 期望 200，实际 ' + g.status);
+    const p = await api('POST', '/api/projects', { token: cly, body: { name: '越权项目' } });
+    need(p.status === 403, 'POST /api/projects 期望 403，实际 ' + p.status + ' ' + brief(p.data));
+    const m = await api('POST', '/api/materials', {
+      token: cly, body: { project: '冒烟测试项目', source: 'ERP采购申请', description: '越权材料', qtyRequired: 1, unit: '根' }
+    });
+    need(m.status >= 200 && m.status < 300, '材料员写材料台账应允许，实际 ' + m.status + ' ' + brief(m.data));
+    return '读 200 / 写项目 403 / 写材料 2xx';
+  });
+
+  /* ---------- 汇总 ---------- */
+  await stopServer();
+  const pass = results.filter(r => r.ok).length;
+  const fail = results.length - pass;
+  log('\n=== 结果：通过 ' + pass + ' / 失败 ' + fail + '（' + ((Date.now() - t0) / 1000).toFixed(1) + 's）===');
+  if (fail) {
+    log('失败清单：');
+    results.filter(r => !r.ok).forEach(r => log('  - [' + r.group + '] ' + r.name + '：' + r.info));
+  }
+  if (KEEP) log('临时目录（已保留）：' + TMP);
+  else { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { } }
+  process.exit(fail ? 1 : 0);
+})().catch(async (e) => {
+  log('冒烟脚本异常：' + e.stack);
+  await stopServer();
+  if (TMP && !KEEP) { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (err) { } }
+  process.exit(1);
+});

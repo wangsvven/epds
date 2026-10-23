@@ -98,14 +98,41 @@ npm start
 ```
 jiabei-local/
 ├── package.json            # 仅依赖 express / multer / xlsx
-├── server.js               # 后端：路由 / 鉴权 / 通用 CRUD 工厂 / 文档中心 / 设置 / 静态托管
+├── server.js               # 后端入口：只做加载顺序、静态托管与 listen
+├── server/                 # 后端（按功能区划分，CommonJS）
+│   ├── core/
+│   │   ├── app.js          # 共享 express 实例（各 routes 复用同一个 app）
+│   │   ├── db.js           # DATA_DIR/DB_PATH、DB 单例、seedDB / loadDB / saveDB / migrateDB
+│   │   ├── auth.js         # 登录态与权限：TOKENS、authMiddleware、用户组与模块写权限
+│   │   ├── crud.js         # 通用 crud() 工厂
+│   │   ├── upload.js       # multer 实例（上传基础设施）
+│   │   ├── util.js         # 纯工具：编号 / 时间 / 日期 CSV 解析 / docx 文本提取 / zip
+│   │   ├── material-calc.js# 材料数量与状态计算（qtyGenerated / materialStatus / withGen）
+│   │   ├── doc-templates.js# 文档模板路径解析与现场勘察模板识别
+│   │   └── risk-category.js# 风险大类关键词归类（危险点导入与 CT 标准载入共用）
+│   └── routes/
+│       ├── system.js       # 登录 / 健康检查 / 用户 / 人员 / 通讯录 / 设置 / 首页直出
+│       ├── projects.js     # 项目列表与工程实际施工量
+│       ├── documents.js    # 文档中心、企业危险点库、竣工资料
+│       ├── plans.js        # 计划管理与借工
+│       ├── materials.js    # 材料台账、导入、出库、领料单
+│       └── workticket.js   # 工作票自动化配置与资料库
 ├── Dockerfile
 ├── docker-compose.yml
+├── scripts/
+│   └── smoke.js            # 冒烟脚本：临时 DATA_DIR 起服务，逐功能区断言（node scripts/smoke.js）
 ├── data/                  # 运行时数据（首次启动自动播种为空实例，已 gitignore）
 │   └── db.json
 ├── public/
-│   ├── index.html          # 登录页 + 顶栏 + 侧边折叠菜单外壳
-│   ├── app.js              # 前端全部逻辑（Vue3 运行时编译组件）
+│   ├── index.html          # 登录页 + 顶栏 + 侧边折叠菜单外壳（按序引入 js/*.js）
+│   ├── js/                 # 前端（全局脚本 + script 标签顺序加载，零构建）
+│   │   ├── api.js          # 请求封装 + Vue 组合式 API 解构（首个加载）
+│   │   ├── utils.js        # 纯工具与共享常量（tagType、材料分桶、单位换算）
+│   │   ├── auth.js         # 当前用户权限状态 Auth
+│   │   ├── views/          # 各视图组件（crud / documents / materials / dashboard /
+│   │   │                   #   settings / init / contacts / users / projects / plans /
+│   │   │                   #   actualWorks）
+│   │   └── main.js         # App 根组件、菜单、createApp、组件注册、mount（最后加载）
 │   ├── login-bg/           # 登录页预设背景图（草原雪山 / 冰川落日 / 层峦叠嶂）+ LQIP 元数据
 │   └── vendor/             # 离线依赖（vue / element-plus / element-plus.css / sheetjs）
 │       ├── vue.global.prod.js
@@ -192,6 +219,11 @@ docker compose up -d --build
 
 ## 九、版本
 
+- **按功能区重组（纯结构重构，未发版）**：`server.js`（约 2900 行）与 `public/app.js`（约 6700 行）按功能区拆分，`server.js` 只保留入口（50 行），前端改为 `public/js/` 下 15 个脚本。
+  - 只搬不改：API 路径、请求/响应结构、`db.json` 数据结构全部未变，不引入新依赖，仍为零构建离线运行、启动入口仍为 `node server.js`。
+  - 后端：`server/core/`（app / db / auth / crud / upload / util / material-calc / doc-templates / risk-category）+ `server/routes/`（system / projects / documents / plans / materials / workticket）。
+  - 前端：`public/js/`（api / utils / auth / main + views 11 个），`index.html` 按依赖顺序引入，`main.js` 最后加载。
+  - 回归标准：`node scripts/smoke.js`（临时 DATA_DIR 起服务，覆盖 9 个功能区 44 项断言），重构过程中每步均全绿。详见 `docs/REFACTOR_PLAN.md`。
 - **v2.10.3**：修复全新实例（含 Docker 空卷首启）「载入默认」提示默认配置为空的问题。
   - 原因：默认模板原来是运行时从当前库里的措施数据「冻结」出来的快照，全新实例库里没有任何措施，快照自然为空，镜像我部署后点「载入默认」只能得到「默认配置为空」。
   - 现在把 49 条施工技术措施 + 19 条施工安全措施**随代码内置**在 `assets/ct-standard.json`：默认模板为空且用户没保存过快照时，自动以该内置内容兜底，全新实例开箱即可「载入默认」；内置文件同时是「一键载入 CT 标准」的数据源（此前缺文件会报「尚未内置 CT 标准资料」）。

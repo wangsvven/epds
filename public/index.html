@@ -10,7 +10,8 @@
   <!-- 提前拉取脚本，缩短「HTML 已到、Vue 还没挂载」的空窗，减少首屏闪动 -->
   <link rel="preload" as="script" href="/vendor/vue.global.prod.js" />
   <link rel="preload" as="script" href="/vendor/element-plus.full.min.js" />
-  <link rel="preload" as="script" href="/app.js" />
+  <link rel="preload" as="script" href="/js/api.js" />
+  <link rel="preload" as="script" href="/js/main.js" />
   <script>
     // 首屏决定明暗，避免刷新时闪一下白底（用户选择优先，其次跟随系统）
     (function () {
@@ -997,6 +998,20 @@
   <script src="/vendor/element-plus.full.min.js"></script>
   <script src="/vendor/element-plus-locale-zh-cn.js"></script>
   <script src="/vendor/xlsx.full.min.js"></script>
-  <script src="/app.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/utils.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/views/crud.js"></script>
+  <script src="/js/views/documents.js"></script>
+  <script src="/js/views/materials.js"></script>
+  <script src="/js/views/dashboard.js"></script>
+  <script src="/js/views/settings.js"></script>
+  <script src="/js/views/init.js"></script>
+  <script src="/js/views/contacts.js"></script>
+  <script src="/js/views/users.js"></script>
+  <script src="/js/views/projects.js"></script>
+  <script src="/js/views/plans.js"></script>
+  <script src="/js/views/actualWorks.js"></script>
+  <script src="/js/main.js"></script>
 </body>
 </html>
