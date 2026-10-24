@@ -9,7 +9,7 @@ const MaterialsView = {
     const projects = ref([]);
     const loading = ref(false);
     const selection = ref([]);
-    const filters = reactive({ stage: '在建工程', workType: '', project: '', subProject: '', status: '', keyword: '' });
+    const filters = reactive({ stage: '在建工程', category: '', importState: '', project: '', status: '', keyword: '' });
     const dialogVisible = ref(false);
     const editingId = ref(null);
     const origQty = ref(0);
@@ -64,40 +64,60 @@ const MaterialsView = {
     window.addEventListener('materials-filter-project', onFilterProject);
     onUnmounted(() => window.removeEventListener('materials-filter-project', onFilterProject));
 
-    // 单体工程名称 = 项目列表工程名称 ∪ 子项目名称（与项目列表联动、必须一致）
+    // 单体工程名称 = 项目列表工程名称 ∪ 子项目名称（新增/编辑材料下拉用，保持全量）
     const projectOptions = computed(() => {
       const names = [];
       projects.value.forEach(p => { if (p.name) names.push(p.name); (p.subProjects || []).forEach(s => s.name && names.push(s.name)); });
       return names;
     });
-    const workTypeOptions = computed(() => [...new Set(projects.value.map(p => p.workType).filter(Boolean))]);
-    const workTypeMap = computed(() => {
+    // 项目导入情况：该项目名下是否存在「带 importId 的材料行」（手工录入的不算导入）
+    const projectImport = computed(() => {
       const mp = {};
-      projects.value.forEach(p => { mp[p.name] = p.workType || ''; (p.subProjects || []).forEach(s => { if (s.name) mp[s.name] = p.workType || ''; }); });
+      list.value.forEach(m => {
+        const n = m.project; if (!n) return;
+        const o = mp[n] || (mp[n] = { total: 0, imported: 0 });
+        o.total++;
+        if (m.importId) o.imported++;
+      });
       return mp;
     });
-    const subProjectNames = computed(() => {
+    function importStateOf(name) {
+      const o = projectImport.value[name];
+      return o && o.imported > 0 ? 'imported' : 'none';
+    }
+    // 框1~3 联动：工程状态（completed）/ 工程类型（category）/ 导入情况
+    function projectPass(p) {
+      if (filters.stage === '已竣工工程' ? !p.completed : p.completed) return false;
+      if (filters.category && (p.category || '') !== filters.category) return false;
+      if (filters.importState && importStateOf(p.name) !== filters.importState) return false;
+      return true;
+    }
+    // 框4 候选：随框1~框3 联动过滤后的真实项目名单
+    const projectCandidates = computed(() => {
+      const names = [];
+      projects.value.forEach(p => {
+        if (!projectPass(p)) return;
+        if (p.name) names.push(p.name);
+        (p.subProjects || []).forEach(s => { if (s.name) names.push(s.name); });
+      });
+      return names;
+    });
+    // 当前可用于显示的材料所属工程（框1~3 的并集）
+    const allowedNames = computed(() => projectCandidates.value);
+    // 选中项目下的子项目名（用于按父项目筛选时连带子项目材料）
+    const selectedSubProjectNames = computed(() => {
       const p = projects.value.find(x => x.name === filters.project);
       return p ? (p.subProjects || []).map(s => s.name).filter(Boolean) : [];
     });
-    // 阶段筛选下的可用工程（含其子项目）
-    const allowedNames = computed(() => {
-      const names = [];
-      projects.value.forEach(p => {
-        const ok = filters.stage === '全部工程' || (filters.stage === '已竣工工程' ? !!p.completed : !p.completed);
-        if (!ok) return;
-        if (p.name) names.push(p.name);
-        (p.subProjects || []).forEach(s => s.name && names.push(s.name));
-      });
-      return names;
+    // 框1~3 变化后，若已选项目不在候选中则清空选择
+    watch(projectCandidates, (opts) => {
+      if (filters.project && !opts.includes(filters.project)) filters.project = '';
     });
     const filtered = computed(() => {
       const kw = filters.keyword.trim();
       return list.value.filter(m => {
-        if (filters.stage && !allowedNames.value.includes(m.project)) return false;
-        if (filters.workType && (workTypeMap.value[m.project] || '') !== filters.workType) return false;
-        if (filters.project && m.project !== filters.project && !subProjectNames.value.includes(m.project)) return false;
-        if (filters.subProject && m.project !== filters.subProject) return false;
+        if (!allowedNames.value.includes(m.project)) return false;
+        if (filters.project && m.project !== filters.project && !selectedSubProjectNames.value.includes(m.project)) return false;
         if (filters.status && m.status !== filters.status) return false;
         if (kw && !(m.project + m.description + m.orderNo + m.code).includes(kw)) return false;
         // 列筛选
@@ -355,7 +375,7 @@ const MaterialsView = {
     }
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
-      projectOptions, workTypeOptions, subProjectNames, filtered, statCount, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
+      projectOptions, projectCandidates, filtered, statCount, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
       load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
@@ -381,19 +401,25 @@ const MaterialsView = {
 
       <div class="toolbar">
         <el-select v-model="filters.stage" style="width:130px">
-          <el-option label="在建工程" value="在建工程" /><el-option label="全部工程" value="全部工程" /><el-option label="已竣工工程" value="已竣工工程" />
+          <el-option label="在建工程" value="在建工程" /><el-option label="已竣工工程" value="已竣工工程" />
         </el-select>
-        <el-select v-model="filters.workType" placeholder="全部工程类型" clearable style="width:150px">
-          <el-option v-for="t in workTypeOptions" :key="t" :label="t" :value="t" />
+        <el-select v-model="filters.category" placeholder="全部工程类型" style="width:150px">
+          <el-option label="全部工程类型" value="" /><el-option label="自有工程" value="自有工程" /><el-option label="客户工程" value="客户工程" />
+        </el-select>
+        <el-select v-model="filters.importState" placeholder="全部项目" style="width:150px">
+          <el-option label="全部项目" value="" /><el-option label="已导入材料" value="imported" /><el-option label="未导入材料" value="none" />
         </el-select>
         <el-select v-model="filters.project" placeholder="全部项目" clearable filterable style="width:200px">
-          <el-option v-for="n in projectOptions" :key="n" :label="n" :value="n" />
+          <el-option label="全部项目" value="" /><el-option v-for="n in projectCandidates" :key="n" :label="n" :value="n" />
         </el-select>
-        <el-select v-model="filters.subProject" placeholder="全部子项目" clearable filterable style="width:180px">
-          <el-option v-for="n in subProjectNames" :key="n" :label="n" :value="n" />
-        </el-select>
-        <el-select v-model="filters.status" placeholder="全部状态" clearable style="width:120px">
-          <el-option label="全部到库" value="全部到库" /><el-option label="部分到库" value="部分到库" /><el-option label="未到库" value="未到库" />
+        <el-select v-model="filters.status" placeholder="全部状态" style="width:150px">
+          <el-option label="全部状态" value="" />
+          <el-option label="未到库" value="未到库" />
+          <el-option label="已生成领料单" value="已生成领料单" />
+          <el-option label="部分到库" value="部分到库" />
+          <el-option label="全部到库" value="全部到库" />
+          <el-option label="异常" value="异常" />
+          <el-option label="无效数据" value="无效数据" />
         </el-select>
         <el-input v-model="filters.keyword" placeholder="搜索项目、物料、订单号" style="width:220px" clearable @keyup.enter="load" />
         <el-button type="primary" @click="load">搜索</el-button>
