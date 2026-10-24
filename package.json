@@ -1,6 +1,6 @@
 {
   "name": "epds",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "description": "本地自托管版电网生产ERP管理系统。零构建，Node + Express + 本地 JSON 存储 + Vue3 + Element Plus。",
   "type": "commonjs",
   "main": "server.js",
