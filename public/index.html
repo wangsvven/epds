@@ -965,11 +965,16 @@
   .mat-stat-v .st-warn { color: var(--warn-text); }
   .mat-stat-v .st-danger { color: var(--danger-text); }
   .mat-stat-v .st-muted { color: var(--text-3); }
+  /* 材料明细分页条 */
+  .mat-pager { display: flex; justify-content: flex-end; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+  .mat-pager-total { color: var(--text-2); font-size: 13px; white-space: nowrap; }
   @media (max-width: 768px) {
     .mat-stats { grid-template-columns: 1fr; gap: 10px; }
     .mat-stat { padding: 11px 14px; }
     .mat-stat-v { font-size: 20px; }
     .mat-stat-v.sm { font-size: 15px; }
+    .mat-pager { justify-content: space-between; gap: 8px; }
+    .mat-pager .el-pagination { flex-wrap: wrap; justify-content: flex-end; }
   }
   /* ===== 材料明细表：排版美化 ===== */
   .mat-table { --el-table-border-color: var(--line); --el-table-row-hover-bg-color: var(--hover); font-size: 12.5px; }

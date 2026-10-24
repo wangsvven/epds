@@ -135,6 +135,12 @@ const MaterialsView = {
     function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }
     function fmt2(n) { return (Math.round((Number(n) || 0) * 100) / 100).toFixed(2); }
     const statCount = computed(() => filtered.value.length);
+    // 材料明细分页：20/50/100/200，默认 50
+    const detailPage = ref(1);
+    const detailPageSize = ref(50);
+    const detailPaged = computed(() => filtered.value.slice((detailPage.value - 1) * detailPageSize.value, detailPage.value * detailPageSize.value));
+    watch(() => [filters.stage, filters.category, filters.importState, filters.project, filters.status, filters.keyword], () => { detailPage.value = 1; });
+    watch(detailPageSize, () => { detailPage.value = 1; });
     const sumRequired = computed(() => filtered.value.reduce((s, m) => s + (Number(m.qtyRequired) || 0), 0));
     const sumArrived = computed(() => filtered.value.reduce((s, m) => s + (Number(m.qtyArrived) || 0), 0));
     const sumNot = computed(() => filtered.value.reduce((s, m) => s + (Number(m.qtyNotArrived) || 0), 0));
@@ -375,7 +381,7 @@ const MaterialsView = {
     }
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
-      projectOptions, projectCandidates, filtered, statCount, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
+      projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
       load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
@@ -444,8 +450,8 @@ const MaterialsView = {
         </div>
       </div>
 
-      <el-table ref="mainTable" :data="filtered" v-loading="loading" class="mat-table" style="width:100%" @selection-change="onSel">
-        <el-table-column type="selection" width="46" :selectable="canSelect" />
+      <el-table ref="mainTable" :data="detailPaged" row-key="id" v-loading="loading" class="mat-table" style="width:100%" @selection-change="onSel">
+        <el-table-column type="selection" width="46" reserve-selection :selectable="canSelect" />
         <el-table-column prop="project" min-width="176">
           <template #header><div class="th-inner"><span>项目名称</span>
             <el-popover placement="bottom-end" trigger="click" :width="200">
@@ -573,6 +579,12 @@ const MaterialsView = {
           </template>
         </el-table-column>
       </el-table>
+
+      <div class="mat-pager">
+        <span class="mat-pager-total">共 {{ filtered.length }} 行</span>
+        <el-pagination v-model:current-page="detailPage" v-model:page-size="detailPageSize" :total="filtered.length"
+          :page-sizes="[20, 50, 100, 200]" layout="prev, pager, next, sizes" background />
+      </div>
 
       <el-dialog :title="'材料暂存清单（' + staging.length + '）'" v-model="stagingVisible" width="920px" top="10vh">
         <div style="margin-bottom:12px">
@@ -1214,7 +1226,7 @@ const Outbounds = {
     const selection = ref([]);
     const outQty = reactive({});
     const mainTable = ref(null);
-    const page = ref(1); const pageSize = ref(100);
+    const page = ref(1); const pageSize = ref(50);
     const opage = ref(1); const opageSize = ref(30);
     // 登记出库 / 出库单详情 / 归还 / 打印预览
     const dlg = reactive({ visible: false, receiver: '', rows: [] });
@@ -1502,7 +1514,7 @@ const Outbounds = {
           <div style="display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:12px">
             <span style="color:var(--text-2);font-size:13px">共 {{ filtered.length }} 行</span>
             <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length"
-              :page-sizes="[100, 200]" layout="prev, pager, next, sizes" background />
+              :page-sizes="[20, 50, 100, 200]" layout="prev, pager, next, sizes" background />
           </div>
         </template>
       </el-tab-pane>
