@@ -96,7 +96,7 @@ npm start
 ## 五、目录结构
 
 ```
-jiabei-local/
+epds/
 ├── package.json            # 仅依赖 express / multer / xlsx
 ├── server.js               # 后端入口：只做加载顺序、静态托管与 listen
 ├── server/                 # 后端（按功能区划分，CommonJS）
