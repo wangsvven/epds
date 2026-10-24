@@ -291,6 +291,16 @@ const MaterialsView = {
       });
       return arr;
     }
+    // 该材料累计已收数量（进度汇总用）
+    function relArrived(rec) {
+      return relHist(rec).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
+    }
+    // 该材料异常原因（取末次异常记录的 reason；作废时显示冲销原因）
+    function relStockReason(rec) {
+      if (rec.status === '已作废') return '作废冲销 · ' + (rec.voidReason || '未填写原因');
+      const hs = relHist(rec).filter(h => h.abnormal && h.reason);
+      return hs.length ? hs[hs.length - 1].reason : '';
+    }
     function relStatusType(s) { return s === '待入库' || s === '部分到库' ? 'warning' : s === '已入库' ? 'success' : 'info'; }
     async function relDownload(rec) {
       try {
@@ -346,7 +356,7 @@ const MaterialsView = {
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
       projectOptions, workTypeOptions, subProjectNames, filtered, statCount, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
-      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
+      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
   <div>
@@ -587,20 +597,26 @@ const MaterialsView = {
           <el-table-column type="expand">
             <template #default="{row}">
               <div style="padding:10px 24px 16px;background:var(--surface-2)">
-                <div style="font-weight:600;margin-bottom:8px">材料明细</div>
-                <el-table :data="[relItem(row)]" size="small" border>
-                  <el-table-column prop="code" label="物料编码" width="130" />
-                  <el-table-column prop="description" label="物料描述" min-width="180" />
-                  <el-table-column label="领料数量" width="100" align="right"><template #default="{row}">{{ fmtQty(row.qty) }}</template></el-table-column>
-                  <el-table-column label="已到数量" width="100" align="right"><template #default="{row}">{{ fmtQty(row.arrivedBefore) }}</template></el-table-column>
-                  <el-table-column prop="unit" label="单位" width="70" />
-                </el-table>
-                <div style="font-weight:600;margin:12px 0 8px">入库记录（共 {{ relHist(row).length }} 次）</div>
+                <div class="rq-mat-head">
+                  <span class="rq-mat-desc">{{ relItem(row).description }}</span>
+                  <span class="rq-tag" :class="'is-' + relStatusType(row.status)">{{ row.status }}</span>
+                  <span v-if="relStockReason(row)" class="rq-mat-reason">异常：{{ relStockReason(row) }}</span>
+                </div>
+                <div class="rq-mat-grid">
+                  <div><label>项目</label><span class="rq-wrap">{{ relItem(row).project || '—' }}</span></div>
+                  <div><label>应领数量</label><span class="rq-num">{{ fmtQty(relItem(row).qty) }} {{ relItem(row).unit || '' }}</span></div>
+                  <div><label>物料编码</label><span class="rq-code">{{ relItem(row).code || '—' }}</span></div>
+                  <div><label>采购订单号</label><span class="rq-code">{{ relItem(row).orderNo || '—' }}</span></div>
+                </div>
+                <div class="rq-mat-sum">
+                  <span>进度：已收 <b>{{ fmtQty(relArrived(row)) }}</b> / 应领 <b>{{ fmtQty(relItem(row).qty) }}</b> / 剩余 <b :class="{ 'is-red': (relItem(row).qty - relArrived(row)) > 0 }">{{ fmtQty(relItem(row).qty - relArrived(row)) }}</b> {{ relItem(row).unit || '' }}</span>
+                </div>
+                <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ relHist(row).length }} 次</span></div>
                 <el-table v-if="relHist(row).length" :data="relHist(row)" size="small" border>
                   <el-table-column prop="at" label="入库时间" width="170" />
-                  <el-table-column label="本次入库数量" width="120" align="right"><template #default="{row}">{{ fmtQty(row.thisQty) }}</template></el-table-column>
-                  <el-table-column label="入库情况" width="100"><template #default="{row}"><span :style="chipStyle(row.abnormal ? '#f56c6c' : '#389e0d')">{{ row.abnormal ? '异常' : '正常' }}</span></template></el-table-column>
-                  <el-table-column prop="reason" label="异常原因"><template #default="{row}">{{ row.reason || '—' }}</template></el-table-column>
+                  <el-table-column label="本次入库数量" width="120" align="right"><template #default="{row:h}">{{ fmtQty(h.thisQty) }}</template></el-table-column>
+                  <el-table-column label="入库情况" width="100" align="center"><template #default="{row:h}"><el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag></template></el-table-column>
+                  <el-table-column prop="reason" label="异常原因" min-width="200"><template #default="{row:h}">{{ h.reason || '-' }}</template></el-table-column>
                 </el-table>
                 <div v-else style="color:var(--text-3);font-size:12px">暂无入库记录（确认入库/补入库后按次记录）</div>
               </div>
@@ -752,6 +768,7 @@ const Requisitions = {
     }));
     function resetFilters() { filters.project = ''; filters.status = ''; filters.keyword = ''; }
     function sumQty(r) { return r.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); }
+    function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }
     function statusType(s) { return s === '待入库' ? 'warning' : s === '部分到库' ? 'warning' : s === '已入库' ? 'success' : 'info'; }
 
     async function download(r) {
@@ -867,7 +884,11 @@ const Requisitions = {
       }));
       return out;
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory };
+    // 某物料累计已收数量（= 历次入库 thisQty 之和）；用于进度汇总
+    function arrivedSum(rec, materialId) {
+      return itemHistory(rec, materialId).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
+    }
+    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum };
   },
   template: `
   <div>
@@ -895,56 +916,32 @@ const Requisitions = {
               <span class="rq-exp-title">领料明细</span>
               <span class="rq-exp-count">{{ row.items.length }} 项 · 合计 {{ sumQty(row) }}</span>
               <span v-if="row.status==='已作废'" class="rq-exp-chip">已作废 · 数量已冲销</span>
-              <span class="rq-exp-hint">点击行首 + 查看入库记录</span>
             </div>
-            <el-table :data="row.items" size="small" border class="rq-detail">
-              <el-table-column type="expand" width="46" label="记录">
-                <template #default="{ row: it }">
-                  <div class="rq-hist">
-                    <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ itemHistory(row, it.materialId).length }} 次</span></div>
-                    <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border class="rq-hist-table">
-                      <el-table-column prop="at" label="入库时间" width="160" />
-                      <el-table-column prop="thisQty" label="本次入库数量" width="120" align="right" />
-                      <el-table-column label="入库情况" width="100" align="center">
-                        <template #default="{ row: h }">
-                          <el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag>
-                        </template>
-                      </el-table-column>
-                      <el-table-column prop="reason" label="异常原因" min-width="200">
-                        <template #default="{ row: h }">{{ h.reason || '-' }}</template>
-                      </el-table-column>
-                    </el-table>
-                    <div v-else class="rq-hist-empty">暂无入库记录（确认入库 / 补入库后按次记录）</div>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column prop="project" label="项目名称" min-width="160">
-                <template #default="{ row: it }"><span class="rq-wrap">{{ it.project }}</span></template>
-              </el-table-column>
-              <el-table-column prop="description" label="物料描述" min-width="210">
-                <template #default="{ row: it }"><span class="rq-wrap">{{ it.description }}</span></template>
-              </el-table-column>
-              <el-table-column label="数量" width="74" align="right">
-                <template #default="{ row: it }"><span class="rq-num">{{ it.qty }}</span></template>
-              </el-table-column>
-              <el-table-column label="入库情况" width="96" align="center">
-                <template #default="{ row: it }"><el-tag size="small" :type="stockInfo(row, it).type">{{ stockInfo(row, it).text }}</el-tag></template>
-              </el-table-column>
-              <el-table-column label="异常原因" min-width="140">
-                <template #default="{ row: it }">
-                  <span class="rq-reason" :class="{ 'is-empty': !stockReason(row, it) || stockReason(row, it) === '-' }">{{ stockReason(row, it) }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="单位" width="52" align="center">
-                <template #default="{ row: it }"><span class="rq-sub">{{ it.unit || '—' }}</span></template>
-              </el-table-column>
-              <el-table-column label="物料编码" width="116">
-                <template #default="{ row: it }"><span class="rq-code">{{ it.code || '—' }}</span></template>
-              </el-table-column>
-              <el-table-column label="采购订单号" width="106">
-                <template #default="{ row: it }"><span class="rq-code">{{ it.orderNo || '—' }}</span></template>
-              </el-table-column>
-            </el-table>
+            <div v-for="(it, idx) in row.items" :key="it.materialId" class="rq-mat">
+              <div class="rq-mat-head">
+                <span class="rq-mat-idx">{{ idx + 1 }}</span>
+                <span class="rq-mat-desc">{{ it.description }}</span>
+                <span class="rq-tag" :class="'is-' + stockInfo(row, it).type">{{ stockInfo(row, it).text }}</span>
+                <span v-if="stockReason(row, it) && stockReason(row, it) !== '-'" class="rq-mat-reason">异常：{{ stockReason(row, it) }}</span>
+              </div>
+              <div class="rq-mat-grid">
+                <div><label>项目</label><span class="rq-wrap">{{ it.project || '—' }}</span></div>
+                <div><label>应领数量</label><span class="rq-num">{{ fmtQty(it.qty) }} {{ it.unit || '' }}</span></div>
+                <div><label>物料编码</label><span class="rq-code">{{ it.code || '—' }}</span></div>
+                <div><label>采购订单号</label><span class="rq-code">{{ it.orderNo || '—' }}</span></div>
+              </div>
+              <div class="rq-mat-sum">
+                <span>进度：已收 <b>{{ fmtQty(arrivedSum(row, it.materialId)) }}</b> / 应领 <b>{{ fmtQty(it.qty) }}</b> / 剩余 <b :class="{ 'is-red': (it.qty - arrivedSum(row, it.materialId)) > 0 }">{{ fmtQty(it.qty - arrivedSum(row, it.materialId)) }}</b> {{ it.unit || '' }}</span>
+              </div>
+              <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ itemHistory(row, it.materialId).length }} 次</span></div>
+              <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border class="rq-hist-table">
+                <el-table-column prop="at" label="入库时间" width="160" />
+                <el-table-column label="本次入库数量" width="120" align="right"><template #default="{row:h}">{{ fmtQty(h.thisQty) }}</template></el-table-column>
+                <el-table-column label="入库情况" width="100" align="center"><template #default="{row:h}"><el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag></template></el-table-column>
+                <el-table-column prop="reason" label="异常原因" min-width="200"><template #default="{row:h}">{{ h.reason || '-' }}</template></el-table-column>
+              </el-table>
+              <div v-else class="rq-hist-empty">暂无入库记录（确认入库 / 补入库后按次记录）</div>
+            </div>
           </div>
         </template>
       </el-table-column>

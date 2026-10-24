@@ -365,12 +365,36 @@
     .rq-hist-n { font-weight:400; color:var(--text-3); margin-left:6px; }
     .rq-hist-table { width:100%; max-width:none; background:var(--surface); }
     .rq-hist-empty { font-size:12px; color:var(--text-3); }
+    /* ===== 领料单展开：每条材料一块（明细 + 进度 + 逐次入库记录），两级扁平 ===== */
+    .rq-mat { margin:10px 0; padding:10px 12px; border:1px solid var(--line-2); border-radius:10px; background:var(--surface); }
+    .rq-mat:first-of-type { margin-top:4px; }
+    .rq-mat-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+    .rq-mat-idx { width:18px; height:18px; line-height:18px; text-align:center; border-radius:50%; background:var(--brand-bg); color:var(--brand); font-size:11px; font-weight:600; flex:none; }
+    .rq-mat-desc { font-weight:600; color:var(--text-1); font-size:13px; min-width:0; }
+    .rq-tag { padding:1px 8px; border-radius:999px; font-size:11.5px; flex:none; white-space:nowrap; }
+    .rq-tag.is-success { background:var(--ok-bg); color:var(--ok-text); border:1px solid var(--ok-line); }
+    .rq-tag.is-warning { background:var(--warn-bg); color:var(--warn-text); border:1px solid var(--warn-line); }
+    .rq-tag.is-info { background:var(--info-bg); color:var(--info-text); border:1px solid var(--info-line); }
+    .rq-tag.is-danger { background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-line); }
+    .rq-tag.is-primary { background:var(--brand-bg); color:var(--brand); border:1px solid var(--brand-line); }
+    .rq-mat-reason { color:var(--danger-text); font-size:12px; min-width:0; }
+    .rq-mat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px 18px; margin-bottom:8px; }
+    .rq-mat-grid > div { min-width:0; }
+    .rq-mat-grid label { display:block; font-size:11px; color:var(--text-3); margin-bottom:2px; }
+    .rq-mat-grid span { font-size:13px; color:var(--text-1); }
+    .rq-mat-grid .rq-wrap { display:block; white-space:normal; word-break:break-word; }
+    .rq-mat-grid .rq-num { font-variant-numeric:tabular-nums; font-weight:600; }
+    .rq-mat-grid .rq-code { font-variant-numeric:tabular-nums; letter-spacing:.2px; color:var(--text-2); white-space:nowrap; }
+    .rq-mat-sum { font-size:12.5px; color:var(--text-2); margin-bottom:10px; font-variant-numeric:tabular-nums; }
+    .rq-mat-sum b { color:var(--text-1); }
+    .rq-mat-sum b.is-red { color:var(--danger-text); }
     @media (max-width:768px) {
       .rq-exp { padding:2px 8px 12px; }
       .rq-exp-head { flex-wrap:wrap; row-gap:4px; }
       .rq-exp-hint { display:none; }
       .rq-detail .cell { padding-left:8px; padding-right:8px; }
       .rq-hist { padding:8px 8px 10px 12px; }
+      .rq-mat-grid { grid-template-columns:repeat(2,1fr); gap:6px 12px; }
     }
   /* 计划管理：进行中（覆盖今天）的计划行淡黄高亮 */
   .el-table tr.plan-ongoing td.el-table__cell { background:var(--warn-bg) !important; }
