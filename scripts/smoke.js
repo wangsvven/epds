@@ -318,6 +318,34 @@ async function listOk(p, token) {
   });
   await step('materials', '领料单 GET /api/materialRequisitions', async () => listOk('/api/materialRequisitions', token).then(d => d.length + ' 条'));
 
+  // 单号规范化：LL-YYYYMMDD-NNNN，当天 4 位流水号从 0001 起、只增不减
+  await step('materials', '领料单号格式 LL-YYYYMMDD-NNNN 与流水号递增', async () => {
+    const mk = async () => {
+      const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: materialId, qty: 3 }] } }), 'requisition create');
+      need(d && d.data && d.data.reqNo, '响应缺少 reqNo');
+      return d.data.reqNo;
+    };
+    const re = /^LL-\d{8}-\d{4}$/;
+    const n1 = await mk();
+    need(re.test(n1), '单号格式应为 LL-YYYYMMDD-NNNN，实际 ' + n1);
+    need(n1.endsWith('-0001'), '当日首张单号应为 ...-0001，实际 ' + n1);
+    const n2 = await mk();
+    need(re.test(n2), '单号格式应为 LL-YYYYMMDD-NNNN，实际 ' + n2);
+    const s1 = +n1.slice(-4), s2 = +n2.slice(-4);
+    need(s2 === s1 + 1, '流水号应从 ' + s1 + ' 递增到 ' + (s1 + 1) + '，实际 ' + n2);
+    return n1 + ' → ' + n2;
+  });
+  await step('materials', '领料单下载文件名 = reqNo（新旧格式兼容）', async () => {
+    const list = needOk(await api('GET', '/api/materialRequisitions', { token }), 'requisition list');
+    need(list.length >= 2, '应至少 2 张领料单，实际 ' + list.length);
+    const rec = list[list.length - 1];
+    const res = await fetch(base + '/api/materialRequisitions/' + rec.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(res.ok, '下载应成功');
+    const cd = res.headers.get('Content-Disposition') || '';
+    need(cd.indexOf('"' + rec.reqNo + '.xlsx"') > -1 || cd.indexOf(rec.reqNo + '.xlsx') > -1, '文件名应为 reqNo.xlsx，实际 ' + cd);
+    return rec.reqNo + '.xlsx';
+  });
+
   /* ---------- plans / borrow ---------- */
   await step('plans', '计划列表 GET /api/plans', async () => listOk('/api/plans', token).then(d => d.length + ' 条'));
   await step('plans', '作业计划 新增 → 详情', async () => {
