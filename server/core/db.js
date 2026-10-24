@@ -334,7 +334,9 @@ function migrateDB() {
   // 0) 级联删除补漏：所属项目已被逻辑删除的材料 → 一并逻辑删除（防止删项目前的存量数据残留）
   if (Array.isArray(DB.materials) && Array.isArray(DB.projects)) {
     const deadProjectNames = new Set(DB.projects.filter(p => p.deleted).map(p => p.name));
-    DB.materials.forEach(m => { if (!m.deleted && m.project && deadProjectNames.has(m.project)) m.deleted = true; });
+    // 同名项目可能「一存一删」：仅当该名称下已无存活项目时才级联删除，避免误删存活项目的材料
+    const aliveProjectNames = new Set(DB.projects.filter(p => !p.deleted).map(p => p.name));
+    DB.materials.forEach(m => { if (!m.deleted && m.project && deadProjectNames.has(m.project) && !aliveProjectNames.has(m.project)) m.deleted = true; });
   }
   // 1) 清理历史多租户残留集合（业务空间 / 团队 / 成员归属 / 审计日志）
   delete DB.spaces; delete DB.bizTeams; delete DB.teamMembers; delete DB.auditLogs;

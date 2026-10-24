@@ -346,6 +346,89 @@ async function listOk(p, token) {
     return rec.reqNo + '.xlsx';
   });
 
+  /* ---------- 到货统计（聚合口径回归，纯函数与前端共用） ---------- */
+  const arrivalCalc = (() => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'arrival-calc.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    return sandbox.window.ArrivalCalc;
+  })();
+
+  await step('materials', '到货统计聚合：应到/已到与材料明细逐行求和一致', async () => {
+    const ms = await listOk('/api/materials', token);
+    const names = [...new Set(ms.map(m => m.project))];
+    const agg = arrivalCalc.aggregate(ms, names);
+    const sum = k => Math.round(ms.reduce((s, m) => s + (Number(m[k]) || 0), 0) * 10000) / 10000;
+    need(agg.totalRows === ms.length, '总行数应为 ' + ms.length + '，实际 ' + agg.totalRows);
+    need(Math.abs(agg.requiredSum - sum('qtyRequired')) < 1e-6, '应到合计不符：' + agg.requiredSum + ' vs ' + sum('qtyRequired'));
+    need(Math.abs(agg.arrivedSum - sum('qtyArrived')) < 1e-6, '已到合计不符：' + agg.arrivedSum + ' vs ' + sum('qtyArrived'));
+    return `行 ${agg.totalRows} · 应到 ${agg.requiredSum} · 已到 ${agg.arrivedSum}`;
+  });
+
+  await step('materials', '到货统计：同名跨项目合并为一行且数量相加', async () => {
+    const p2 = needOk(await api('POST', '/api/projects', { token, body: { name: '冒烟测试项目B', batch: '2026-01', substation: '冒烟供电所', workType: '配网', category: '自有工程' } }), 'projects POST B');
+    needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '预应力混凝土电杆Φ150×10M', qtyRequired: 5, qtyArrived: 2, unit: '根', code: 'S01HDG1005' }
+    }), 'materials POST B');
+    const ms = await listOk('/api/materials', token);
+    const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
+    need(agg.kindCount === 1, '同名物料应合并为 1 种，实际 ' + agg.kindCount);
+    need(agg.rows.length === 1, '主表应 1 行，实际 ' + agg.rows.length);
+    need(Math.abs(agg.requiredSum - 15) < 1e-6, '应到合计应为 15，实际 ' + agg.requiredSum);
+    need(Math.abs(agg.arrivedSum - 2) < 1e-6, '已到合计应为 2，实际 ' + agg.arrivedSum);
+    return `1 种 · 应到 ${agg.requiredSum} · 已到 ${agg.arrivedSum} · ${p2.name}`;
+  });
+
+  await step('materials', '到货统计：同编码不同描述分开算（各是各的）', async () => {
+    needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '同编码另一描述', qtyRequired: 7, qtyArrived: 1, unit: '根', code: 'S01HDG1005' }
+    }), 'materials POST C');
+    const ms = await listOk('/api/materials', token);
+    const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
+    need(agg.kindCount === 2, '同编码不同描述应算 2 种，实际 ' + agg.kindCount);
+    need(agg.rows.length === 2, '主表应 2 行，实际 ' + agg.rows.length);
+    const d1 = agg.rows.find(r => r.description === '预应力混凝土电杆Φ150×10M');
+    const d2 = agg.rows.find(r => r.description === '同编码另一描述');
+    need(d1 && Math.abs(d1.required - 15) < 1e-6 && Math.abs(d1.arrived - 2) < 1e-6, '原描述组应仍为 15/2，实际 ' + (d1 && d1.required + '/' + d1.arrived));
+    need(d2 && Math.abs(d2.required - 7) < 1e-6 && Math.abs(d2.arrived - 1) < 1e-6, '新描述组应为 7/1，实际 ' + (d2 && d2.required + '/' + d2.arrived));
+    need(d1.code === 'S01HDG1005' && d2.code === 'S01HDG1005', '两行编码应相同（仅描述不同）');
+    return `2 种：${d1.required}/${d1.arrived} + ${d2.required}/${d2.arrived}`;
+  });
+
+  await step('materials', '到货统计：同名不同编码也各是各的（编码+名称成条）', async () => {
+    needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '预应力混凝土电杆Φ150×10M', qtyRequired: 3, qtyArrived: 0, unit: '根', code: 'SMOKE-OTHER' }
+    }), 'materials POST D');
+    needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '从未到货物料', qtyRequired: 8, qtyArrived: 0, unit: '个', code: 'SMOKE-NOARR' }
+    }), 'materials POST E');
+    const ms = await listOk('/api/materials', token);
+    const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
+    // 4 组：D1/C1(15,2)、D2/C1(7,1)、D1/SMOKE-OTHER(3,0)、D3/SMOKE-NOARR(8,0)
+    need(agg.kindCount === 4, '应为 4 组（编码+名称），实际 ' + agg.kindCount);
+    const d1 = agg.rows.find(r => r.description === '预应力混凝土电杆Φ150×10M');
+    need(d1 && Math.abs(d1.required - 15) < 1e-6, '同名不同编码不应合并（应仍为 15），实际 ' + (d1 && d1.required));
+    need(d1.code === 'S01HDG1005', '该行编码应为 S01HDG1005，实际 ' + (d1 && d1.code));
+    need(Math.abs(agg.requiredSum - 33) < 1e-6, '应到合计应为 33，实际 ' + agg.requiredSum);
+    need(agg.arrivedKindCount === 2, '已到货组数应为 2，实际 ' + agg.arrivedKindCount);
+    need(agg.notArrivedKindCount === 2, '未到货组数应为 2，实际 ' + agg.notArrivedKindCount);
+    need(agg.rows.length === agg.arrivedKindCount, '主表行数应等于已到货组数');
+    const rr = arrivalCalc.recentArrivals([
+      { reqNo: 'LL-20260101-0001', projects: ['冒烟测试项目'], status: '已入库', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-01 09:00', rows: [{ materialId: 'a', thisQty: 1 }] }] },
+      { reqNo: 'LL-20260101-0002', projects: ['冒烟测试项目'], status: '已入库', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-02 09:00', rows: [{ materialId: 'a', thisQty: 2 }] }] },
+      { reqNo: 'LL-20260101-0003', projects: ['冒烟测试项目'], status: '已作废', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-03 09:00', rows: [{ materialId: 'a', thisQty: 3 }] }] }
+    ], ['冒烟测试项目'], 50);
+    need(rr.length === 2, '作废单应排除，应 2 条，实际 ' + rr.length);
+    need(rr[0].at > rr[1].at, '应按时间倒序，实际 ' + rr.map(x => x.at).join(' | '));
+    return `组 ${agg.kindCount} / 已到 ${agg.arrivedKindCount} / 未到 ${agg.notArrivedKindCount} · D1 未与同名异码合并 · 动态 ${rr.length} 条`;
+  });
+
   /* ---------- plans / borrow ---------- */
   await step('plans', '计划列表 GET /api/plans', async () => listOk('/api/plans', token).then(d => d.length + ' 条'));
   await step('plans', '作业计划 新增 → 详情', async () => {
