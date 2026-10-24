@@ -9,7 +9,9 @@ const MaterialsView = {
     const projects = ref([]);
     const loading = ref(false);
     const selection = ref([]);
-    const filters = reactive({ stage: '在建工程', category: '', importState: '', project: '', status: '', keyword: '' });
+    // 「全部…」用非空哨兵值：空字符串会被 el-select 当成未选、退化成灰色 placeholder
+    const ALL = '__all';
+    const filters = reactive({ stage: '在建工程', category: ALL, importState: ALL, project: ALL, status: ALL, keyword: '' });
     const dialogVisible = ref(false);
     const editingId = ref(null);
     const origQty = ref(0);
@@ -88,8 +90,8 @@ const MaterialsView = {
     // 框1~3 联动：工程状态（completed）/ 工程类型（category）/ 导入情况
     function projectPass(p) {
       if (filters.stage === '已竣工工程' ? !p.completed : p.completed) return false;
-      if (filters.category && (p.category || '') !== filters.category) return false;
-      if (filters.importState && importStateOf(p.name) !== filters.importState) return false;
+      if (filters.category && filters.category !== ALL && (p.category || '') !== filters.category) return false;
+      if (filters.importState && filters.importState !== ALL && importStateOf(p.name) !== filters.importState) return false;
       return true;
     }
     // 框4 候选：随框1~框3 联动过滤后的真实项目名单
@@ -111,14 +113,14 @@ const MaterialsView = {
     });
     // 框1~3 变化后，若已选项目不在候选中则清空选择
     watch(projectCandidates, (opts) => {
-      if (filters.project && !opts.includes(filters.project)) filters.project = '';
+      if (filters.project && filters.project !== ALL && !opts.includes(filters.project)) filters.project = ALL;
     });
     const filtered = computed(() => {
       const kw = filters.keyword.trim();
       return list.value.filter(m => {
         if (!allowedNames.value.includes(m.project)) return false;
-        if (filters.project && m.project !== filters.project && !selectedSubProjectNames.value.includes(m.project)) return false;
-        if (filters.status && m.status !== filters.status) return false;
+        if (filters.project && filters.project !== ALL && m.project !== filters.project && !selectedSubProjectNames.value.includes(m.project)) return false;
+        if (filters.status && filters.status !== ALL && m.status !== filters.status) return false;
         if (kw && !(m.project + m.description + m.orderNo + m.code).includes(kw)) return false;
         // 列筛选
         if (colFilters.project.length && !colFilters.project.includes(m.project)) return false;
@@ -181,7 +183,7 @@ const MaterialsView = {
     function openAdd() {
       editingId.value = null;
       Object.assign(form, emptyForm());
-      if (filters.project) form.project = filters.project;
+      if (filters.project && filters.project !== ALL) form.project = filters.project;
       dialogVisible.value = true;
     }
     function openEdit(row) {
@@ -410,17 +412,17 @@ const MaterialsView = {
         <el-select v-model="filters.stage" style="width:130px">
           <el-option label="在建工程" value="在建工程" /><el-option label="已竣工工程" value="已竣工工程" />
         </el-select>
-        <el-select v-model="filters.category" placeholder="全部工程类型" style="width:150px">
-          <el-option label="全部工程类型" value="" /><el-option label="自有工程" value="自有工程" /><el-option label="客户工程" value="客户工程" />
+        <el-select v-model="filters.category" style="width:150px">
+          <el-option label="全部工程类型" value="__all" /><el-option label="自有工程" value="自有工程" /><el-option label="客户工程" value="客户工程" />
         </el-select>
-        <el-select v-model="filters.importState" placeholder="全部项目" style="width:150px">
-          <el-option label="全部项目" value="" /><el-option label="已导入材料" value="imported" /><el-option label="未导入材料" value="none" />
+        <el-select v-model="filters.importState" style="width:150px">
+          <el-option label="全部项目" value="__all" /><el-option label="已导入材料" value="imported" /><el-option label="未导入材料" value="none" />
         </el-select>
-        <el-select v-model="filters.project" placeholder="全部项目" clearable filterable style="width:200px">
-          <el-option label="全部项目" value="" /><el-option v-for="n in projectCandidates" :key="n" :label="n" :value="n" />
+        <el-select v-model="filters.project" filterable style="width:200px">
+          <el-option label="全部项目" value="__all" /><el-option v-for="n in projectCandidates" :key="n" :label="n" :value="n" />
         </el-select>
-        <el-select v-model="filters.status" placeholder="全部状态" style="width:150px">
-          <el-option label="全部状态" value="" />
+        <el-select v-model="filters.status" style="width:150px">
+          <el-option label="全部状态" value="__all" />
           <el-option label="未到库" value="未到库" />
           <el-option label="已生成领料单" value="已生成领料单" />
           <el-option label="部分到库" value="部分到库" />
