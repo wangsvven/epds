@@ -346,6 +346,65 @@ async function listOk(p, token) {
     return rec.reqNo + '.xlsx';
   });
 
+  /* ---------- 到货统计（聚合口径回归，纯函数与前端共用） ---------- */
+  const arrivalCalc = (() => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'arrival-calc.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    return sandbox.window.ArrivalCalc;
+  })();
+
+  await step('materials', '到货统计聚合：应到/已到与材料明细逐行求和一致', async () => {
+    const ms = await listOk('/api/materials', token);
+    const names = [...new Set(ms.map(m => m.project))];
+    const agg = arrivalCalc.aggregate(ms, names);
+    const sum = k => Math.round(ms.reduce((s, m) => s + (Number(m[k]) || 0), 0) * 10000) / 10000;
+    need(agg.totalRows === ms.length, '总行数应为 ' + ms.length + '，实际 ' + agg.totalRows);
+    need(Math.abs(agg.requiredSum - sum('qtyRequired')) < 1e-6, '应到合计不符：' + agg.requiredSum + ' vs ' + sum('qtyRequired'));
+    need(Math.abs(agg.arrivedSum - sum('qtyArrived')) < 1e-6, '已到合计不符：' + agg.arrivedSum + ' vs ' + sum('qtyArrived'));
+    return `行 ${agg.totalRows} · 应到 ${agg.requiredSum} · 已到 ${agg.arrivedSum}`;
+  });
+
+  await step('materials', '到货统计：同编码跨项目合并为一行且数量相加', async () => {
+    const p2 = needOk(await api('POST', '/api/projects', { token, body: { name: '冒烟测试项目B', batch: '2026-01', substation: '冒烟供电所', workType: '配网', category: '自有工程' } }), 'projects POST B');
+    const m2 = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '同编码另一描述', qtyRequired: 5, qtyArrived: 2, unit: '根', code: 'S01HDG1005' }
+    }), 'materials POST B');
+    const ms = await listOk('/api/materials', token);
+    const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
+    need(agg.kindCount === 1, '同编码应合并为 1 种，实际 ' + agg.kindCount);
+    need(agg.rows.length === 1, '主表应 1 行，实际 ' + agg.rows.length);
+    need(Math.abs(agg.requiredSum - 15) < 1e-6, '应到合计应为 15，实际 ' + agg.requiredSum);
+    need(Math.abs(agg.arrivedSum - 2) < 1e-6, '已到合计应为 2，实际 ' + agg.arrivedSum);
+    need(agg.rows[0].description === '预应力混凝土电杆Φ150×10M', '描述应取应到最大行，实际 ' + agg.rows[0].description);
+    need(agg.rows[0].descConflict === true, '应标记描述不一致');
+    return `1 种 · 应到 ${agg.requiredSum} · 已到 ${agg.arrivedSum} · ${p2.name}/${m2.id}`;
+  });
+
+  await step('materials', '到货统计：未到货种数 = 种数 − 已到货种数；动态按时间倒序', async () => {
+    needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '从未到货物料', qtyRequired: 8, qtyArrived: 0, unit: '个', code: 'SMOKE-NOARR' }
+    }), 'materials POST C');
+    const ms = await listOk('/api/materials', token);
+    const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
+    need(agg.kindCount === 2, '种数应为 2，实际 ' + agg.kindCount);
+    need(agg.arrivedKindCount === 1, '已到货种数应为 1，实际 ' + agg.arrivedKindCount);
+    need(agg.notArrivedKindCount === 1, '未到货种数应为 1，实际 ' + agg.notArrivedKindCount);
+    need(agg.rows.length === agg.arrivedKindCount, '主表行数应等于已到货种数');
+    const rr = arrivalCalc.recentArrivals([
+      { reqNo: 'LL-20260101-0001', projects: ['冒烟测试项目'], status: '已入库', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-01 09:00', rows: [{ materialId: 'a', thisQty: 1 }] }] },
+      { reqNo: 'LL-20260101-0002', projects: ['冒烟测试项目'], status: '已入库', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-02 09:00', rows: [{ materialId: 'a', thisQty: 2 }] }] },
+      { reqNo: 'LL-20260101-0003', projects: ['冒烟测试项目'], status: '已作废', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-03 09:00', rows: [{ materialId: 'a', thisQty: 3 }] }] }
+    ], ['冒烟测试项目'], 50);
+    need(rr.length === 2, '作废单应排除，应 2 条，实际 ' + rr.length);
+    need(rr[0].at > rr[1].at, '应按时间倒序，实际 ' + rr.map(x => x.at).join(' | '));
+    return `种 ${agg.kindCount} / 已到 ${agg.arrivedKindCount} / 未到 ${agg.notArrivedKindCount} · 动态 ${rr.length} 条`;
+  });
+
   /* ---------- plans / borrow ---------- */
   await step('plans', '计划列表 GET /api/plans', async () => listOk('/api/plans', token).then(d => d.length + ' 条'));
   await step('plans', '作业计划 新增 → 详情', async () => {

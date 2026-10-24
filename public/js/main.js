@@ -257,6 +257,7 @@ app.component('AccountsPanel', AccountsPanel);
 app.component('Requisitions', Requisitions);
 app.component('Imports', Imports);
 app.component('Outbounds', Outbounds);
+app.component('ArrivalStats', ArrivalStats);
 
 app.component('PlanDateTime', PlanDateTime);
 app.component('PlansView', PlansView);

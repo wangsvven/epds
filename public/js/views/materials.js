@@ -391,6 +391,7 @@ const MaterialsView = {
       <el-tab-pane label="领料单" name="requisition" />
       <el-tab-pane label="导入批次" name="import" />
       <el-tab-pane label="出库管理" name="outbound" />
+      <el-tab-pane label="到货统计" name="arrival" />
     </el-tabs>
 
     <div v-if="tab==='detail'">
@@ -693,6 +694,9 @@ const MaterialsView = {
     </div>
     <div v-else-if="tab==='outbound'">
       <Outbounds />
+    </div>
+    <div v-else-if="tab==='arrival'">
+      <ArrivalStats />
     </div>
 
     <el-dialog :title="editingId ? '编辑材料' : '新增材料'" v-model="dialogVisible" width="960px" top="4vh">
