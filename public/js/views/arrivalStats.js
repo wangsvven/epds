@@ -62,7 +62,7 @@ const ArrivalStats = {
       <el-select v-model="plan" style="width:220px" @change="onPlanChange">
         <el-option v-for="p in plans" :key="p.id" :label="p.name" :value="p.name" />
       </el-select>
-      <span class="as-sum">材料 {{ agg.totalRows }} 行 · 按物料名称合并 {{ agg.kindCount }} 种 · 其中已到货 {{ agg.arrivedKindCount }} 种</span>
+      <span class="as-sum">材料 {{ agg.totalRows }} 行 · 按编码 + 名称合并 {{ agg.kindCount }} 种 · 其中已到货 {{ agg.arrivedKindCount }} 种</span>
       <span class="spacer"></span>
       <el-button @click="load">刷新统计</el-button>
     </div>
@@ -87,13 +87,8 @@ const ArrivalStats = {
     </div>
 
     <el-table :data="paged" class="mat-table as-table" style="width:100%">
-      <el-table-column prop="code" label="物料编码" width="176">
-        <template #default="{row}">
-          <span class="mat-code">{{ row.code || '—' }}</span>
-          <el-tooltip v-if="row.codeConflict" :content="'同名物料存在多个编码：' + row.codes.join(' / ')" placement="top">
-            <span class="as-flag">多编码</span>
-          </el-tooltip>
-        </template>
+      <el-table-column prop="code" label="物料编码" width="146">
+        <template #default="{row}"><span class="mat-code">{{ row.code || '—' }}</span></template>
       </el-table-column>
       <el-table-column prop="description" label="物料描述" min-width="300">
         <template #default="{row}"><span class="mat-desc">{{ row.description }}</span></template>

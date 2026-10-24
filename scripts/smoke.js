@@ -399,7 +399,7 @@ async function listOk(p, token) {
     return `2 种：${d1.required}/${d1.arrived} + ${d2.required}/${d2.arrived}`;
   });
 
-  await step('materials', '到货统计：同名多编码合并并标记；未到货种数与动态倒序', async () => {
+  await step('materials', '到货统计：同名不同编码也各是各的（编码+名称成条）', async () => {
     needOk(await api('POST', '/api/materials', {
       token,
       body: { project: '冒烟测试项目B', source: '甲供材料', description: '预应力混凝土电杆Φ150×10M', qtyRequired: 3, qtyArrived: 0, unit: '根', code: 'SMOKE-OTHER' }
@@ -410,13 +410,15 @@ async function listOk(p, token) {
     }), 'materials POST E');
     const ms = await listOk('/api/materials', token);
     const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
+    // 4 组：D1/C1(15,2)、D2/C1(7,1)、D1/SMOKE-OTHER(3,0)、D3/SMOKE-NOARR(8,0)
+    need(agg.kindCount === 4, '应为 4 组（编码+名称），实际 ' + agg.kindCount);
     const d1 = agg.rows.find(r => r.description === '预应力混凝土电杆Φ150×10M');
-    need(d1 && Math.abs(d1.required - 18) < 1e-6, '同名不同编码应合并为 18，实际 ' + (d1 && d1.required));
-    need(d1.codeConflict === true && d1.codes.length === 2, '同名多编码应被标记，实际 ' + JSON.stringify(d1.codes));
-    need(agg.kindCount === 3, '种数应为 3，实际 ' + agg.kindCount);
-    need(agg.arrivedKindCount === 2, '已到货种数应为 2，实际 ' + agg.arrivedKindCount);
-    need(agg.notArrivedKindCount === 1, '未到货种数应为 1，实际 ' + agg.notArrivedKindCount);
-    need(agg.rows.length === agg.arrivedKindCount, '主表行数应等于已到货种数');
+    need(d1 && Math.abs(d1.required - 15) < 1e-6, '同名不同编码不应合并（应仍为 15），实际 ' + (d1 && d1.required));
+    need(d1.code === 'S01HDG1005', '该行编码应为 S01HDG1005，实际 ' + (d1 && d1.code));
+    need(Math.abs(agg.requiredSum - 33) < 1e-6, '应到合计应为 33，实际 ' + agg.requiredSum);
+    need(agg.arrivedKindCount === 2, '已到货组数应为 2，实际 ' + agg.arrivedKindCount);
+    need(agg.notArrivedKindCount === 2, '未到货组数应为 2，实际 ' + agg.notArrivedKindCount);
+    need(agg.rows.length === agg.arrivedKindCount, '主表行数应等于已到货组数');
     const rr = arrivalCalc.recentArrivals([
       { reqNo: 'LL-20260101-0001', projects: ['冒烟测试项目'], status: '已入库', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-01 09:00', rows: [{ materialId: 'a', thisQty: 1 }] }] },
       { reqNo: 'LL-20260101-0002', projects: ['冒烟测试项目'], status: '已入库', items: [{ materialId: 'a', description: '甲' }], history: [{ at: '2026-01-02 09:00', rows: [{ materialId: 'a', thisQty: 2 }] }] },
@@ -424,7 +426,7 @@ async function listOk(p, token) {
     ], ['冒烟测试项目'], 50);
     need(rr.length === 2, '作废单应排除，应 2 条，实际 ' + rr.length);
     need(rr[0].at > rr[1].at, '应按时间倒序，实际 ' + rr.map(x => x.at).join(' | '));
-    return `种 ${agg.kindCount} / 已到 ${agg.arrivedKindCount} / 未到 ${agg.notArrivedKindCount} · 同名多编码已标记 · 动态 ${rr.length} 条`;
+    return `组 ${agg.kindCount} / 已到 ${agg.arrivedKindCount} / 未到 ${agg.notArrivedKindCount} · D1 未与同名异码合并 · 动态 ${rr.length} 条`;
   });
 
   /* ---------- plans / borrow ---------- */
