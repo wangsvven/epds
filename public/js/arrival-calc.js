@@ -1,6 +1,6 @@
 /* ========== arrival-calc ========== */
 /* 到货统计聚合（纯函数，无 Vue/无 DOM 依赖）：前端页面与冒烟脚本共用同一套口径。
-   - aggregate(materials, projectNames)：按物料编码合并，复用材料台账的 qtyRequired/qtyArrived 字段
+   - aggregate(materials, projectNames)：按物料名称（描述）合并，复用材料台账的 qtyRequired/qtyArrived 字段
    - recentArrivals(requisitions, projectNames, limit)：领料单入库记录按时间倒序 */
 (function (root) {
   function round4(n) { return Math.round((Number(n) || 0) * 10000) / 10000; }
@@ -12,21 +12,23 @@
     const map = new Map();
     rows.forEach(m => {
       const code = String(m.code || '').trim();
-      const key = code ? 'c:' + code : 'd:' + String(m.description || '') + '|' + String(m.unit || '');
+      const desc = String(m.description || '').trim();
+      // 按物料名称（描述）合并：同编码不同描述各自独立；描述为空时按编码兜底
+      const key = desc ? 'n:' + desc : 'c:' + code;
       const req = Number(m.qtyRequired) || 0;
       const arr = Number(m.qtyArrived) || 0;
       let g = map.get(key);
       if (!g) {
-        g = { code, description: m.description || '', unit: m.unit || '', required: 0, arrived: 0, rowCount: 0, maxReq: -1, units: new Set(), descs: new Set() };
+        g = { code, description: desc, unit: m.unit || '', required: 0, arrived: 0, rowCount: 0, maxReq: -1, units: new Set(), codes: new Set() };
         map.set(key, g);
       }
       g.required = round4(g.required + req);
       g.arrived = round4(g.arrived + arr);
       g.rowCount++;
+      if (code) g.codes.add(code);
       if (m.unit) g.units.add(String(m.unit));
-      if (m.description) g.descs.add(String(m.description));
-      // 描述/单位取「应到数量最大的一行」
-      if (req > g.maxReq) { g.maxReq = req; g.description = m.description || ''; g.unit = m.unit || ''; }
+      // 编码/单位取「应到数量最大的一行」
+      if (req > g.maxReq) { g.maxReq = req; g.description = desc; g.unit = m.unit || ''; g.code = code; }
     });
     const all = [...map.values()].map(g => {
       const notArrived = round4(Math.max(0, g.required - g.arrived));
@@ -42,7 +44,8 @@
         rowCount: g.rowCount,
         unitConflict: g.units.size > 1,
         units: [...g.units],
-        descConflict: g.descs.size > 1
+        codeConflict: g.codes.size > 1,
+        codes: [...g.codes]
       };
     });
     // 只列已到合计 > 0；按未到降序，全部到齐（未到=0）排最后
