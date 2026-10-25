@@ -25,7 +25,8 @@ const App = {
     const me = reactive({ name: '', role: '' });
     const viewVersion = ref(0);
     const tenant = ref('');
-    const sysName = ref('电网生产ERP（本地版）');
+    // 主页脚版本号：由 /api/public-config 下发（服务端读 package.json，禁止前端写死）
+    const siteVersion = ref('');
     // 首次使用初始化向导是否已完成
     const initialized = ref(true);
     const initMode = computed(() => !!token.value && !initialized.value);
@@ -37,7 +38,7 @@ const App = {
     // 登录页背景 / 品牌：背景由服务端直出到 CSS 变量 --login-bg（无闪跳），
     // 这里仅作为回退（如从非 / 路径进入）与品牌名同步。
     const loginBg = ref('');
-    const loginBrand = reactive({ systemName: '', companyName: '' });
+    const loginBrand = reactive({ companyName: '' });
 
     // ===== 明暗主题：首屏由 index.html 内联脚本预先定好，这里只做切换与持久化 =====
     const theme = ref(document.documentElement.classList.contains('dark') ? 'dark' : 'light');
@@ -77,10 +78,8 @@ const App = {
         Auth.isAdmin = !!r.user.isAdmin;
         Auth.group = r.user.role;
         Auth.writeModules = (r.user.permissions && r.user.permissions.writeModules) || [];
-        // 顶栏企业名跟随「网站设置-企业名称」，未设置时回退租户名
-        tenant.value = (r.settings && r.settings.companyName) || r.tenant.name;
-        sysName.value = r.settings.systemName;
-        document.title = r.settings.systemName || document.title;
+        // 顶栏企业名跟随「网站设置-企业名称」；未填写时整行不渲染（不再回退旧系统名）
+        tenant.value = (r.settings && r.settings.companyName) || '';
         // 首次使用初始化向导：未完成时进入「初始化设置」首屏
         initialized.value = !!(r.settings && r.settings.initialized);
         // 首次初始化未完成：若当前停留在非允许页面（含首页），强制转跳回初始化向导
@@ -124,8 +123,8 @@ const App = {
         // 回退设置：仅当服务端未注入（值为 none）时才覆盖，避免覆盖正确的直出值造成闪跳
         const cur = getComputedStyle(document.documentElement).getPropertyValue('--login-bg').trim();
         if (!cur || cur === 'none') document.documentElement.style.setProperty('--login-bg', "url('" + bg + "')");
-        loginBrand.systemName = c.systemName || '';
         loginBrand.companyName = c.companyName || '';
+        siteVersion.value = c.version || '';
       }).catch(() => {});
       // 项目详情跳转：进入材料台账 / 计划管理（跨模块导航）
       // 跨模块跳转同样受初始化守卫约束：未初始化时业务页面一律转跳初始化向导
@@ -146,7 +145,7 @@ const App = {
     // 网站设置保存后实时刷新顶部标题/企业名称
     window.addEventListener('brand-changed', fetchMe);
 
-    return { token, me, tenant, sysName, initialized, initMode, collapsed, route, loginForm, loginLoading, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
+    return { token, me, tenant, siteVersion, initialized, initMode, collapsed, route, loginForm, loginLoading, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
   },
   template: `
   <div v-if="!token">
@@ -159,7 +158,10 @@ const App = {
       <div class="login-card">
         <div class="login-inner">
           <div class="brand">
-            <h2>{{ loginBrand.systemName || '电网生产ERP' }}</h2>
+            <div class="brand-bolt" aria-hidden="true">
+              <svg viewBox="0 0 24 30"><path d="M14.5 0 2 17.5h7.2L6.8 30 22 11.8h-7.4L14.5 0z" fill="url(#epdGradBright)"/></svg>
+            </div>
+            <h2><span class="lb-1">Electric Power</span><span class="lb-2">Data System</span></h2>
             <div class="sub">本地自托管版 · 请登录</div>
           </div>
           <el-form @submit.prevent="login">
@@ -171,7 +173,7 @@ const App = {
       </div>
       <div class="login-page-footer">
         <div class="company" v-if="loginBrand.companyName">{{ loginBrand.companyName }}</div>
-        <div v-else>{{ loginBrand.systemName || '' }}</div>
+        <div class="sysver">Electric Power Data System · 本地版{{ siteVersion ? ' v' + siteVersion : '' }}</div>
       </div>
     </div>
   </div>
@@ -182,10 +184,12 @@ const App = {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3.5 7h17M3.5 12h17M3.5 17h17"/></svg>
         </button>
         <div class="app-brand" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 2.5 5 13.4h5.6l-1 8.1 8.4-11.3h-5.7z"/></svg>
+          <svg viewBox="0 0 24 30"><path d="M14.5 0 2 17.5h7.2L6.8 30 22 11.8h-7.4L14.5 0z" fill="url(#epdGradDeep)"/></svg>
         </div>
-        <span class="sysname">{{ sysName }}</span>
-        <span v-if="tenant" class="tenant-name">{{ tenant }}</span>
+        <div class="brand-lockup">
+          <div class="brand-org" v-if="tenant">{{ tenant }}</div>
+          <div class="brand-title"><span class="bt-a">Electric Power</span> <span class="bt-grad">Data System</span></div>
+        </div>
       </div>
       <div class="right">
         <button class="theme-toggle" @click="toggleTheme" :title="theme==='dark' ? '切换到浅色模式' : '切换到深色模式'">

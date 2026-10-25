@@ -5,6 +5,11 @@ const path = require('path');
 const crypto = require('crypto');
 const xlsx = require('xlsx');
 const ROOT = path.join(__dirname, '..', '..');
+// 当前版本号：实时读 package.json（前端页脚展示用，避免前端写死；发布升版后刷新即跟随）
+function pkgVersion() {
+  try { return String(JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || ''); }
+  catch (e) { return ''; }
+}
 const { resolveSurveyTemplate } = require('../core/doc-templates');
 
 const app = require('../core/app');
@@ -41,7 +46,8 @@ app.get('/api/public-config', (req, res) => {
   res.json({
     systemName: DB.settings.systemName || '',
     companyName: DB.settings.companyName || '',
-    loginBg: DB.settings.loginBg || DEFAULT_LOGIN_BG
+    loginBg: DB.settings.loginBg || DEFAULT_LOGIN_BG,
+    version: pkgVersion()
   });
 });
 // 本地上传的登录页背景（无需登录；仅允许读取 data/uploads/login-bg 目录，防目录穿越）
