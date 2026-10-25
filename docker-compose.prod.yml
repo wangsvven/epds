@@ -6,11 +6,11 @@
 # 镜像只含代码，db.json 等数据全在宿主机，更新容器不会丢失。
 services:
   grid-erp:
-    # 已固定为 v2.11.0（稳定发布版本）。日后发布新版本时，需在此改标签（如 :v2.11.1）
+    # 已固定为 v2.13.0（稳定发布版本）。日后发布新版本时，需在此改标签（如 :v2.13.1）
     # 并重新 pull，或改回 :main 以追 GitHub main 分支最新。
     # 注：仓库已由 ziliaozizhi-local-erp 更名为 epds，镜像路径随之变更；
     #    epds 下的新包首次推送后默认是 private，需在 Packages 设置里改成 Public 才能免登录拉取。
-    image: ghcr.io/wangsvven/epds:v2.11.0
+    image: ghcr.io/wangsvven/epds:v2.13.0
     container_name: grid-erp
     ports:
       - "5173:5173"
