@@ -77,6 +77,7 @@ const App = {
         Auth.loaded = true;
         Auth.isAdmin = !!r.user.isAdmin;
         Auth.group = r.user.role;
+        Auth.displayName = r.user.name || r.user.username || '';
         Auth.writeModules = (r.user.permissions && r.user.permissions.writeModules) || [];
         // 顶栏企业名跟随「网站设置-企业名称」；未填写时整行不渲染（不再回退旧系统名）
         tenant.value = (r.settings && r.settings.companyName) || '';

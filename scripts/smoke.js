@@ -605,8 +605,9 @@ async function listOk(p, token) {
     const before = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail');
     need(before.survey === undefined || before.survey === null, '新建计划不应已有 survey');
     const body1 = {
-      dualName: '10kV 冒烟线 001 号杆', workTask: '冒烟工作内容', outageScope: '冒烟停电范围',
-      retainedLive: '', ground10: '1 号杆', ground04: '', surveyDate: '2026-10-26',
+      surveyUnit: '冒烟勘察单位', dualName: '10kV 冒烟线 001 号杆', workTask: '冒烟工作内容', outageScope: '冒烟停电范围',
+      retainedLive: '', envDesc: '冒烟环境描述', opsMeasures: '运维措施', teamMeasures: '班组措施',
+      commonMeasures: '通用措施', ground10: '1 号杆', ground04: '', surveyDate: '2026-10-26', recorder: ' 冒烟记录人 ',
       hazardPoints: [{ id: 'hp1', hazardId: 'hx1', title: '触电', situation: '现场情况', measure: '验电接地' }]
     };
     const s1 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body1 }), 'survey PUT');
@@ -614,15 +615,28 @@ async function listOk(p, token) {
     need(Array.isArray(s1.hazardPoints) && s1.hazardPoints.length === 1, '危险点未保存');
     need(s1.hazardPoints[0].id === 'hp1' && s1.hazardPoints[0].hazardId === 'hx1', '危险点 id/hazardId 未按传入保留');
     need(s1.hazardPoints[0].title === '触电' && s1.hazardPoints[0].measure === '验电接地', '危险点字段不符');
+    // 4a 增补的 6 个字段：勘察单位 / 4.3 环境描述 / 4.4 三框 / 记录人
+    const EXTRA = ['surveyUnit', 'envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures', 'recorder'];
+    need(EXTRA.every(k => typeof s1[k] === 'string'), '增补字段未按字符串返回：' + brief(EXTRA.map(k => k + '=' + JSON.stringify(s1[k])))); 
+    need(s1.surveyUnit === '冒烟勘察单位' && s1.envDesc === '冒烟环境描述', '勘察单位/环境描述存取不符');
+    need(s1.opsMeasures === '运维措施' && s1.teamMeasures === '班组措施' && s1.commonMeasures === '通用措施', '4.4 三个措施框存取不符');
+    need(s1.recorder === '冒烟记录人', '记录人应去空白：' + JSON.stringify(s1.recorder));
     const createdAt = s1.createdAt;
     const d1 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after survey');
     need(d1.survey && d1.survey.dualName === '10kV 冒烟线 001 号杆', '保存后重读计划拿不到 survey');
+    need(d1.survey.envDesc === '冒烟环境描述' && d1.survey.recorder === '冒烟记录人', '重读计划时增补字段丢失');
     // 二次 PUT：内容更新，createdAt 不变
     const body2 = { ...body1, workTask: '改后的工作内容', hazardPoints: [...body1.hazardPoints, { id: 'hp2', hazardId: '', title: '自定义危险点', situation: '', measure: '自定义措施' }] };
     const s2 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), 'survey PUT 2');
     need(s2.createdAt === createdAt, '二次保存 createdAt 应保持不变（' + createdAt + ' → ' + s2.createdAt + '）');
     need(s2.updatedAt >= createdAt, 'updatedAt 应刷新');
     need(s2.workTask === '改后的工作内容' && s2.hazardPoints.length === 2, '二次保存内容不符');
+    need(EXTRA.every(k => s1[k] === s2[k]), '二次保存后增补字段发生变化');
+    // 未传的增补字段回落空字符串（白名单缺省 ''）
+    const s2b = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { dualName: '仅双重名称', hazardPoints: [] } }), 'survey PUT 缺省');
+    need(EXTRA.every(k => s2b[k] === ''), '未传的增补字段应为空字符串：' + brief(EXTRA.map(k => k + '=' + JSON.stringify(s2b[k]))));
+    // 回到 body2 继续后面的校验
+    needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), 'survey PUT 复原');
     // 某条 measure 为空 → 400，且已存记录不被改动
     const badMsr = { ...body2, hazardPoints: [...body2.hazardPoints, { id: 'hp3', hazardId: '', title: '缺措施的条', situation: '', measure: '   ' }] };
     const r400 = await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: badMsr });

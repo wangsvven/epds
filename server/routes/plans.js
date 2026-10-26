@@ -266,7 +266,11 @@ app.delete('/api/workPlans/:id/package', (req, res) => {
 
 // ---------- 施工资料 · 现场勘察记录（挂在计划记录上；老记录无 survey 字段按 null 处理） ----------
 // 部门（班组）与勘察编号不落库，生成时再从计划读 team / surveyNo
-const SURVEY_TEXT_FIELDS = ['dualName', 'workTask', 'outageScope', 'retainedLive', 'ground10', 'ground04', 'surveyDate'];
+const SURVEY_TEXT_FIELDS = [
+  'surveyUnit', 'dualName', 'workTask', 'outageScope', 'retainedLive',
+  'envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures',
+  'ground10', 'ground04', 'surveyDate', 'recorder'
+];
 function planSurvey(p) {
   const v = p && p.survey;
   return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;

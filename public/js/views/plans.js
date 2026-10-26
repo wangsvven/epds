@@ -404,13 +404,19 @@ const PlansView = {
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       if (saved) {
         surveyDlg.form = {
+          surveyUnit: saved.surveyUnit || '',
           dualName: saved.dualName || '',
           workTask: saved.workTask || '',
           outageScope: saved.outageScope || '',
           retainedLive: saved.retainedLive || '',
+          envDesc: saved.envDesc || '',
+          opsMeasures: saved.opsMeasures || '',
+          teamMeasures: saved.teamMeasures || '',
+          commonMeasures: saved.commonMeasures || '',
           ground10: saved.ground10 || '',
           ground04: saved.ground04 || '',
           surveyDate: saved.surveyDate || '',
+          recorder: saved.recorder || '',
           hazardPoints: (Array.isArray(saved.hazardPoints) ? saved.hazardPoints : []).map(h => ({
             id: h.id || newHpId(),
             hazardId: h.hazardId || '',
@@ -421,8 +427,11 @@ const PlansView = {
         };
       } else {
         surveyDlg.form = {
-          dualName: '', workTask: plan.content || '', outageScope: plan.outageRange || '',
-          retainedLive: '', ground10: '', ground04: '', surveyDate: todayYmd(), hazardPoints: []
+          surveyUnit: '', dualName: '', workTask: plan.content || '', outageScope: plan.outageRange || '',
+          retainedLive: '', envDesc: '', opsMeasures: '', teamMeasures: '', commonMeasures: '',
+          ground10: '', ground04: '', surveyDate: todayYmd(),
+          recorder: Auth.displayName || '',
+          hazardPoints: []
         };
       }
       surveyDlg.errId = '';
@@ -486,9 +495,11 @@ const PlansView = {
       surveyDlg.saving = true;
       try {
         const saved = await api.put('/api/workPlans/' + plan.id + '/survey', {
-          dualName: f.dualName || '', workTask: f.workTask || '', outageScope: f.outageScope || '',
-          retainedLive: f.retainedLive || '', ground10: f.ground10 || '', ground04: f.ground04 || '',
-          surveyDate: f.surveyDate || '',
+          surveyUnit: f.surveyUnit || '', dualName: f.dualName || '', workTask: f.workTask || '',
+          outageScope: f.outageScope || '', retainedLive: f.retainedLive || '', envDesc: f.envDesc || '',
+          opsMeasures: f.opsMeasures || '', teamMeasures: f.teamMeasures || '', commonMeasures: f.commonMeasures || '',
+          ground10: f.ground10 || '', ground04: f.ground04 || '',
+          surveyDate: f.surveyDate || '', recorder: f.recorder || '',
           hazardPoints: arr.map(h => ({
             id: h.id, hazardId: h.hazardId || '', title: h.title || '',
             situation: h.situation || '', measure: h.measure || ''
@@ -1271,22 +1282,23 @@ const PlansView = {
       </template>
     </el-dialog>
 
-    <!-- 现场勘察记录编辑器（嵌套弹窗；本批只做表单与保存，不含作业分组/环境描述/措施/生成/签字页） -->
+    <!-- 现场勘察记录编辑器（嵌套弹窗；字段顺序按勘察模板槽位；本批不含生成/签字页） -->
     <el-dialog v-model="surveyDlg.visible" title="现场勘察记录" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
-        <!-- 顶部只读信息：部门（班组）与编号取计划字段，不落 survey -->
+        <!-- 顶部只读信息：部门（班组）、编号、工作地点取计划字段，不落 survey -->
         <div class="survey-meta">
           <span>部门（班组）：<b>{{ (matDlg.plan && matDlg.plan.team) || '-' }}</b></span>
           <span>编号：<b>{{ (matDlg.plan && matDlg.plan.surveyNo) || '-' }}</b></span>
+          <span>工作地点：<b>{{ (matDlg.plan && matDlg.plan.address) || '-' }}</b></span>
         </div>
 
         <el-form label-position="top" size="default">
           <div class="survey-grid">
+            <el-form-item label="勘察单位">
+              <el-input v-model="surveyDlg.form.surveyUnit" placeholder="勘察单位名称" />
+            </el-form-item>
             <el-form-item label="双重名称">
               <el-input v-model="surveyDlg.form.dualName" placeholder="勘察设备的双重名称" />
-            </el-form-item>
-            <el-form-item label="勘察日期">
-              <el-date-picker v-model="surveyDlg.form.surveyDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" />
             </el-form-item>
             <el-form-item label="工作任务" class="sg-full">
               <el-input v-model="surveyDlg.form.workTask" type="textarea" :rows="2" placeholder="首次从计划工作内容带入，可修改" />
@@ -1297,11 +1309,8 @@ const PlansView = {
             <el-form-item label="4.2 保留的带电部位">
               <el-input v-model="surveyDlg.form.retainedLive" type="textarea" :rows="3" placeholder="选填" />
             </el-form-item>
-            <el-form-item label="10kV 接地线位置">
-              <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="每行一个位置" />
-            </el-form-item>
-            <el-form-item label="0.4kV 接地线位置">
-              <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="每行一个位置" />
+            <el-form-item label="4.3 环境描述" class="sg-full">
+              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="作业现场环境描述（选填）" />
             </el-form-item>
           </div>
 
@@ -1339,6 +1348,30 @@ const PlansView = {
               </el-option-group>
             </el-select>
             <el-button @click="addCustomHazard">新增自定义危险点</el-button>
+          </div>
+
+          <div class="survey-grid sg-tail">
+            <el-form-item label="4.4 运维人员采取的安全措施">
+              <el-input v-model="surveyDlg.form.opsMeasures" type="textarea" :rows="3" placeholder="选填" />
+            </el-form-item>
+            <el-form-item label="4.4 班组应采取的安全措施">
+              <el-input v-model="surveyDlg.form.teamMeasures" type="textarea" :rows="3" placeholder="选填" />
+            </el-form-item>
+            <el-form-item label="4.4 通用风险控制措施" class="sg-full">
+              <el-input v-model="surveyDlg.form.commonMeasures" type="textarea" :rows="3" placeholder="选填" />
+            </el-form-item>
+            <el-form-item label="10kV 接地线位置">
+              <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="每行一个位置" />
+            </el-form-item>
+            <el-form-item label="0.4kV 接地线位置">
+              <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="每行一个位置" />
+            </el-form-item>
+            <el-form-item label="勘察日期">
+              <el-date-picker v-model="surveyDlg.form.surveyDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" />
+            </el-form-item>
+            <el-form-item label="记录人">
+              <el-input v-model="surveyDlg.form.recorder" placeholder="默认当前登录用户，可修改" />
+            </el-form-item>
           </div>
         </el-form>
       </div>
