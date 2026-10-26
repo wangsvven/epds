@@ -934,8 +934,8 @@
   .pdt-panel { position:fixed; z-index:3000; background:var(--surface); border:1px solid var(--line);
     border-radius:12px; box-shadow:var(--shadow-md); overflow:hidden; }
   .pdt-body { display:flex; }
-  .pdt-cal { flex:1 1 auto; min-width:0; padding:4px 10px 8px; }
-  .pdt-head { display:flex; align-items:center; justify-content:center; gap:2px; height:40px; }
+  .pdt-cal { flex:1 1 auto; min-width:0; padding:0 10px 10px; }
+  .pdt-head { display:flex; align-items:center; justify-content:center; gap:2px; height:44px; }
   .pdt-nav { width:26px; height:26px; border:0; background:transparent; color:var(--text-3); font-size:15px; line-height:1;
     border-radius:6px; cursor:pointer; font-family:inherit; }
   .pdt-nav:hover { background:var(--hover); color:var(--text-1); }
@@ -950,13 +950,23 @@
   .pdt-day.out { color:var(--text-3); opacity:.6; }
   .pdt-day.today { box-shadow:0 0 0 1px var(--brand) inset; color:var(--brand); }
   .pdt-day.on { background:var(--brand); color:#fff; font-weight:600; box-shadow:none; }
-  .pdt-time { flex:0 0 158px; display:flex; border-left:1px solid var(--line); padding-top:40px; }
-  .pdt-col { flex:1 1 0; min-width:0; height:242px; overflow-y:auto; scrollbar-width:none; }
+  /* 时间区：抬头行（时/分/秒）+ 三列循环滚动（可视 7 行 × 36px = 252px，与日历区等高） */
+  .pdt-time { flex:0 0 158px; display:flex; flex-direction:column; border-left:1px solid var(--line); }
+  .pdt-time-head { display:flex; align-items:center; height:44px; }
+  .pdt-time-head span { flex:1 1 0; text-align:center; font-size:12.5px; color:var(--text-3); }
+  .pdt-cols { position:relative; display:flex; height:252px; }
+  /* 选中带：贯通三列的浅蓝带（在数字下层，pointer-events 关掉不吃点击） */
+  .pdt-band { position:absolute; left:0; right:0; top:108px; height:36px; z-index:0; pointer-events:none;
+    background:#ecf5ff; border-top:1px solid #d9ecff; border-bottom:1px solid #d9ecff; }
+  html.dark .pdt-band { background:rgba(51,112,255,.18); border-top-color:rgba(51,112,255,.34); border-bottom-color:rgba(51,112,255,.34); }
+  .pdt-col { position:relative; z-index:1; flex:1 1 0; min-width:0; height:100%; overflow-y:auto; scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 16%, #000 84%, transparent 100%);
+    mask-image:linear-gradient(to bottom, transparent 0, #000 16%, #000 84%, transparent 100%); }
   .pdt-col::-webkit-scrollbar { width:0; height:0; }
   .pdt-col + .pdt-col { border-left:1px solid var(--line); }
-  .pdt-cell { height:26px; line-height:26px; text-align:center; font-size:13px; color:var(--text-2); cursor:pointer; }
+  .pdt-cell { height:36px; line-height:36px; text-align:center; font-size:13px; color:var(--text-2); cursor:pointer; }
   .pdt-cell:hover { background:var(--hover); color:var(--text-1); }
-  .pdt-cell.on { color:var(--brand); font-weight:600; background:var(--brand-soft); }
+  .pdt-cell.on { color:var(--brand); font-weight:600; }
   .pdt-foot { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-top:1px solid var(--line); }
   .pdt-now { border:0; background:transparent; color:var(--text-2); font-size:12.5px; cursor:pointer;
     padding:4px 2px; font-family:inherit; border-radius:6px; }
@@ -966,10 +976,11 @@
   .pdt-ok:hover { background:var(--brand-soft); }
   .pdt-ok:disabled { color:var(--text-3); cursor:not-allowed; background:transparent; }
   @media (max-width:768px){
-    .pdt-time { flex:0 0 132px; padding-top:38px; }
-    .pdt-col { height:210px; }
+    .pdt-time { flex:0 0 132px; }
+    .pdt-cols { height:232px; }   /* 与移动端日历区（数字 31px）等高 */
+    .pdt-band { top:108px; }
     .pdt-day { height:31px; font-size:12.5px; }
-    .pdt-cal { padding:2px 6px 6px; }
+    .pdt-cal { padding:0 6px 8px; }
   }
   /* 入库核对徽标：紧凑描边徽标（深浅色通用） */
   .in-chip { display:inline-block; padding:0 8px; border-radius:4px; font-size:12px; line-height:18px;

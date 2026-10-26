@@ -901,10 +901,21 @@ const PlanDateTime = {
     const HOURS = Array.from({ length: 24 }, (_, i) => pad(i));
     const MINUTES = Array.from({ length: 60 }, (_, i) => pad(i));
     const SECONDS = Array.from({ length: 60 }, (_, i) => pad(i));
+    // 无限循环滚动：同一组数值重复 5 份，打开时定位到中间一份；越出后在滚动停止时按整周期跳回等值位置
+    const ROW = 36;             // 单元格行高（与 .pdt-cell 样式保持一致）
+    const BAND_TOP = ROW * 3;   // 选中带顶边 = 第 4 行（可视 7 行）
+    const REPEAT = 5;           // 重复份数（前后各留 2 份余量）
+    const rep = arr => { const out = []; for (let c = 0; c < REPEAT; c++) arr.forEach(v => out.push(v)); return out; };
+    const HOURS_REP = rep(HOURS), MINUTES_REP = rep(MINUTES), SECONDS_REP = rep(SECONDS);
     const open = ref(false);
     const triggerEl = ref(null);
     const panelEl = ref(null);
     const colH = ref(null); const colM = ref(null); const colS = ref(null);
+    const colRef = { h: colH, mi: colM, s: colS };
+    const colList = { h: HOURS, mi: MINUTES, s: SECONDS };
+    const colSelKey = { h: 'h', mi: 'mi', s: 's' };
+    const sync = { h: false, mi: false, s: false };   // 程序滚动期间不回读，避免自激
+    const timers = { h: 0, mi: 0, s: 0 };
     const pos = reactive({ top: 0, left: 0, width: 460 });
     const now0 = new Date();
     const view = reactive({ y: now0.getFullYear(), m: now0.getMonth() + 1 });
@@ -948,12 +959,47 @@ const PlanDateTime = {
       if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
       pos.width = pw; pos.left = left; pos.top = top;
     }
-    function scrollCols() {
-      [[colH, sel.h], [colM, sel.mi], [colS, sel.s]].forEach(pair => {
-        const el = pair[0].value; if (!el) return;
-        const idx = sel.has ? Number(pair[1]) : 0;
-        el.scrollTop = Math.max(0, idx * 26 - 104);
-      });
+    // 把某一列滚到「中间一份 + 当前值」的位置，使该值落在选中带上
+    function scrollValueToBand(kind, value, smooth) {
+      const el = colRef[kind].value; if (!el) return;
+      const n = colList[kind].length;
+      const top = (2 * n + Number(value || 0)) * ROW - BAND_TOP;
+      if (smooth && el.scrollTo) el.scrollTo({ top, behavior: 'smooth' });
+      else el.scrollTop = top;
+    }
+    // 滚动中：只做防抖，不动 scrollTop（否则会打断惯性）
+    function onColScroll(kind) {
+      clearTimeout(timers[kind]);
+      timers[kind] = setTimeout(() => snapCol(kind), 150);
+    }
+    // 滚动停止：先按整周期归位到中间一份（内容重复，视觉无感），再把最近的数值吸附到选中带
+    function snapCol(kind) {
+      const el = colRef[kind].value; if (!el || sync[kind]) return;
+      const n = colList[kind].length, period = n * ROW, base = 2 * period - BAND_TOP;
+      const rel = (((el.scrollTop - base) % period) + period) % period;
+      if (Math.abs(rel - (el.scrollTop - base)) > 0.5) el.scrollTop = base + rel;
+      const i = Math.max(0, Math.min(Math.round((el.scrollTop + BAND_TOP) / ROW), n * REPEAT - 1));
+      pickTime(colSelKey[kind], pad(i % n));
+      const top = i * ROW - BAND_TOP;
+      if (Math.abs(el.scrollTop - top) > 0.5) {
+        sync[kind] = true;
+        el.scrollTo({ top, behavior: 'smooth' });
+        setTimeout(() => { sync[kind] = false; }, 300);
+      }
+    }
+    // 点某一格：选离当前位置最近的一份同值格，平滑滚到带上
+    function pickCell(kind, v) {
+      const el = colRef[kind].value; if (!el) return;
+      const n = colList[kind].length;
+      const cur = Math.round((el.scrollTop + BAND_TOP) / ROW);
+      const curVal = ((cur % n) + n) % n;
+      const fwd = ((Number(v) - curVal) + n) % n;
+      const delta = fwd <= n / 2 ? fwd : fwd - n;
+      const target = Math.max(0, Math.min(cur + delta, n * REPEAT - 1));
+      sync[kind] = true;
+      el.scrollTo({ top: target * ROW - BAND_TOP, behavior: 'smooth' });
+      pickTime(colSelKey[kind], v);
+      setTimeout(() => { sync[kind] = false; }, 320);
     }
     function onDocDown(e) {
       if (panelEl.value && panelEl.value.contains(e.target)) return;
@@ -988,7 +1034,16 @@ const PlanDateTime = {
       view.m = p ? p.m : t.getMonth() + 1;
       open.value = true;
       applyPos(); bindEvents();
-      nextTick(() => { applyPos(); scrollCols(); });
+      nextTick(() => {
+        applyPos();
+        ['h', 'mi', 's'].forEach(kind => {
+          if (!colRef[kind].value) return;
+          sync[kind] = true;
+          scrollValueToBand(kind, sel.has ? sel[colSelKey[kind]] : 0, false);
+          // 打开时的定位不算用户滚动：屏蔽到防抖窗口之后再放行，避免空值时被自动「选中」
+          setTimeout(() => { sync[kind] = false; }, 350);
+        });
+      });
     }
     function close() { open.value = false; unbindEvents(); }
     function toggle() { open.value ? close() : doOpen(); }
@@ -1017,7 +1072,7 @@ const PlanDateTime = {
     function clear() { emit('update:modelValue', ''); }
     onBeforeUnmount(unbindEvents);
 
-    return { pad, WEEK, HOURS, MINUTES, SECONDS, open, triggerEl, panelEl, colH, colM, colS, pos, view, sel, text, cells, isToday, isSel, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear };
+    return { pad, WEEK, HOURS_REP, MINUTES_REP, SECONDS_REP, open, triggerEl, panelEl, colH, colM, colS, pos, view, sel, text, cells, isToday, isSel, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear, onColScroll, pickCell };
   },
   template: `
   <div class="pdt" :class="{ 'is-open': open }">
@@ -1047,9 +1102,19 @@ const PlanDateTime = {
             </div>
           </div>
           <div class="pdt-time">
-            <div class="pdt-col" ref="colH"><div v-for="h in HOURS" :key="h" class="pdt-cell" :class="{ on: sel.has && pad(sel.h) === h }" @click="pickTime('h', h)">{{ h }}</div></div>
-            <div class="pdt-col" ref="colM"><div v-for="m in MINUTES" :key="m" class="pdt-cell" :class="{ on: sel.has && pad(sel.mi) === m }" @click="pickTime('mi', m)">{{ m }}</div></div>
-            <div class="pdt-col" ref="colS"><div v-for="s in SECONDS" :key="s" class="pdt-cell" :class="{ on: sel.has && pad(sel.s) === s }" @click="pickTime('s', s)">{{ s }}</div></div>
+            <div class="pdt-time-head"><span>时</span><span>分</span><span>秒</span></div>
+            <div class="pdt-cols">
+              <div class="pdt-band" aria-hidden="true"></div>
+              <div class="pdt-col" ref="colH" @scroll="onColScroll('h')">
+                <div v-for="(h, i) in HOURS_REP" :key="'h' + i" class="pdt-cell" :class="{ on: sel.has && pad(sel.h) === h }" @click="pickCell('h', h)">{{ h }}</div>
+              </div>
+              <div class="pdt-col" ref="colM" @scroll="onColScroll('mi')">
+                <div v-for="(m, i) in MINUTES_REP" :key="'m' + i" class="pdt-cell" :class="{ on: sel.has && pad(sel.mi) === m }" @click="pickCell('mi', m)">{{ m }}</div>
+              </div>
+              <div class="pdt-col" ref="colS" @scroll="onColScroll('s')">
+                <div v-for="(s, i) in SECONDS_REP" :key="'s' + i" class="pdt-cell" :class="{ on: sel.has && pad(sel.s) === s }" @click="pickCell('s', s)">{{ s }}</div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="pdt-foot">
