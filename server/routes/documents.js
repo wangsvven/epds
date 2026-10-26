@@ -9,7 +9,7 @@ const app = require('../core/app');
 const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
-const { genId, nowISO, aliveFilter, fmtNow, parseCSVBuffer, repairUploadName } = require('../core/util');
+const { genId, nowISO, aliveFilter, fmtNow, parseCSVBuffer, repairUploadName, extractDocxText } = require('../core/util');
 const { resolveDocPath } = require('../core/doc-templates');
 const { categorize } = require('../core/risk-category');
 

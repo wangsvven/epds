@@ -14,6 +14,7 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
+const { buildStoreZip } = require('../server/core/util');   // 造最小 docx 用（跟服务端同一套 zip 实现）
 
 const ROOT = path.resolve(__dirname, '..');
 const KEEP = process.argv.includes('--keep');
@@ -532,6 +533,22 @@ async function listOk(p, token) {
     const list = needOk(await api('GET', '/api/workticket/hazards', { token }), 'hazards list');
     need(Array.isArray(list) && list.some(h => h.id === d.id), '危险点库未包含新建条目');
     return 'id=' + d.id;
+  });
+  // 文档预览（docx → 提取文本）：勘察记录模板走的就是这条链路，重构时曾漏导入 extractDocxText 导致 500
+  await step('documents', 'docx 上传 → 预览提取文本', async () => {
+    const xml = Buffer.from('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>现场勘察记录</w:t></w:r></w:p><w:p><w:r><w:t>冒烟勘察内容</w:t></w:r></w:p></w:body></w:document>', 'utf8');
+    const docx = buildStoreZip([{ name: 'word/document.xml', data: xml }]);
+    const fd = new FormData();
+    fd.append('category', '工作票模板');
+    fd.append('file', new Blob([docx], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), '冒烟勘察记录.docx');
+    const upRes = await fetch(base + '/api/documents/files', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd, signal: AbortSignal.timeout(10000) });
+    const up = await upRes.json();
+    need(upRes.status === 200 && up && up.id, '上传失败：' + brief(up));
+    const pv = needOk(await api('GET', '/api/documents/files/' + up.id + '/preview', { token }), 'preview');
+    need(pv.kind === 'docx', 'preview.kind 应为 docx，实际 ' + brief(pv.kind));
+    need(Array.isArray(pv.lines) && pv.lines.includes('冒烟勘察内容'), '预览未提取到正文：' + brief(pv.lines));
+    await api('DELETE', '/api/documents/files/' + up.id, { token });
+    return 'kind=docx 行数=' + pv.lines.length;
   });
 
   /* ---------- workticket ---------- */
