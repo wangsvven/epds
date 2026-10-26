@@ -534,11 +534,40 @@ const PlansView = {
       surveyDlg.form.hazardPoints.push(hp);
       Vue.nextTick(() => scrollHp(hp.id));
     }
-    function addCustomHazard() {
+    // 标题弹窗（自定义条目用）：返回去空白的标题，取消/空值返回 ''
+    function promptHazardTitle(hp, isNew) {
+      return ElementPlus.ElMessageBox.prompt(
+        isNew ? '请填写自定义危险点的标题' : '修改自定义危险点的标题',
+        isNew ? '新增自定义危险点' : '修改危险点标题',
+        {
+          confirmButtonText: '确定', cancelButtonText: '取消',
+          inputValue: hp ? (hp.title || '') : '',
+          inputPlaceholder: '请输入危险点标题',
+          inputValidator: v => (!!(v && String(v).trim()) || '标题不能为空')
+        }
+      ).then(({ value }) => String(value).trim()).catch(() => '');
+    }
+    // 标题只在卡头显示：库条目锁定不可改，自定义条目点标题可再次改名
+    // 库条目标题点击不拦截冒泡 → 沿用卡头的展开/收起
+    function onTitleClick(hp, e) {
+      if (!hp || hp.hazardId) return;
+      if (e && e.stopPropagation) e.stopPropagation();
+      renameHazard(hp);
+    }
+    async function renameHazard(hp) {
+      if (!hp || hp.hazardId) return;
+      const t = await promptHazardTitle(hp, false);
+      if (!t || t === hp.title) return;
+      hp.title = t;
+      surveyDlg.errId = '';
+    }
+    async function addCustomHazard() {
       if (!surveyDlg.form) return;
-      const hp = { id: newHpId(), hazardId: '', title: '', situation: '', measure: '', scope: SURVEY_HP_SCOPE_ALL };
+      const title = await promptHazardTitle(null, true);
+      if (!title) return;
+      const hp = { id: newHpId(), hazardId: '', title, situation: '', measure: '', scope: SURVEY_HP_SCOPE_ALL };
       surveyDlg.form.hazardPoints.push(hp);
-      openHp(hp);                                    // 自定义条目为空，自动展开待填写
+      openHp(hp);                                    // 新条目自动展开，便于填措施
       Vue.nextTick(() => scrollHp(hp.id));
     }
     function libHazard(hp) { return (hp && hp.hazardId) ? (hazardLibrary.value.find(x => x.id === hp.hazardId) || null) : null; }
@@ -817,7 +846,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SX_LOWER_READY, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SX_LOWER_READY, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1516,37 +1545,29 @@ const PlansView = {
 
             <div class="shp-sub">
               <span class="shp-sub-t">4.3 危险点及对应安全措施</span>
-              <span class="shp-sub-s">标题与措施均为必填，保存时逐条校验</span>
             </div>
 
             <div v-if="!surveyDlg.form.hazardPoints.length" class="survey-hp-empty">尚未添加危险点：可从下方搜索危险点库添加，或新增自定义危险点</div>
             <div v-for="(hp, i) in surveyDlg.form.hazardPoints" :key="hp.id" :id="'hp-' + hp.id" class="survey-hp" :class="{ 'hp-err': surveyDlg.errId === hp.id, 'hp-open': !!hpOpen[hp.id] }">
               <div class="survey-hp-bar" @click="toggleHp(hp)">
                 <span class="shp-no">（{{ i + 1 }}）</span>
-                <span class="survey-hp-title" :title="hp.title">{{ hp.title || '（未命名危险点）' }}</span>
+                <span class="survey-hp-title" :class="{ 'shp-title-edit': !hp.hazardId }" :title="hp.hazardId ? hp.title : '点击修改标题'" @click="onTitleClick(hp, $event)">{{ hp.title || '（未命名危险点）' }}</span>
                 <el-select v-if="svGrouped" v-model="hp.scope" size="small" class="shp-scope" @click.stop>
                   <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
                 </el-select>
                 <div class="survey-hp-acts">
-                  <el-button link size="small">{{ hpOpen[hp.id] ? '收起详情' : '展开详情' }}</el-button>
-                  <el-button link size="small" :disabled="i === 0" @click.stop="moveHazard(hp, -1)">上移</el-button>
-                  <el-button link size="small" :disabled="i === surveyDlg.form.hazardPoints.length - 1" @click.stop="moveHazard(hp, 1)">下移</el-button>
-                  <el-button link type="danger" size="small" @click.stop="removeHazard(hp)">删除</el-button>
+                  <el-button size="small">{{ hpOpen[hp.id] ? '收起详情' : '展开详情' }}</el-button>
+                  <el-button size="small" :disabled="i === 0" @click.stop="moveHazard(hp, -1)">上移</el-button>
+                  <el-button size="small" :disabled="i === surveyDlg.form.hazardPoints.length - 1" @click.stop="moveHazard(hp, 1)">下移</el-button>
+                  <el-button size="small" type="danger" plain @click.stop="removeHazard(hp)">删除</el-button>
                 </div>
               </div>
               <div v-show="hpOpen[hp.id]" class="shp-body">
-                <el-form-item label="危险点标题">
-                  <el-input v-model="hp.title" placeholder="请填写危险点标题" />
-                </el-form-item>
-                <el-form-item label="现场具体情况">
-                  <el-input v-model="hp.situation" type="textarea" :rows="2" placeholder="4.3中的现场具体情况（可选）" />
-                </el-form-item>
-                <el-form-item label="对应安全措施">
-                  <el-input v-model="hp.measure" type="textarea" :rows="3" placeholder="请填写对应安全措施" />
-                </el-form-item>
+                <el-input v-model="hp.situation" type="textarea" :rows="2" placeholder="4.3中的现场具体情况（可选）" />
+                <el-input v-model="hp.measure" type="textarea" :rows="3" placeholder="对应安全措施（必填）" />
                 <div class="shp-foot">
                   <span class="shp-src" :class="hp.hazardId ? 'shp-src-lib' : 'shp-src-mine'">{{ hp.hazardId ? '危险点库' : '自定义' }}</span>
-                  <el-button v-if="hp.hazardId" link type="primary" size="small" :disabled="!canRestoreMeasure(hp)" @click="restoreMeasure(hp)">恢复标准措施</el-button>
+                  <el-button v-if="hp.hazardId" size="small" :disabled="!canRestoreMeasure(hp)" @click="restoreMeasure(hp)">恢复标准措施</el-button>
                 </div>
               </div>
             </div>

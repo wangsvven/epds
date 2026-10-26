@@ -942,21 +942,23 @@
   .shp-head + .el-form-item { margin-top:10px; }
   .shp-sub { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin:14px 0 10px; }
   .shp-sub-t { font-size:13.5px; font-weight:600; color:var(--text-1); }
-  .shp-sub-s { font-size:12px; color:var(--text-3); }
   .survey-hp-empty { border:1px dashed var(--line-strong); border-radius:8px; padding:18px; text-align:center; color:var(--text-3); font-size:13px; background:var(--surface-2); }
   /* 危险点条目卡：默认折叠只显示卡头；点卡头或「展开详情」展开 */
   .survey-hp { border:1px solid var(--line); border-radius:8px; margin-bottom:10px; background:var(--surface); overflow:hidden; }
   .survey-hp.hp-err { border-color:var(--danger-line); box-shadow:0 0 0 2px var(--danger-bg); }
   .survey-hp.hp-err .survey-hp-bar { background:var(--danger-bg); }
-  .survey-hp-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:9px 12px; cursor:pointer; user-select:none; }
+  .survey-hp-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px; cursor:pointer; user-select:none; }
   .survey-hp.hp-open .survey-hp-bar { border-bottom:1px dashed var(--line); }
-  .shp-no { font-size:12.5px; font-weight:600; color:var(--brand-text); flex:0 0 auto; font-variant-numeric:tabular-nums; }
+  .shp-no { font-size:13px; font-weight:500; color:var(--text-1); flex:0 0 auto; font-variant-numeric:tabular-nums; }
   .survey-hp-title { font-size:13.5px; font-weight:500; color:var(--text-1); min-width:0; flex:1 1 140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .shp-title-edit { cursor:pointer; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
+  .shp-title-edit:hover { color:var(--brand-text); }
   .shp-scope { width:104px; flex:0 0 auto; }
-  .survey-hp-acts { display:flex; gap:8px; flex-wrap:wrap; margin-left:auto; }
-  .survey-hp-acts .el-button { margin-left:0; font-size:12.5px; }
+  .survey-hp-acts { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+  .survey-hp-acts .el-button { margin-left:0; font-size:12.5px; height:26px; padding:0 10px; }
   .shp-body { padding:12px 12px 0; }
-  .shp-foot { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:0 0 10px; }
+  .shp-body .el-textarea + .el-textarea { margin-top:8px; }
+  .shp-foot { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 0; }
   .shp-src { display:inline-block; padding:0 7px; border-radius:4px; font-size:11px; line-height:17px; font-weight:500; white-space:nowrap; border:1px solid transparent; }
   .shp-src-lib { color:var(--brand-text); background:var(--brand-soft); }
   .shp-src-mine { color:var(--text-3); background:var(--surface-3); border-color:var(--line); }
