@@ -598,59 +598,59 @@ async function listOk(p, token) {
     need(del2.status === 404, '无包删除应 404，实际 ' + del2.status);
     return 'zip→' + pk.id + ' / 7z 替换→' + r2.data.id + '（旧文件已删）/ 400x2 旧包不变 / 删除后 404';
   });
-  await step('plans', '现场勘察记录：创建 → 更新（createdAt 不变）→ 缺措施/缺标题 400 → 计划不存在 404', async () => {
+  await step('plans', '现场勘察记录：创建（分组+小组）→ 重读一致 → 二次更新 createdAt 不变 → 非法 grouping 回落 → groups 超 3 条截断 → 4.3 字段未传保留 → 404', async () => {
     const p = needOk(await api('POST', '/api/workPlans', {
-      token, body: { name: '冒烟勘察计划', planType: '周计划', content: '冒烟工作内容', outageRange: '冒烟停电范围', team: '施工一队' }
+      token, body: { name: '冒烟勘察计划', planType: '周计划', content: '冒烟工作内容', outageRange: '冒烟停电范围', team: '施工一队', surveyNo: '202610900' }
     }), 'plan POST');
     const before = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail');
     need(before.survey === undefined || before.survey === null, '新建计划不应已有 survey');
+    const G1 = { leader: '小张', members: ['小张', '小王'], workLocation: '1 号杆', workTask: '立杆' };
+    const G2 = { leader: '小李', members: ['小李'], workLocation: '2 号杆', workTask: '放线' };
     const body1 = {
-      surveyUnit: '冒烟勘察单位', dualName: '10kV 冒烟线 001 号杆', workTask: '冒烟工作内容', outageScope: '冒烟停电范围',
-      retainedLive: '', envDesc: '冒烟环境描述', opsMeasures: '运维措施', teamMeasures: '班组措施',
-      commonMeasures: '通用措施', ground10: '1 号杆', ground04: '', surveyDate: '2026-10-26', recorder: ' 冒烟记录人 ',
-      hazardPoints: [{ id: 'hp1', hazardId: 'hx1', title: '触电', situation: '现场情况', measure: '验电接地' }]
+      grouping: '分2个小组', surveyUnit: ' 冒烟勘察单位 ',
+      team: '施工一队', surveyNo: '202610900', dualName: '10kV 冒烟线 001 号杆',
+      workLocation: '冒烟工作地点', workTask: '冒烟工作内容',
+      outageScope: '冒烟停电范围', retainedLive: '冒烟带电部位',
+      groups: [G1, G2]
     };
     const s1 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body1 }), 'survey PUT');
     need(s1 && s1.createdAt && s1.updatedAt, '保存结果缺少 createdAt/updatedAt');
-    need(Array.isArray(s1.hazardPoints) && s1.hazardPoints.length === 1, '危险点未保存');
-    need(s1.hazardPoints[0].id === 'hp1' && s1.hazardPoints[0].hazardId === 'hx1', '危险点 id/hazardId 未按传入保留');
-    need(s1.hazardPoints[0].title === '触电' && s1.hazardPoints[0].measure === '验电接地', '危险点字段不符');
-    // 4a 增补的 6 个字段：勘察单位 / 4.3 环境描述 / 4.4 三框 / 记录人
-    const EXTRA = ['surveyUnit', 'envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures', 'recorder'];
-    need(EXTRA.every(k => typeof s1[k] === 'string'), '增补字段未按字符串返回：' + brief(EXTRA.map(k => k + '=' + JSON.stringify(s1[k])))); 
-    need(s1.surveyUnit === '冒烟勘察单位' && s1.envDesc === '冒烟环境描述', '勘察单位/环境描述存取不符');
-    need(s1.opsMeasures === '运维措施' && s1.teamMeasures === '班组措施' && s1.commonMeasures === '通用措施', '4.4 三个措施框存取不符');
-    need(s1.recorder === '冒烟记录人', '记录人应去空白：' + JSON.stringify(s1.recorder));
+    need(s1.grouping === '分2个小组', 'grouping 未保存：' + JSON.stringify(s1.grouping));
+    need(s1.surveyUnit === '冒烟勘察单位', '勘察单位应去空白：' + JSON.stringify(s1.surveyUnit));
+    need(s1.team === '施工一队' && s1.surveyNo === '202610900', '部门/编号未保存（本批起落库）');
+    need(s1.workLocation === '冒烟工作地点' && s1.workTask === '冒烟工作内容', '工作地点/工作内容未保存');
+    need(s1.outageScope === '冒烟停电范围' && s1.retainedLive === '冒烟带电部位', '4.1/4.2 未保存');
+    need(Array.isArray(s1.groups) && s1.groups.length === 2, 'groups 应为 2 条，实际 ' + brief(s1.groups));
+    need(JSON.stringify(s1.groups[0]) === JSON.stringify(G1) && JSON.stringify(s1.groups[1]) === JSON.stringify(G2), 'groups 往返不一致：' + brief(s1.groups));
+    // 本批不预建 4.3 及以后的空字段
+    ['envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder', 'hazardPoints']
+      .forEach(k => need(s1[k] === undefined, '不应预建空字段 ' + k));
     const createdAt = s1.createdAt;
     const d1 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after survey');
-    need(d1.survey && d1.survey.dualName === '10kV 冒烟线 001 号杆', '保存后重读计划拿不到 survey');
-    need(d1.survey.envDesc === '冒烟环境描述' && d1.survey.recorder === '冒烟记录人', '重读计划时增补字段丢失');
-    // 二次 PUT：内容更新，createdAt 不变
-    const body2 = { ...body1, workTask: '改后的工作内容', hazardPoints: [...body1.hazardPoints, { id: 'hp2', hazardId: '', title: '自定义危险点', situation: '', measure: '自定义措施' }] };
+    need(d1.survey && JSON.stringify(d1.survey.groups) === JSON.stringify(s1.groups), '重读计划时 groups 不一致');
+    need(d1.survey.surveyNo === '202610900' && d1.survey.workLocation === '冒烟工作地点', '重读计划时字段丢失');
+    // 二次 PUT：改分组数与内容，createdAt 不变
+    const G3 = { leader: '小赵', members: [], workLocation: '3 号杆', workTask: '紧线' };
+    const body2 = { ...body1, grouping: '分3个小组', surveyUnit: '改后单位', groups: [G1, G2, G3] };
     const s2 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), 'survey PUT 2');
     need(s2.createdAt === createdAt, '二次保存 createdAt 应保持不变（' + createdAt + ' → ' + s2.createdAt + '）');
     need(s2.updatedAt >= createdAt, 'updatedAt 应刷新');
-    need(s2.workTask === '改后的工作内容' && s2.hazardPoints.length === 2, '二次保存内容不符');
-    need(EXTRA.every(k => s1[k] === s2[k]), '二次保存后增补字段发生变化');
-    // 未传的增补字段回落空字符串（白名单缺省 ''）
-    const s2b = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { dualName: '仅双重名称', hazardPoints: [] } }), 'survey PUT 缺省');
-    need(EXTRA.every(k => s2b[k] === ''), '未传的增补字段应为空字符串：' + brief(EXTRA.map(k => k + '=' + JSON.stringify(s2b[k]))));
-    // 回到 body2 继续后面的校验
-    needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), 'survey PUT 复原');
-    // 某条 measure 为空 → 400，且已存记录不被改动
-    const badMsr = { ...body2, hazardPoints: [...body2.hazardPoints, { id: 'hp3', hazardId: '', title: '缺措施的条', situation: '', measure: '   ' }] };
-    const r400 = await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: badMsr });
-    need(r400.status === 400, '缺措施应 400，实际 ' + r400.status + ' ' + brief(r400.data));
-    need(/安全措施/.test(String((r400.data || {}).error)), '400 文案应提到安全措施：' + brief(r400.data));
-    const d3 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after 400');
-    need(d3.survey.hazardPoints.length === 2, '400 后已存记录不应被改动');
-    // 标题为空 → 400
-    const r400b = await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, hazardPoints: [{ id: 'hp4', hazardId: '', title: '  ', situation: '', measure: '措施' }] } });
-    need(r400b.status === 400, '缺标题应 400，实际 ' + r400b.status + ' ' + brief(r400b.data));
+    need(s2.grouping === '分3个小组' && s2.groups.length === 3 && s2.surveyUnit === '改后单位', '二次保存内容不符');
+    // grouping 非法值 → 回落「不分小组」
+    const s3 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, grouping: '分5个小组' } }), 'grouping 非法');
+    need(s3.grouping === '不分小组', '非法 grouping 应回落「不分小组」，实际 ' + JSON.stringify(s3.grouping));
+    // groups 传 4 条 → 只保留前 3 条
+    const s4 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, groups: [G1, G2, G3, { leader: '多余', members: ['多余'], workLocation: '4 号杆', workTask: '多余' }] } }), 'groups 截断');
+    need(s4.groups.length === 3, 'groups 应截断到 3 条，实际 ' + s4.groups.length);
+    need(JSON.stringify(s4.groups) === JSON.stringify([G1, G2, G3]), '截断后应是前 3 条：' + brief(s4.groups));
+    // 4.3 及以后：显式传则更新；未传则沿用已存值（本批界面隐藏但不丢数据）
+    needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, envDesc: '已存环境描述', recorder: '已存记录人' } }), '写入 4.3');
+    const s5 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), '不传 4.3');
+    need(s5.envDesc === '已存环境描述' && s5.recorder === '已存记录人', '未传的 4.3 字段应沿用旧值，实际 ' + brief([s5.envDesc, s5.recorder]));
     // 计划不存在 → 404
     const r404 = await api('PUT', '/api/workPlans/nope_not_exist/survey', { token, body: body1 });
     need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
-    return 'createdAt 稳定 ' + createdAt + '；缺措施/缺标题 400、不存在 404 均正确';
+    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、未传 4.3 字段保留、不存在 404';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

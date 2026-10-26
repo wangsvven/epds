@@ -265,43 +265,74 @@ app.delete('/api/workPlans/:id/package', (req, res) => {
 });
 
 // ---------- 施工资料 · 现场勘察记录（挂在计划记录上；老记录无 survey 字段按 null 处理） ----------
-// 部门（班组）与勘察编号不落库，生成时再从计划读 team / surveyNo
+// 本批（四期第一步）可编辑字段：作业分组 + 勘察单位 + 部门(班组) + 编号 + 双重名称 + 工作地点/内容 + 4.1 + 4.2
 const SURVEY_TEXT_FIELDS = [
-  'surveyUnit', 'dualName', 'workTask', 'outageScope', 'retainedLive',
-  'envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures',
-  'ground10', 'ground04', 'surveyDate', 'recorder'
+  'surveyUnit', 'team', 'surveyNo', 'dualName',
+  'workLocation', 'workTask', 'outageScope', 'retainedLive'
 ];
+// 4.3 及以后：本批界面暂不渲染（下一批开启），但已存数据必须原样保留 —— 请求未带该键时沿用旧值，不预建空字段
+const SURVEY_LOWER_FIELDS = [
+  'envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder'
+];
+const SURVEY_GROUPINGS = ['不分小组', '分2个小组', '分3个小组'];
 function planSurvey(p) {
   const v = p && p.survey;
   return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+}
+// 小组清洗：最多 3 条；leader/workLocation/workTask 字符串，members 字符串数组
+function cleanSurveyGroups(raw) {
+  const arr = Array.isArray(raw) ? raw.slice(0, 3) : [];
+  return arr.map(g => {
+    const o = g || {};
+    return {
+      leader: String(o.leader == null ? '' : o.leader).trim(),
+      members: Array.isArray(o.members) ? o.members.map(m => String(m == null ? '' : m).trim()).filter(Boolean) : [],
+      workLocation: String(o.workLocation == null ? '' : o.workLocation).trim(),
+      workTask: String(o.workTask == null ? '' : o.workTask).trim()
+    };
+  });
 }
 app.put('/api/workPlans/:id/survey', (req, res) => {
   const p = findPlan(req.params.id);
   if (!p) return res.status(404).json({ error: '未找到计划' });
   const b = req.body || {};
-  // 白名单收字段：字符串去空白，危险点逐条清洗
+  const prev = planSurvey(p) || {};
   const survey = {};
+  // 本批文本字段：白名单收，去空白
   SURVEY_TEXT_FIELDS.forEach(k => { survey[k] = String(b[k] == null ? '' : b[k]).trim(); });
-  const raw = Array.isArray(b.hazardPoints) ? b.hazardPoints : [];
-  const points = [];
-  for (let i = 0; i < raw.length; i++) {
-    const h = raw[i] || {};
-    const title = String(h.title == null ? '' : h.title).trim();
-    const measure = String(h.measure == null ? '' : h.measure).trim();
-    if (!title) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点缺少标题' });
-    if (!measure) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点「' + title + '」缺少对应安全措施' });
-    points.push({
-      id: h.id ? String(h.id) : genId('hp'),
-      hazardId: h.hazardId ? String(h.hazardId) : '',
-      title,
-      situation: String(h.situation == null ? '' : h.situation).trim(),
-      measure
-    });
+  // 4.3 及以后：只有请求显式带了才更新，否则沿用旧值（旧记录没有该键就不建）
+  SURVEY_LOWER_FIELDS.forEach(k => {
+    if (b[k] !== undefined) survey[k] = String(b[k] == null ? '' : b[k]).trim();
+    else if (prev[k] !== undefined) survey[k] = String(prev[k] == null ? '' : prev[k]);
+  });
+  // 作业分组：只接受三个枚举值，非法回落「不分小组」
+  const g = String(b.grouping == null ? '' : b.grouping).trim();
+  survey.grouping = SURVEY_GROUPINGS.indexOf(g) > -1 ? g : '不分小组';
+  survey.groups = cleanSurveyGroups(b.groups);
+  // 危险点（本批界面不渲染）：带了才清洗校验，没带就原样保留
+  if (b.hazardPoints !== undefined) {
+    const raw = Array.isArray(b.hazardPoints) ? b.hazardPoints : [];
+    const points = [];
+    for (let i = 0; i < raw.length; i++) {
+      const h = raw[i] || {};
+      const title = String(h.title == null ? '' : h.title).trim();
+      const measure = String(h.measure == null ? '' : h.measure).trim();
+      if (!title) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点缺少标题' });
+      if (!measure) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点「' + title + '」缺少对应安全措施' });
+      points.push({
+        id: h.id ? String(h.id) : genId('hp'),
+        hazardId: h.hazardId ? String(h.hazardId) : '',
+        title,
+        situation: String(h.situation == null ? '' : h.situation).trim(),
+        measure
+      });
+    }
+    survey.hazardPoints = points;
+  } else if (prev.hazardPoints !== undefined) {
+    survey.hazardPoints = prev.hazardPoints;
   }
-  survey.hazardPoints = points;
   // 首次创建保留原 createdAt；更新只刷新 updatedAt
-  const prev = planSurvey(p);
-  survey.createdAt = (prev && prev.createdAt) || nowISO();
+  survey.createdAt = prev.createdAt || nowISO();
   survey.updatedAt = nowISO();
   p.survey = survey;
   saveDB();
