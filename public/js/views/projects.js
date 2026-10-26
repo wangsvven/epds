@@ -321,6 +321,33 @@ const ProjectsView = {
       const p = n => String(n).padStart(2, '0');
       return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
     }
+    // ---- 项目详情 · 周计划表格展示（空值统一 '-'，时间按墙上时间直取，不做时区换算） ----
+    function planText(v) { return (v === undefined || v === null || v === '') ? '-' : v; }
+    function pdt(s) {
+      if (!s) return '';
+      const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+      if (m) return m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5];
+      const t = fmtDT(s);
+      return t === '-' ? '' : t;
+    }
+    // 计划时间：同年省年份、同日再省日期，中间用 – 连成一个区间
+    function planRange(row) {
+      const s = pdt(row && row.startDate), e = pdt(row && row.endDate);
+      if (!s && !e) return '-';
+      if (!s) return e;
+      if (!e) return s;
+      const [sd, st] = s.split(' '), [ed, et] = e.split(' ');
+      if (sd === ed) return sd + ' ' + st + ' – ' + et;
+      if (sd.slice(0, 4) === ed.slice(0, 4)) return s + ' – ' + ed.slice(5) + ' ' + et;
+      return s + ' – ' + e;
+    }
+    function planStatusType(s) {
+      if (s === '已执行') return 'success';
+      if (s === '已取消') return 'danger';
+      if (s === '已结算') return 'warning';
+      if (s === '已归档') return 'info';
+      return 'primary';
+    }
     // ---- 详情页材料台账汇总（材料台账/周计划模块完成前，按项目进度推导的占位数据） ----
     const LEDGER_CONF = [['pole', '电杆', '根'], ['cable', '导线', '千米'], ['device', '设备', '台'], ['fitting', '金具及铁附件', '件']];
     // 包配色（与项目列表局计划进度色一致：深蓝=电杆、浅蓝=导线、灰=设备；琥珀=金具及铁附件）
@@ -345,6 +372,7 @@ const ProjectsView = {
       detail, showDetail, backToList, completeProject, removeProject,
       projFileInput, projFiles, triggerProjUpload, onProjUpload, delProjFile, packProjDownload, fmtDT,
       projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, pkgColor, statusTagType,
+      planText, planRange, planStatusType,
       projInfoFields, projProgressChips, projProgressHasData
     };
   },
@@ -546,13 +574,28 @@ const ProjectsView = {
       </div>
       <div>
         <div style="font-weight:600;font-size:14px;margin-bottom:8px">周计划（{{ projPlans.filter(p => p.planType === '周计划').length }}）</div>
-        <el-table v-if="projPlans.filter(p => p.planType === '周计划').length" :data="projPlans.filter(p => p.planType === '周计划')" border size="small">
-          <el-table-column prop="name" label="计划名称" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="team" label="作业班组" width="120" />
-          <el-table-column prop="leader" label="班组长" width="100" />
-          <el-table-column prop="startDate" label="开始" width="120" />
-          <el-table-column prop="endDate" label="结束" width="120" />
-          <el-table-column prop="status" label="状态" width="90" />
+        <el-table v-if="projPlans.filter(p => p.planType === '周计划').length" :data="projPlans.filter(p => p.planType === '周计划')" border size="small" class="proj-plan-table">
+          <el-table-column prop="team" label="作业班组" width="104" show-overflow-tooltip :formatter="(r,c,v)=>planText(v)" />
+          <el-table-column label="关联项目/子项目" min-width="206">
+            <template #default="{ row }">
+              <div class="pp-assoc">
+                <span class="pp-assoc-proj" :title="row.project || ''">{{ planText(row.project) }}</span>
+                <span v-if="row.subProject" class="pp-assoc-sub" :title="row.subProject">{{ row.subProject }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="name" label="计划名称" min-width="200" class-name="pp-clamp2" />
+          <el-table-column label="计划时间" width="228" class-name="ppt-nowrap">
+            <template #default="{ row }">{{ planRange(row) }}</template>
+          </el-table-column>
+          <el-table-column prop="content" label="作业内容" min-width="168" class-name="pp-clamp2" :formatter="(r,c,v)=>planText(v)" />
+          <el-table-column prop="workTicketNo" label="工作票编号" width="132" class-name="ppt-nowrap" :formatter="(r,c,v)=>planText(v)" />
+          <el-table-column prop="status" label="状态" width="92" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.status" :type="planStatusType(row.status)" size="small" effect="plain">{{ row.status }}</el-tag>
+              <span v-else style="color:var(--text-3)">-</span>
+            </template>
+          </el-table-column>
         </el-table>
         <div v-else style="color:var(--text-3);font-size:13px">暂无与本项目关联的周计划，可在「计划管理」-「周计划管理」中新增计划并关联本项目。</div>
       </div>
