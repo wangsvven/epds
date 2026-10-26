@@ -18,17 +18,12 @@ const PlansView = {
     const RISK_CATEGORIES = ['有限空间', '机械伤害', '起重伤害', '触电', '高处坠落', '倒塔/坍塌', '跨越风险', '物体打击', '动火作业'];
     const riskFactors = ref(RISK_CATEGORIES.slice());   // 下拉选项：9 个风险大类
     const hazardLibrary = ref([]);                      // 危险点库全部明细（含 category 字段）
-    const substations = ref([]);                        // 属地供电所（全局设置）
     const units = ref([]);                              // 单位维护（分包/兄弟/监理/抄送）
     function unitsByType(type) { return units.value.filter(u => u.type === type); }
     async function loadHazards() {
       try {
         const d = await api.get('/api/documents');
         hazardLibrary.value = ((d && d.hazardLibrary) || []).slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
-      } catch (e) {}
-      try {
-        const r = await api.get('/api/substations');
-        substations.value = (Array.isArray(r) ? r : (r.data || [])).slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
       } catch (e) {}
       try {
         const r = await api.get('/api/units');
@@ -66,7 +61,8 @@ const PlansView = {
     const tab = ref('week');
     const list = ref([]);
     const loading = ref(false);
-    const projects = ref([]); const projectsFull = ref([]); const teams = ref([]); const workers = ref([]);
+    const projects = ref([]); const projectsFull = ref([]); const workers = ref([]);
+    const teams = ref([]);                              // 班组管理（施工班组）→ 作业班组下拉源
     const filters = reactive({ startDate: '', endDate: '', name: '', content: '', noProject: false, team: '', leader: '', ticketType: '', projectScope: [] });
     const page = ref(1); const pageSize = ref(20);
     const dlg = reactive({ visible: false, editingId: null, form: null, ticketNoDirty: false });
@@ -78,7 +74,7 @@ const PlansView = {
       address: '', station: '', machine: '是', riskLevel: '四级', controlMeasures: '',
       gridRisk: '无', riskFactors: [], majorRisk: '无',
       buildCity: '', buildCounty: '', execCity: '', execCounty: '',
-      substation: '', subcontractors: [], supervisor: '', ccUnits: [],
+      team: '', subcontractors: [], supervisor: '', ccUnits: [],
       staffText: '', teamLeader: '', staffCount: '', highStaff: '', gasTester: '', guardian: '',
       chargePerson: '', chargePersonPhone: '', arrivalPersons: '', safetyPatrol: '',
       wlPole: '', wlLine1035: '', wlCable: '', wlRing: '', wlVacuum: '', wlTransformer: '', wlLine04: '',
@@ -99,7 +95,11 @@ const PlansView = {
         projectsFull.value = arr;
         projects.value = arr.map(p => p.name || p.projectName).filter(Boolean);
       } catch (e) {}
-      try { const r = await api.get('/api/teams'); teams.value = (Array.isArray(r) ? r : (r.data || [])).map(t => t.name).filter(Boolean); } catch (e) {}
+      try {
+        const r = await api.get('/api/teams');
+        const arr = Array.isArray(r) ? r : (r.data || []);
+        teams.value = arr.slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0)).map(t => t.name).filter(Boolean);
+      } catch (e) {}
       try { const r = await api.get('/api/workers'); const arr = Array.isArray(r) ? r : (r.data || []); workersFull.value = arr; workers.value = arr.map(w => w.name).filter(Boolean); } catch (e) {}
       try { const r = await api.get('/api/contacts'); contacts.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
       await loadHazards();
@@ -274,6 +274,7 @@ const PlansView = {
     let unitsLoaded = false;
     async function openAdd() {
       if (!unitsLoaded) { await loadHazards(); unitsLoaded = true; }
+      if (!teams.value.length) await loadMeta();   // 新实例/刚维护完班组后打开，也能取到最新施工班组
       dlg.editingId = null; dlg.form = emptyForm();
       // 计划类型跟随当前所在 tab：月计划管理 tab 新增存为月计划，其余存周计划
       dlg.form.planType = tab.value === 'month' ? '月计划' : '周计划';
@@ -297,7 +298,7 @@ const PlansView = {
       if (!dlg.form.controlMeasures && (dlg.form.riskFactors || []).length) dlg.form.controlMeasures = genMeasures(dlg.form.riskFactors);
       // 字段规范化（老数据补齐）
       ['subcontractors', 'ccUnits', 'chargePersons'].forEach(k => { if (!Array.isArray(dlg.form[k])) dlg.form[k] = []; });
-      ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
+      ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
     }
     async function submit() {
       const f = dlg.form;
@@ -307,7 +308,7 @@ const PlansView = {
       if (!String(f.name || '').trim()) { ElementPlus.ElMessage.warning('请填写作业计划名称'); return; }
       if (!f.startDate || !f.endDate) { ElementPlus.ElMessage.warning('请选择计划开始/结束日期'); return; }
       if (f.endDate < f.startDate) { ElementPlus.ElMessage.warning('计划结束日期不能早于开始日期'); return; }
-      if (!f.substation) { ElementPlus.ElMessage.warning('请选择作业班组（属地供电所）'); return; }
+      if (!f.team) { ElementPlus.ElMessage.warning('请选择作业班组'); return; }
       if (!String(f.staffText || '').trim()) { ElementPlus.ElMessage.warning('请选择作业实施（施工）人员'); return; }
       if (!f.teamLeader) { ElementPlus.ElMessage.warning('请选择班组长'); return; }
       // 当日计划工作量：数字格式校验
@@ -319,11 +320,9 @@ const PlansView = {
       }
       try {
         const body = { ...f, name: String(f.name).trim() };
-        // 施工班组首行同步到列表的作业班组/班组长展示字段
-        if (Array.isArray(f.teams) && f.teams.length) {
-          if (f.teams[0].team) body.team = f.teams[0].team;
-          if (f.teams[0].leader) body.leader = f.teams[0].leader;
-        }
+        // 作业班组 / 班组长同步到列表展示字段（列表、筛选、日历、导出均读 team / leader）
+        if (f.team) body.team = f.team;
+        if (f.teamLeader) body.leader = f.teamLeader;
         if (Array.isArray(f.chargePersons) && f.chargePersons.length) body.chargePerson = f.chargePersons[0];
         if (dlg.editingId) await api.put('/api/workPlans/' + dlg.editingId, body);
         else await api.post('/api/workPlans', body);
@@ -423,7 +422,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, substations, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -722,10 +721,11 @@ const PlansView = {
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
-            <el-form-item label="作业班组（属地供电所）" required>
-              <el-select v-model="dlg.form.substation" placeholder="请选择" filterable clearable style="width:100%">
-                <el-option v-for="s in substations" :key="s.id || s.name" :label="s.name" :value="s.name" />
+            <el-form-item label="作业班组" required>
+              <el-select v-model="dlg.form.team" placeholder="请选择施工班组" filterable clearable style="width:100%">
+                <el-option v-for="t in teams" :key="t" :label="t" :value="t" />
               </el-select>
+              <div v-if="!teams.length" style="color:var(--text-3);font-size:12px;line-height:1.6">暂无施工班组，请先在「设置 → 班组管理」新增</div>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
