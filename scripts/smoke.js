@@ -532,6 +532,72 @@ async function listOk(p, token) {
     need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
     return 'id=' + dw.id + ' size=' + dw.size + ' 删除后 404';
   });
+  await step('plans', '施工资料压缩包：上传 → 替换 → 校验拒绝 → 下载 → 删除（单包 ≤1MB）', async () => {
+    const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟压缩包计划', planType: '周计划' } }), 'plan POST');
+    need(p && p.id, '响应缺少 id');
+    const up = async (buf, filename) => {
+      const fd = new FormData();
+      fd.append('file', new Blob([buf]), filename);
+      const res = await fetch(base + '/api/workPlans/' + p.id + '/package', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd, signal: AbortSignal.timeout(10000)
+      });
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      return { status: res.status, data };
+    };
+    // 1) zip 上传：记录形状
+    const zip1 = Buffer.from('PK\u0003\u0004smoke-zip-one');
+    const r1 = await up(zip1, '冒烟资料包.zip');
+    need(r1.status === 200 && r1.data && r1.data.id, 'zip 上传失败：' + r1.status + ' ' + brief(r1.data));
+    const pk = r1.data;
+    need(/^pk/.test(pk.id), 'id 前缀应为 pk，实际 ' + brief(pk.id));
+    need(pk.category === '资料压缩包', 'category 不符：' + brief(pk.category));
+    need(pk.name === '冒烟资料包.zip', 'name 不符：' + brief(pk.name));
+    need(pk.size === zip1.length, 'size 应为 ' + zip1.length + '，实际 ' + brief(pk.size));
+    need(String(pk.path).startsWith('uploads/plans/' + p.id + '/'), 'path 不符：' + brief(pk.path));
+    need(!!pk.uploadedAt, '缺少 uploadedAt');
+    const abs1 = path.join(TMP, 'data', pk.path);
+    need(fs.existsSync(abs1), '首次上传的文件应落盘：' + pk.path);
+    // 2) 再传 .7Z（大写后缀也要认）→ 记录被替换、旧文件删除
+    const seven = Buffer.from('7z\u00bc\u00af\u0027\u001csmoke-seven');
+    const r2 = await up(seven, '冒烟资料包.7Z');
+    need(r2.status === 200 && r2.data && r2.data.id, '7z 上传失败：' + r2.status + ' ' + brief(r2.data));
+    need(r2.data.id !== pk.id, '替换后应返回新记录');
+    need(r2.data.name === '冒烟资料包.7Z', '替换后 name 不符：' + brief(r2.data.name));
+    need(!fs.existsSync(abs1), '替换后旧包文件应已删除');
+    const abs2 = path.join(TMP, 'data', r2.data.path);
+    need(fs.existsSync(abs2), '新包文件应存在：' + r2.data.path);
+    const d2 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after replace');
+    need(d2.materialPackage && d2.materialPackage.id === r2.data.id, '记录未指向新包');
+    // 3) 下载拿到新文件字节
+    const dl = await fetch(base + '/api/workPlans/' + p.id + '/package/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(dl.status === 200, '下载期望 200，实际 ' + dl.status);
+    const got = Buffer.from(await dl.arrayBuffer());
+    need(got.length === seven.length && got.equals(seven), '下载内容与上传不一致');
+    // 4) 后缀不合规 → 400，旧包记录与文件逐字节不变
+    const r3 = await up(Buffer.from('not a package'), '说明.txt');
+    need(r3.status === 400, '.txt 期望 400，实际 ' + r3.status + ' ' + brief(r3.data));
+    const d3 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after txt');
+    need(d3.materialPackage && d3.materialPackage.id === r2.data.id, '.txt 被拒后记录被改动');
+    need(fs.existsSync(abs2) && fs.readFileSync(abs2).equals(seven), '.txt 被拒后旧包文件变了');
+    // 5) 超过 1MB → 400，旧包同样不变
+    const big = Buffer.alloc(1024 * 1024 + 1, 0x41);
+    const r4 = await up(big, '超大包.zip');
+    need(r4.status === 400, '>1MB 期望 400，实际 ' + r4.status + ' ' + brief(r4.data));
+    const d4 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after big');
+    need(d4.materialPackage && d4.materialPackage.id === r2.data.id, '>1MB 被拒后记录被改动');
+    need(fs.existsSync(abs2) && fs.readFileSync(abs2).equals(seven), '>1MB 被拒后旧包文件变了');
+    // 6) 删除 → 记录置 null、文件删除、下载 404；无包再删 404
+    needOk(await api('DELETE', '/api/workPlans/' + p.id + '/package', { token }), 'package DELETE');
+    const d5 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after delete');
+    need(d5.materialPackage === null, '删除后应置 null，实际 ' + brief(d5.materialPackage));
+    need(!fs.existsSync(abs2), '删除后磁盘文件应已移除');
+    const dl2 = await fetch(base + '/api/workPlans/' + p.id + '/package/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
+    const del2 = await api('DELETE', '/api/workPlans/' + p.id + '/package', { token });
+    need(del2.status === 404, '无包删除应 404，实际 ' + del2.status);
+    return 'zip→' + pk.id + ' / 7z 替换→' + r2.data.id + '（旧文件已删）/ 400x2 旧包不变 / 删除后 404';
+  });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {
       token, body: { team: '冒烟班组', direction: '借出', reason: '冒烟测试', people: 2, status: '待审批' }

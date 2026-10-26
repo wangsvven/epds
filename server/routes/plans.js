@@ -179,7 +179,92 @@ app.delete('/api/workPlans/:id/drawings/:fileId', (req, res) => {
   res.json({ ok: true });
 });
 
-// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings 注册）
+// ---------- 施工资料 · 资料压缩包（单包替换语义；老记录无该字段按 null 处理） ----------
+// 与图纸共用落盘目录 uploads/plans/<计划id>/ 与「时间戳_安全化原名」命名
+const PACKAGE_EXTS = ['.zip', '.7z', '.rar'];
+const PACKAGE_MAX = 1024 * 1024; // 共享 multer 上限是 20MB，本接口自己卡 1MB
+function planPackage(p) {
+  const v = p && p.materialPackage;
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+}
+function pkgExt(name) {
+  const n = String(name || '');
+  const i = n.lastIndexOf('.');
+  return i < 0 ? '' : n.slice(i).toLowerCase();
+}
+// 上传即替换：校验 → 写新文件 → 换记录并落盘 → 最后才删旧文件；任何一步失败旧包原样可用
+app.post('/api/workPlans/:id/package', upload.single('file'), (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  if (!req.file) return res.status(400).json({ error: '未收到文件' });
+  const name = req.file.originalname || '';
+  if (!PACKAGE_EXTS.includes(pkgExt(name))) {
+    return res.status(400).json({ error: '仅支持 ZIP、7z、RAR 格式的压缩包' });
+  }
+  if (req.file.size > PACKAGE_MAX) {
+    return res.status(400).json({ error: '压缩包大小不能超过 1MB' });
+  }
+  // 校验全部通过后才允许动磁盘与记录
+  const prev = planPackage(p);
+  const oldPkg = prev ? { ...prev } : null;
+  const dir = path.join(ROOT, 'data', 'uploads', 'plans', p.id);
+  const diskName = Date.now() + '_' + planFileSafeName(name);
+  const abs = path.join(dir, diskName);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(abs, req.file.buffer);
+  } catch (e) {
+    return res.status(500).json({ error: '保存压缩包失败：' + e.message });
+  }
+  const item = {
+    id: genId('pk'),
+    category: '资料压缩包',
+    name,
+    size: req.file.size,
+    path: 'uploads/plans/' + p.id + '/' + diskName,
+    uploadedAt: nowISO()
+  };
+  try {
+    p.materialPackage = item;
+    saveDB();
+  } catch (e) {
+    // 记录没落盘：恢复旧记录并清掉刚写的新文件，旧包保持可用
+    if (oldPkg) p.materialPackage = oldPkg; else delete p.materialPackage;
+    try { fs.unlinkSync(abs); } catch (e2) {}
+    return res.status(500).json({ error: '保存压缩包记录失败：' + e.message });
+  }
+  // 新记录已落盘，才删旧文件（只删本模块目录下的，失败静默）
+  if (oldPkg && typeof oldPkg.path === 'string' && oldPkg.path !== item.path && oldPkg.path.startsWith('uploads/plans/')) {
+    try { fs.unlinkSync(path.join(ROOT, 'data', oldPkg.path)); } catch (e) {}
+  }
+  res.json(item);
+});
+// 下载：附件形式（压缩包不做 inline 预览）
+app.get('/api/workPlans/:id/package/download', (req, res) => {
+  const p = findPlan(req.params.id);
+  // 只读接口：不初始化、不改记录
+  const f = planPackage(p);
+  const fp = f && path.join(ROOT, 'data', f.path);
+  if (!f || !fs.existsSync(fp)) return res.status(404).json({ error: '文件不存在' });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(f.name) + '"');
+  fs.createReadStream(fp).pipe(res);
+});
+app.delete('/api/workPlans/:id/package', (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  const f = planPackage(p);
+  if (!f) return res.status(404).json({ error: '暂无资料压缩包' });
+  p.materialPackage = null;
+  saveDB();
+  // 记录已置空，再删磁盘文件（仅本模块目录，失败静默）
+  if (typeof f.path === 'string' && f.path.startsWith('uploads/plans/')) {
+    try { fs.unlinkSync(path.join(ROOT, 'data', f.path)); } catch (e) {}
+  }
+  res.json({ ok: true });
+});
+
+// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings /:id/package 注册）
 ['plans', 'borrowWorks', 'workPlans'].forEach(c => {
   crud(c, c, { biz: true, soft: true });
 });
