@@ -598,7 +598,7 @@ async function listOk(p, token) {
     need(del2.status === 404, '无包删除应 404，实际 ' + del2.status);
     return 'zip→' + pk.id + ' / 7z 替换→' + r2.data.id + '（旧文件已删）/ 400x2 旧包不变 / 删除后 404';
   });
-  await step('plans', '现场勘察记录：创建（分组+小组）→ 重读一致 → 二次更新 createdAt 不变 → 非法 grouping 回落 → groups 超 3 条截断 → 4.3 字段未传保留 → 404', async () => {
+  await step('plans', '现场勘察记录：分组/小组往返 → createdAt 稳定 → 非法 grouping 回落 → groups 截断 → 4.3 环境描述+危险点往返（scope 清洗/必填 400/50 条上限）→ 404', async () => {
     const p = needOk(await api('POST', '/api/workPlans', {
       token, body: { name: '冒烟勘察计划', planType: '周计划', content: '冒烟工作内容', outageRange: '冒烟停电范围', team: '施工一队', surveyNo: '202610900' }
     }), 'plan POST');
@@ -622,9 +622,10 @@ async function listOk(p, token) {
     need(s1.outageScope === '冒烟停电范围' && s1.retainedLive === '冒烟带电部位', '4.1/4.2 未保存');
     need(Array.isArray(s1.groups) && s1.groups.length === 2, 'groups 应为 2 条，实际 ' + brief(s1.groups));
     need(JSON.stringify(s1.groups[0]) === JSON.stringify(G1) && JSON.stringify(s1.groups[1]) === JSON.stringify(G2), 'groups 往返不一致：' + brief(s1.groups));
-    // 本批不预建 4.3 及以后的空字段
-    ['envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder', 'hazardPoints']
+    // 本批不预建 4.4 及以后的空字段（hazardPoints 未传也不建）
+    ['opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder', 'hazardPoints']
       .forEach(k => need(s1[k] === undefined, '不应预建空字段 ' + k));
+    need(s1.envDesc === '', 'envDesc 属白名单字段，未传应为空串，实际 ' + JSON.stringify(s1.envDesc));
     const createdAt = s1.createdAt;
     const d1 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after survey');
     need(d1.survey && JSON.stringify(d1.survey.groups) === JSON.stringify(s1.groups), '重读计划时 groups 不一致');
@@ -643,14 +644,53 @@ async function listOk(p, token) {
     const s4 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, groups: [G1, G2, G3, { leader: '多余', members: ['多余'], workLocation: '4 号杆', workTask: '多余' }] } }), 'groups 截断');
     need(s4.groups.length === 3, 'groups 应截断到 3 条，实际 ' + s4.groups.length);
     need(JSON.stringify(s4.groups) === JSON.stringify([G1, G2, G3]), '截断后应是前 3 条：' + brief(s4.groups));
-    // 4.3 及以后：显式传则更新；未传则沿用已存值（本批界面隐藏但不丢数据）
+    // 4.4 及以后：显式传则更新；未传则沿用已存值（界面未开启，数据不能丢）
     needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, envDesc: '已存环境描述', recorder: '已存记录人' } }), '写入 4.3');
     const s5 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), '不传 4.3');
-    need(s5.envDesc === '已存环境描述' && s5.recorder === '已存记录人', '未传的 4.3 字段应沿用旧值，实际 ' + brief([s5.envDesc, s5.recorder]));
+    need(s5.envDesc === '', 'envDesc 未传应按空串处理（白名单字段），实际 ' + JSON.stringify(s5.envDesc));
+    need(s5.recorder === '已存记录人', '未传的 4.4 字段应沿用旧值，实际 ' + brief(s5.recorder));
+    // 4.3 危险点条目组：envDesc + hazardPoints 往返一致（去空白、scope 原样）
+    const HP1 = { id: 'hz_a', hazardId: 'lib_1', title: ' 高空坠落风险 ', situation: ' 杆上作业 ', measure: ' 正确使用安全带 ', scope: '2小组' };
+    const HP2 = { id: 'hz_b', hazardId: '', title: '自定义危险点', situation: '', measure: '自定义措施', scope: '全组' };
+    const s6 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
+      token, body: { ...body2, envDesc: ' 现场有跨越，邻近 10kV 线路\n需停电 ', hazardPoints: [HP1, HP2] }
+    }), '写入 4.3 危险点');
+    need(s6.envDesc === '现场有跨越，邻近 10kV 线路\n需停电', 'envDesc 应去首尾空白并保留换行：' + JSON.stringify(s6.envDesc));
+    need(Array.isArray(s6.hazardPoints) && s6.hazardPoints.length === 2, 'hazardPoints 应为 2 条，实际 ' + brief(s6.hazardPoints));
+    need(s6.hazardPoints[0].title === '高空坠落风险' && s6.hazardPoints[0].measure === '正确使用安全带' && s6.hazardPoints[0].situation === '杆上作业',
+      '危险点字段未去空白：' + brief(s6.hazardPoints[0]));
+    need(s6.hazardPoints[0].hazardId === 'lib_1' && s6.hazardPoints[0].id === 'hz_a', '危险点 id/hazardId 未原样保留：' + brief(s6.hazardPoints[0]));
+    need(s6.hazardPoints[0].scope === '2小组' && s6.hazardPoints[1].scope === '全组', 'scope 往返不一致：' + brief(s6.hazardPoints.map(h => h.scope)));
+    // 重读计划：危险点组原样返回
+    const d6 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after 4.3');
+    need(JSON.stringify(d6.survey.hazardPoints) === JSON.stringify(s6.hazardPoints), '重读计划时危险点不一致：' + brief(d6.survey.hazardPoints));
+    // 非法 scope → 回落「全组」；缺 id → 自动生成 hz 前缀
+    const s7 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
+      token, body: { ...body2, hazardPoints: [{ title: 'A', measure: 'B', scope: '9小组' }] }
+    }), '非法 scope');
+    need(s7.hazardPoints[0].scope === '全组', '非法 scope 应回落「全组」，实际 ' + JSON.stringify(s7.hazardPoints[0].scope));
+    need(/^hz/.test(String(s7.hazardPoints[0].id)), '缺 id 时应自动生成 hz 前缀 id，实际 ' + s7.hazardPoints[0].id);
+    // 措施为空 → 400，文案指出第几条
+    const badM = await api('PUT', '/api/workPlans/' + p.id + '/survey', {
+      token, body: { ...body2, hazardPoints: [{ title: 'A', measure: 'B' }, { title: 'C', measure: '  ' }] }
+    });
+    need(badM.status === 400, '措施为空应 400，实际 ' + badM.status);
+    need(String((badM.data && badM.data.error) || '').indexOf('第 2 条') > -1, '400 文案应指出第 2 条，实际 ' + brief(badM.data));
+    // 标题为空 → 400
+    const badT = await api('PUT', '/api/workPlans/' + p.id + '/survey', {
+      token, body: { ...body2, hazardPoints: [{ title: '', measure: 'B' }] }
+    });
+    need(badT.status === 400, '标题为空应 400，实际 ' + badT.status);
+    need(String((badT.data && badT.data.error) || '').indexOf('第 1 条') > -1, '400 文案应指出第 1 条，实际 ' + brief(badT.data));
+    // 51 条 → 截断到 50 条
+    const many = Array.from({ length: 51 }, (_, i) => ({ title: '危险点' + i, measure: '措施' + i }));
+    const s8 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, hazardPoints: many } }), '超 50 条');
+    need(s8.hazardPoints.length === 50, 'hazardPoints 应截断到 50 条，实际 ' + s8.hazardPoints.length);
+    need(s8.hazardPoints[49].title === '危险点49', '截断后应是前 50 条，第 50 条为 ' + s8.hazardPoints[49].title);
     // 计划不存在 → 404
     const r404 = await api('PUT', '/api/workPlans/nope_not_exist/survey', { token, body: body1 });
     need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
-    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、未传 4.3 字段保留、不存在 404';
+    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+2 条危险点往返一致、非法 scope 回落、必填 400、超 50 条截断';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

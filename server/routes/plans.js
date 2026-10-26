@@ -265,15 +265,18 @@ app.delete('/api/workPlans/:id/package', (req, res) => {
 });
 
 // ---------- 施工资料 · 现场勘察记录（挂在计划记录上；老记录无 survey 字段按 null 处理） ----------
-// 本批（四期第一步）可编辑字段：作业分组 + 勘察单位 + 部门(班组) + 编号 + 双重名称 + 工作地点/内容 + 4.1 + 4.2
+// 可编辑文本字段：作业分组 + 勘察单位 + 部门(班组) + 编号 + 双重名称 + 工作地点/内容 + 4.1 + 4.2 + 4.3 环境描述
 const SURVEY_TEXT_FIELDS = [
   'surveyUnit', 'team', 'surveyNo', 'dualName',
-  'workLocation', 'workTask', 'outageScope', 'retainedLive'
+  'workLocation', 'workTask', 'outageScope', 'retainedLive', 'envDesc'
 ];
-// 4.3 及以后：本批界面暂不渲染（下一批开启），但已存数据必须原样保留 —— 请求未带该键时沿用旧值，不预建空字段
+// 4.4 及以后：本批界面暂不渲染（下一批开启），但已存数据必须原样保留 —— 请求未带该键时沿用旧值，不预建空字段
 const SURVEY_LOWER_FIELDS = [
-  'envDesc', 'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder'
+  'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder'
 ];
+// 4.3 危险点条目：归属只有四种取值，非法回落「全组」；条数上限 50
+const SURVEY_HP_SCOPES = ['全组', '1小组', '2小组', '3小组'];
+const SURVEY_HP_MAX = 50;
 const SURVEY_GROUPINGS = ['不分小组', '分2个小组', '分3个小组'];
 function planSurvey(p) {
   const v = p && p.survey;
@@ -309,9 +312,9 @@ app.put('/api/workPlans/:id/survey', (req, res) => {
   const g = String(b.grouping == null ? '' : b.grouping).trim();
   survey.grouping = SURVEY_GROUPINGS.indexOf(g) > -1 ? g : '不分小组';
   survey.groups = cleanSurveyGroups(b.groups);
-  // 危险点（本批界面不渲染）：带了才清洗校验，没带就原样保留
+  // 危险点条目组（4.3）：带了才清洗校验，没带就原样保留
   if (b.hazardPoints !== undefined) {
-    const raw = Array.isArray(b.hazardPoints) ? b.hazardPoints : [];
+    const raw = Array.isArray(b.hazardPoints) ? b.hazardPoints.slice(0, SURVEY_HP_MAX) : [];
     const points = [];
     for (let i = 0; i < raw.length; i++) {
       const h = raw[i] || {};
@@ -319,12 +322,14 @@ app.put('/api/workPlans/:id/survey', (req, res) => {
       const measure = String(h.measure == null ? '' : h.measure).trim();
       if (!title) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点缺少标题' });
       if (!measure) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点「' + title + '」缺少对应安全措施' });
+      const sc = String(h.scope == null ? '' : h.scope).trim();
       points.push({
-        id: h.id ? String(h.id) : genId('hp'),
+        id: h.id ? String(h.id) : genId('hz'),
         hazardId: h.hazardId ? String(h.hazardId) : '',
         title,
         situation: String(h.situation == null ? '' : h.situation).trim(),
-        measure
+        measure,
+        scope: SURVEY_HP_SCOPES.indexOf(sc) > -1 ? sc : '全组'
       });
     }
     survey.hazardPoints = points;

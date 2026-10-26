@@ -375,12 +375,22 @@ const PlansView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message || '删除失败'); }
     }
     // ---- 现场勘察记录：四期第一步（作业分组 + 勘察单位/部门/编号/双重名称 + 3.工作任务 + 4.1 + 4.2） ----
-    // 4.3 及以后（环境描述 / 危险点组 / 4.4 / 接地线 / 勘察日期 / 记录人）下一批开启：
+    // ---- 四期第二步：4.3 环境描述 + 危险点条目组（envDesc / hazardPoints） ----
+    // 4.4 及以后（两组措施 / 接地线 / 勘察日期 / 记录人 / 生成）下一批开启：
     // 数据与逻辑保留在 survey 上，本批界面不渲染（SX_LOWER_READY = false）。
     const SX_LOWER_READY = false;
     const SURVEY_GROUPING_OPTS = ['不分小组', '分2个小组', '分3个小组'];
+    // 4.3 预置的 7 条标准危险点（按参考系统顺序；逐条按标题精确匹配危险点库，未命中跳过、不编造）
+    const SURVEY_STD_HAZARDS = [
+      '高空坠落风险', '倒杆伤害风险', '物体打击风险', '超出作业范围误登杆风险',
+      '工器具是否合格风险', '触电伤害风险', '施工区域外来人员进入风险'
+    ];
+    const SURVEY_HP_SCOPE_ALL = '全组';
     const surveyDlg = reactive({ visible: false, form: null, seed: null, saving: false, errId: '' });
     const hazardPick = ref('');
+    const hpOpen = reactive({});           // 危险点卡展开状态（key = 条目 id；默认全部折叠，不落库）
+    function toggleHp(hp) { if (hp) hpOpen[hp.id] = !hpOpen[hp.id]; }
+    function openHp(hp) { if (hp) hpOpen[hp.id] = true; }
     const matSurveyed = computed(() => !!(matDlg.plan && matDlg.plan.survey && typeof matDlg.plan.survey === 'object' && !Array.isArray(matDlg.plan.survey)));
     // 危险点库按分类分组（下拉用；库本体来自 /api/documents，与文档中心同一数据通道）
     const hazardGroups = computed(() => {
@@ -408,6 +418,35 @@ const PlansView = {
       return g === '分2个小组' ? 2 : g === '分3个小组' ? 3 : 0;
     });
     const svGrouped = computed(() => svGroupCount.value > 0);
+    // 危险点归属选项：不分小组只有「全组」；分 N 组时额外给出 1..N 小组
+    const hpScopeOpts = computed(() => {
+      const n = svGroupCount.value;
+      const arr = [SURVEY_HP_SCOPE_ALL];
+      for (let i = 1; i <= n; i++) arr.push(i + '小组');
+      return arr;
+    });
+    // 归属取值：只认「全组 / 1小组 / 2小组 / 3小组」，其余回落「全组」
+    function hpScopeOf(v) {
+      const s = String(v == null ? '' : v).trim();
+      return ['全组', '1小组', '2小组', '3小组'].indexOf(s) > -1 ? s : SURVEY_HP_SCOPE_ALL;
+    }
+    // 首次创建时预置标准危险点：标题精确匹配库记录（hazard 字段），命中即取库 id/标题/措施
+    const hpSeedStat = { hits: 0, miss: [] };
+    function seedHazardPoints() {
+      const out = [];
+      hpSeedStat.hits = 0; hpSeedStat.miss = [];
+      SURVEY_STD_HAZARDS.forEach(t => {
+        const h = hazardLibrary.value.find(x => String(x.hazard == null ? '' : x.hazard).trim() === t);
+        if (!h) { hpSeedStat.miss.push(t); return; }
+        hpSeedStat.hits++;
+        out.push({
+          id: newHpId(), hazardId: h.id, title: h.hazard,
+          situation: '', measure: h.measure || '', scope: SURVEY_HP_SCOPE_ALL
+        });
+      });
+      return out;
+    }
+    async function ensureHazards() { if (!hazardLibrary.value.length) await loadHazards(); }
     // 补齐小组数组到当前分组数；分组数变小时不截断（第三组数据留在数组里，界面不显示、保存原样带回）
     function padGroups(n) {
       const f = surveyDlg.form; if (!f) return;
@@ -431,11 +470,12 @@ const PlansView = {
       return {
         team: seedChip('team'), surveyNo: seedChip('surveyNo'),
         workLocation: seedChip('workLocation'), workTask: seedChip('workTask'), outageScope: seedChip('outageScope'),
-        surveyUnit: todoChip('surveyUnit'), dualName: todoChip('dualName'), retainedLive: todoChip('retainedLive')
+        surveyUnit: todoChip('surveyUnit'), dualName: todoChip('dualName'), retainedLive: todoChip('retainedLive'),
+        envDesc: todoChip('envDesc')
       };
     });
-    // 打开编辑器：已勘察一律加载已保存内容（不重新带入、不覆盖）；未勘察才从计划带入一次
-    function openSurveyEditor() {
+    // 打开编辑器：已勘察一律加载已保存内容（不重新带入、不覆盖）；未勘察才从计划带入一次 + 预置标准危险点
+    async function openSurveyEditor() {
       const plan = matDlg.plan;
       if (!plan || !plan.id) return;
       // 带入值：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、工作内容=plan.content、4.1=plan.outageRange
@@ -456,7 +496,7 @@ const PlansView = {
             members: Array.isArray(g.members) ? g.members.slice() : [],
             workLocation: g.workLocation || '', workTask: g.workTask || ''
           })),
-          // 4.3 及以后：随对象带出，界面暂不渲染，保存时不提交（服务端沿用旧值）
+          // 4.4 及以后：随对象带出，界面暂不渲染，保存时不提交（服务端沿用旧值）
           envDesc: saved.envDesc || '', opsMeasures: saved.opsMeasures || '', teamMeasures: saved.teamMeasures || '',
           commonMeasures: saved.commonMeasures || '', ground10: saved.ground10 || '', ground04: saved.ground04 || '',
           surveyDate: saved.surveyDate || '', recorder: saved.recorder || '',
@@ -465,19 +505,22 @@ const PlansView = {
             hazardId: h.hazardId || '',
             title: h.title || '',
             situation: h.situation || '',
-            measure: h.measure || ''
+            measure: h.measure || '',
+            scope: hpScopeOf(h.scope)
           }))
         };
       } else {
+        await ensureHazards();   // 预置标准危险点依赖危险点库，未加载先取一次
         surveyDlg.form = {
           grouping: '不分小组',
           surveyUnit: '', team: plan.team || '', surveyNo: plan.surveyNo || '', dualName: '',
           workLocation: plan.address || '', workTask: plan.content || '',
           outageScope: plan.outageRange || '', retainedLive: '', groups: [],
           envDesc: '', opsMeasures: '', teamMeasures: '', commonMeasures: '', ground10: '', ground04: '',
-          surveyDate: todayYmd(), recorder: Auth.displayName || '', hazardPoints: []
+          surveyDate: todayYmd(), recorder: Auth.displayName || '', hazardPoints: seedHazardPoints()
         };
       }
+      Object.keys(hpOpen).forEach(k => { delete hpOpen[k]; });   // 每次打开一律折叠
       padGroups(svGroupCount.value);
       surveyDlg.errId = '';
       hazardPick.value = '';
@@ -487,14 +530,15 @@ const PlansView = {
       const h = hazardLibrary.value.find(x => x.id === hazardPick.value) || null;
       hazardPick.value = '';
       if (!h || !surveyDlg.form) return;
-      const hp = { id: newHpId(), hazardId: h.id, title: h.hazard || '', situation: '', measure: h.measure || '' };
+      const hp = { id: newHpId(), hazardId: h.id, title: h.hazard || '', situation: '', measure: h.measure || '', scope: SURVEY_HP_SCOPE_ALL };
       surveyDlg.form.hazardPoints.push(hp);
       Vue.nextTick(() => scrollHp(hp.id));
     }
     function addCustomHazard() {
       if (!surveyDlg.form) return;
-      const hp = { id: newHpId(), hazardId: '', title: '', situation: '', measure: '' };
+      const hp = { id: newHpId(), hazardId: '', title: '', situation: '', measure: '', scope: SURVEY_HP_SCOPE_ALL };
       surveyDlg.form.hazardPoints.push(hp);
+      openHp(hp);                                    // 自定义条目为空，自动展开待填写
       Vue.nextTick(() => scrollHp(hp.id));
     }
     function libHazard(hp) { return (hp && hp.hazardId) ? (hazardLibrary.value.find(x => x.id === hp.hazardId) || null) : null; }
@@ -524,21 +568,20 @@ const PlansView = {
     async function saveSurvey() {
       const plan = matDlg.plan; const f = surveyDlg.form;
       if (!plan || !plan.id || !f || surveyDlg.saving) return;
-      // 危险点校验（4.3 起界面开启后才生效；本批不渲染、不提交）
-      if (SX_LOWER_READY) {
-        const arr = f.hazardPoints || [];
-        for (let i = 0; i < arr.length; i++) {
-          const t = String(arr[i].title || '').trim();
-          const m = String(arr[i].measure || '').trim();
-          if (!t || !m) {
-            surveyDlg.errId = arr[i].id;
-            scrollHp(arr[i].id);
-            ElementPlus.ElMessage.error('第 ' + (i + 1) + ' 条危险点' + (!t ? '缺少标题' : '「' + t + '」缺少对应安全措施'));
-            return;
-          }
+      // 4.3 危险点校验：标题与措施必填；拦下后展开并定位到第一条有问题的卡片
+      const hpArr = f.hazardPoints || [];
+      for (let i = 0; i < hpArr.length; i++) {
+        const t = String(hpArr[i].title || '').trim();
+        const m = String(hpArr[i].measure || '').trim();
+        if (!t || !m) {
+          surveyDlg.errId = hpArr[i].id;
+          openHp(hpArr[i]);
+          Vue.nextTick(() => scrollHp(hpArr[i].id));
+          ElementPlus.ElMessage.error('第 ' + (i + 1) + ' 条危险点' + (!t ? '缺少标题' : '「' + t + '」缺少对应安全措施'));
+          return;
         }
-        surveyDlg.errId = '';
       }
+      surveyDlg.errId = '';
       const body = {
         grouping: f.grouping || '不分小组',
         surveyUnit: f.surveyUnit || '', team: f.team || '', surveyNo: f.surveyNo || '',
@@ -549,17 +592,19 @@ const PlansView = {
           leader: g.leader || '',
           members: Array.isArray(g.members) ? g.members.slice() : [],
           workLocation: g.workLocation || '', workTask: g.workTask || ''
+        })),
+        // 4.3：环境描述 + 危险点条目组（只存原始条目，4.4 组装结果生成时再算）
+        envDesc: f.envDesc || '',
+        hazardPoints: hpArr.map(h => ({
+          id: h.id, hazardId: h.hazardId || '', title: h.title || '',
+          situation: h.situation || '', measure: h.measure || '', scope: hpScopeOf(h.scope)
         }))
       };
-      // 4.3 及以后：界面开启后才提交（未开启时不发，服务端沿用已存值，不会丢）
+      // 4.4 及以后：界面开启后才提交（未开启时不发，服务端沿用已存值，不会丢）
       if (SX_LOWER_READY) {
-        body.envDesc = f.envDesc || ''; body.opsMeasures = f.opsMeasures || ''; body.teamMeasures = f.teamMeasures || '';
+        body.opsMeasures = f.opsMeasures || ''; body.teamMeasures = f.teamMeasures || '';
         body.commonMeasures = f.commonMeasures || ''; body.ground10 = f.ground10 || ''; body.ground04 = f.ground04 || '';
         body.surveyDate = f.surveyDate || ''; body.recorder = f.recorder || '';
-        body.hazardPoints = (f.hazardPoints || []).map(h => ({
-          id: h.id, hazardId: h.hazardId || '', title: h.title || '',
-          situation: h.situation || '', measure: h.measure || ''
-        }));
       }
       surveyDlg.saving = true;
       try {
@@ -772,7 +817,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SX_LOWER_READY, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, hazardPick, hazardGroups, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SX_LOWER_READY, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1341,8 +1386,8 @@ const PlansView = {
       </template>
     </el-dialog>
 
-    <!-- 现场勘察记录编辑器（四期第一步：作业分组 / 勘察单位 / 部门 / 编号 / 双重名称 / 3.工作任务 / 4.1 / 4.2） -->
-    <!-- 4.3 及以后（环境描述 / 危险点组 / 4.4 / 接地线 / 勘察日期 / 记录人）下一批开启，见 SX_LOWER_READY -->
+    <!-- 现场勘察记录编辑器（四期第二步：至 4.3 环境描述 + 危险点条目组） -->
+    <!-- 4.4 及以后（两组措施 / 通用措施 / 接地线 / 勘察日期 / 记录人 / 生成）下一批开启，见 SX_LOWER_READY -->
     <el-dialog v-model="surveyDlg.visible" title="现场勘察记录" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
@@ -1455,47 +1500,69 @@ const PlansView = {
             <el-input v-model="surveyDlg.form.retainedLive" type="textarea" :rows="3" placeholder="不在停电范围的带电部位请手动填入" />
           </el-form-item>
 
-          <!-- ===== 4.3 及以后：下一批开启（SX_LOWER_READY = true 时渲染，数据字段已保留） ===== -->
-          <template v-if="SX_LOWER_READY">
-            <el-form-item label="4.3 环境描述">
-              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="作业现场环境描述（选填）" />
+          <!-- ===== 4.3 作业现场的条件、环境及其他危险点（四期第二步：环境描述 + 危险点条目组） ===== -->
+          <div class="sv-sec">
+            <div class="sv-sec-head shp-head">
+              <span class="sv-sec-title">4.3作业现场的条件、环境及其他危险点</span>
+              <span class="sv-sec-sub">（应注明：交叉、邻近（同杆塔、并行）电力线路；多电源、自发电情况，有可能反送电的设备和分支线；地下管网沟道及其他影响施工作业的设施情况）</span>
+            </div>
+
+            <el-form-item>
+              <template #label>
+                <span class="sv-lab">环境描述<span v-if="svBadges.envDesc" class="sv-chip" :class="'sv-' + svBadges.envDesc.cls">{{ svBadges.envDesc.text }}</span></span>
+              </template>
+              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="请填写作业现场的条件、环境及其他危险点情况" />
             </el-form-item>
 
-            <div class="survey-hp-head">
-              <span style="font-size:14px;font-weight:600">危险点与对应安全措施</span>
-              <span style="font-size:12px;color:var(--text-3)">标题与措施均为必填，保存前逐条校验</span>
+            <div class="shp-sub">
+              <span class="shp-sub-t">4.3 危险点及对应安全措施</span>
+              <span class="shp-sub-s">标题与措施均为必填，保存时逐条校验</span>
             </div>
-            <div v-if="!surveyDlg.form.hazardPoints.length" class="survey-hp-empty">尚未添加危险点，可从危险点库添加或新增自定义危险点</div>
-            <div v-for="(hp, i) in surveyDlg.form.hazardPoints" :key="hp.id" :id="'hp-' + hp.id" class="survey-hp" :class="{ 'hp-err': surveyDlg.errId === hp.id }">
-              <div class="survey-hp-bar">
-                <span class="survey-hp-no">{{ i + 1 }}</span>
-                <span class="survey-hp-title">{{ hp.title || '（未命名危险点）' }}</span>
+
+            <div v-if="!surveyDlg.form.hazardPoints.length" class="survey-hp-empty">尚未添加危险点：可从下方搜索危险点库添加，或新增自定义危险点</div>
+            <div v-for="(hp, i) in surveyDlg.form.hazardPoints" :key="hp.id" :id="'hp-' + hp.id" class="survey-hp" :class="{ 'hp-err': surveyDlg.errId === hp.id, 'hp-open': !!hpOpen[hp.id] }">
+              <div class="survey-hp-bar" @click="toggleHp(hp)">
+                <span class="shp-no">（{{ i + 1 }}）</span>
+                <span class="survey-hp-title" :title="hp.title">{{ hp.title || '（未命名危险点）' }}</span>
+                <el-select v-if="svGrouped" v-model="hp.scope" size="small" class="shp-scope" @click.stop>
+                  <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
+                </el-select>
                 <div class="survey-hp-acts">
-                  <el-button link size="small" :disabled="i === 0" @click="moveHazard(hp, -1)">上移</el-button>
-                  <el-button link size="small" :disabled="i === surveyDlg.form.hazardPoints.length - 1" @click="moveHazard(hp, 1)">下移</el-button>
-                  <el-button link type="primary" size="small" :disabled="!canRestoreMeasure(hp)" @click="restoreMeasure(hp)">恢复标准措施</el-button>
-                  <el-button link type="danger" size="small" @click="removeHazard(hp)">删除</el-button>
+                  <el-button link size="small">{{ hpOpen[hp.id] ? '收起详情' : '展开详情' }}</el-button>
+                  <el-button link size="small" :disabled="i === 0" @click.stop="moveHazard(hp, -1)">上移</el-button>
+                  <el-button link size="small" :disabled="i === surveyDlg.form.hazardPoints.length - 1" @click.stop="moveHazard(hp, 1)">下移</el-button>
+                  <el-button link type="danger" size="small" @click.stop="removeHazard(hp)">删除</el-button>
                 </div>
               </div>
-              <el-form-item label="危险点标题">
-                <el-input v-model="hp.title" placeholder="危险点标题" />
-              </el-form-item>
-              <el-form-item label="现场具体情况">
-                <el-input v-model="hp.situation" type="textarea" :rows="2" placeholder="选填" />
-              </el-form-item>
-              <el-form-item label="对应安全措施">
-                <el-input v-model="hp.measure" type="textarea" :rows="3" placeholder="必填" />
-              </el-form-item>
+              <div v-show="hpOpen[hp.id]" class="shp-body">
+                <el-form-item label="危险点标题">
+                  <el-input v-model="hp.title" placeholder="请填写危险点标题" />
+                </el-form-item>
+                <el-form-item label="现场具体情况">
+                  <el-input v-model="hp.situation" type="textarea" :rows="2" placeholder="4.3中的现场具体情况（可选）" />
+                </el-form-item>
+                <el-form-item label="对应安全措施">
+                  <el-input v-model="hp.measure" type="textarea" :rows="3" placeholder="请填写对应安全措施" />
+                </el-form-item>
+                <div class="shp-foot">
+                  <span class="shp-src" :class="hp.hazardId ? 'shp-src-lib' : 'shp-src-mine'">{{ hp.hazardId ? '危险点库' : '自定义' }}</span>
+                  <el-button v-if="hp.hazardId" link type="primary" size="small" :disabled="!canRestoreMeasure(hp)" @click="restoreMeasure(hp)">恢复标准措施</el-button>
+                </div>
+              </div>
             </div>
+
             <div class="survey-add">
-              <el-select v-model="hazardPick" filterable clearable placeholder="从危险点库选择添加" style="width:280px" @change="addHazardFromLib">
+              <el-select v-model="hazardPick" filterable clearable class="shp-pick" placeholder="搜索危险点库，例如：邻近、跨越" @change="addHazardFromLib">
                 <el-option-group v-for="g in hazardGroups" :key="g.label" :label="g.label">
                   <el-option v-for="h in g.items" :key="h.id" :label="h.hazard" :value="h.id" />
                 </el-option-group>
               </el-select>
               <el-button @click="addCustomHazard">新增自定义危险点</el-button>
             </div>
+          </div>
 
+          <!-- ===== 4.4 及以后：下一批开启（SX_LOWER_READY = true 时渲染，数据字段已保留） ===== -->
+          <template v-if="SX_LOWER_READY">
             <div class="survey-grid sg-tail">
               <el-form-item label="4.4 运维人员采取的安全措施">
                 <el-input v-model="surveyDlg.form.opsMeasures" type="textarea" :rows="3" placeholder="选填" />
