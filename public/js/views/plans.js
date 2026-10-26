@@ -376,9 +376,7 @@ const PlansView = {
     }
     // ---- 现场勘察记录：四期第一步（作业分组 + 勘察单位/部门/编号/双重名称 + 3.工作任务 + 4.1 + 4.2） ----
     // ---- 四期第二步：4.3 环境描述 + 危险点条目组（envDesc / hazardPoints） ----
-    // 4.4 及以后（两组措施 / 接地线 / 勘察日期 / 记录人 / 生成）下一批开启：
-    // 数据与逻辑保留在 survey 上，本批界面不渲染（SX_LOWER_READY = false）。
-    const SX_LOWER_READY = false;
+    // ---- 四期第三步：4.4 两组措施 + 10kV/0.4kV 接地线 + 勘察日期（含逐行归属） ----
     const SURVEY_GROUPING_OPTS = ['不分小组', '分2个小组', '分3个小组'];
     // 4.3 预置的 7 条标准危险点（按参考系统顺序；逐条按标题精确匹配危险点库，未命中跳过、不编造）
     const SURVEY_STD_HAZARDS = [
@@ -430,6 +428,67 @@ const PlansView = {
       const s = String(v == null ? '' : v).trim();
       return ['全组', '1小组', '2小组', '3小组'].indexOf(s) > -1 ? s : SURVEY_HP_SCOPE_ALL;
     }
+    // ---- 逐行归属（4.4 班组措施 / 10kV / 0.4kV 接地线）：文本非空行 ↔ scopes 按序对齐 ----
+    const SX_SCOPE_FIELDS = [
+      { text: 'teamMeasures', sc: 'teamMeasureScopes' },
+      { text: 'ground10', sc: 'ground10Scopes' },
+      { text: 'ground04', sc: 'ground04Scopes' }
+    ];
+    const sxPrev = {};   // 每个文本字段上一次的非空行快照（用于识别「删掉的是哪一行」）
+    function sxLines(v) {
+      return String(v == null ? '' : v).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    }
+    // 最长公共子序列：返回 { 新行下标: 旧行下标 }，用来把未改动行的归属原地保留
+    function lcsPairs(a, b) {
+      const n = a.length, m = b.length;
+      const dp = [];
+      for (let i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0));
+      for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+          dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+      const out = {}; let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { out[j] = i; i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+        else j++;
+      }
+      return out;
+    }
+    // 按当前文本行重算 scopes：内容未变的行保留原归属；原地改字的行按顺序配对保留；
+    // 新增行补「全组」；被删掉的行其归属随之移除（后续行前移）
+    function applyScopeAlign(textKey, scKey, lines) {
+      const f = surveyDlg.form; if (!f) return;
+      const oldLines = Array.isArray(sxPrev[textKey]) ? sxPrev[textKey] : [];
+      const oldScopes = Array.isArray(f[scKey]) ? f[scKey].slice() : [];
+      const map = lcsPairs(oldLines, lines);
+      const usedOld = {}; Object.keys(map).forEach(k => { usedOld[map[k]] = true; });
+      const freeNew = lines.map((_, i) => i).filter(i => map[i] === undefined);
+      const freeOld = oldLines.map((_, i) => i).filter(i => !usedOld[i]);
+      freeNew.forEach((ni, k) => { if (k < freeOld.length) map[ni] = freeOld[k]; });
+      f[scKey] = lines.map((_, i) => (map[i] === undefined ? SURVEY_HP_SCOPE_ALL : hpScopeOf(oldScopes[map[i]])));
+      sxPrev[textKey] = lines.slice();
+    }
+    // 文本框输入：用事件值算行（不依赖 v-model 更新时序）
+    function onScopeTextInput(textKey, scKey, v) {
+      const f = surveyDlg.form; if (!f) return;
+      const val = (v === undefined || v === null) ? f[textKey] : v;
+      if (!svGrouped.value) { sxPrev[textKey] = sxLines(val); return; }
+      applyScopeAlign(textKey, scKey, sxLines(val));
+    }
+    // 打开编辑器 / 切换分组后：把 scopes 补齐到当前行数（缺的补「全组」），并重置行快照
+    function padScopes() {
+      const f = surveyDlg.form; if (!f) return;
+      SX_SCOPE_FIELDS.forEach(({ text, sc }) => {
+        const lines = sxLines(f[text]);
+        const arr = Array.isArray(f[sc]) ? f[sc] : [];
+        const out = [];
+        for (let i = 0; i < lines.length; i++) out.push(hpScopeOf(arr[i]));
+        f[sc] = out;
+        sxPrev[text] = lines;
+      });
+    }
     // 首次创建时预置标准危险点：标题精确匹配库记录（hazard 字段），命中即取库 id/标题/措施
     const hpSeedStat = { hits: 0, miss: [] };
     function seedHazardPoints() {
@@ -453,7 +512,7 @@ const PlansView = {
       if (!Array.isArray(f.groups)) f.groups = [];
       while (f.groups.length < n) f.groups.push({ leader: '', members: [], workLocation: '', workTask: '' });
     }
-    function onGroupingChange() { padGroups(svGroupCount.value); }
+    function onGroupingChange() { padGroups(svGroupCount.value); padScopes(); }
     function svMembersText(g) { return '已选 ' + ((g && Array.isArray(g.members)) ? g.members.length : 0) + ' 人'; }
     // 徽标：带入类字段（部门/编号/工作地点/工作内容/4.1）——当前值 === 打开时的带入值且带入值非空 → 周计划自动带入，否则人工填写
     //      非带入类字段（勘察单位/双重名称/4.2）——为空显示「待填写」，有值不显示
@@ -470,8 +529,11 @@ const PlansView = {
       return {
         team: seedChip('team'), surveyNo: seedChip('surveyNo'),
         workLocation: seedChip('workLocation'), workTask: seedChip('workTask'), outageScope: seedChip('outageScope'),
+        surveyDate: seedChip('surveyDate'),
         surveyUnit: todoChip('surveyUnit'), dualName: todoChip('dualName'), retainedLive: todoChip('retainedLive'),
-        envDesc: todoChip('envDesc')
+        envDesc: todoChip('envDesc'),
+        opsMeasures: todoChip('opsMeasures'), teamMeasures: todoChip('teamMeasures'),
+        ground10: todoChip('ground10'), ground04: todoChip('ground04')
       };
     });
     // 打开编辑器：已勘察一律加载已保存内容（不重新带入、不覆盖）；未勘察才从计划带入一次 + 预置标准危险点
@@ -479,9 +541,13 @@ const PlansView = {
       const plan = matDlg.plan;
       if (!plan || !plan.id) return;
       // 带入值：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、工作内容=plan.content、4.1=plan.outageRange
+      // 勘察日期=plan.startDate（计划开始时间，取前 10 位日期部分），取不到回落今天
+      const planDay = String(plan.startDate || '').trim().slice(0, 10);
+      const planDayOk = /^\d{4}-\d{2}-\d{2}$/.test(planDay) ? planDay : '';
       surveyDlg.seed = {
         team: plan.team || '', surveyNo: plan.surveyNo || '',
-        workLocation: plan.address || '', workTask: plan.content || '', outageScope: plan.outageRange || ''
+        workLocation: plan.address || '', workTask: plan.content || '', outageScope: plan.outageRange || '',
+        surveyDate: planDayOk
       };
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       if (saved) {
@@ -496,10 +562,13 @@ const PlansView = {
             members: Array.isArray(g.members) ? g.members.slice() : [],
             workLocation: g.workLocation || '', workTask: g.workTask || ''
           })),
-          // 4.4 及以后：随对象带出，界面暂不渲染，保存时不提交（服务端沿用旧值）
+          // 4.3 / 4.4：已保存内容原样加载，不重新带入、不覆盖
           envDesc: saved.envDesc || '', opsMeasures: saved.opsMeasures || '', teamMeasures: saved.teamMeasures || '',
-          commonMeasures: saved.commonMeasures || '', ground10: saved.ground10 || '', ground04: saved.ground04 || '',
-          surveyDate: saved.surveyDate || '', recorder: saved.recorder || '',
+          ground10: saved.ground10 || '', ground04: saved.ground04 || '',
+          teamMeasureScopes: Array.isArray(saved.teamMeasureScopes) ? saved.teamMeasureScopes.slice() : [],
+          ground10Scopes: Array.isArray(saved.ground10Scopes) ? saved.ground10Scopes.slice() : [],
+          ground04Scopes: Array.isArray(saved.ground04Scopes) ? saved.ground04Scopes.slice() : [],
+          surveyDate: saved.surveyDate || '',
           hazardPoints: (Array.isArray(saved.hazardPoints) ? saved.hazardPoints : []).map(h => ({
             id: h.id || newHpId(),
             hazardId: h.hazardId || '',
@@ -516,12 +585,14 @@ const PlansView = {
           surveyUnit: '', team: plan.team || '', surveyNo: plan.surveyNo || '', dualName: '',
           workLocation: plan.address || '', workTask: plan.content || '',
           outageScope: plan.outageRange || '', retainedLive: '', groups: [],
-          envDesc: '', opsMeasures: '', teamMeasures: '', commonMeasures: '', ground10: '', ground04: '',
-          surveyDate: todayYmd(), recorder: Auth.displayName || '', hazardPoints: seedHazardPoints()
+          envDesc: '', opsMeasures: '', teamMeasures: '', ground10: '', ground04: '',
+          teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
+          surveyDate: planDayOk || todayYmd(), hazardPoints: seedHazardPoints()
         };
       }
       Object.keys(hpOpen).forEach(k => { delete hpOpen[k]; });   // 每次打开一律折叠
       padGroups(svGroupCount.value);
+      padScopes();
       surveyDlg.errId = '';
       hazardPick.value = '';
       surveyDlg.visible = true;
@@ -611,6 +682,8 @@ const PlansView = {
         }
       }
       surveyDlg.errId = '';
+      // 逐行归属按最终文本行数对齐（多出的行补「全组」，行被删则归属随之移除）
+      padScopes();
       const body = {
         grouping: f.grouping || '不分小组',
         surveyUnit: f.surveyUnit || '', team: f.team || '', surveyNo: f.surveyNo || '',
@@ -627,14 +700,15 @@ const PlansView = {
         hazardPoints: hpArr.map(h => ({
           id: h.id, hazardId: h.hazardId || '', title: h.title || '',
           situation: h.situation || '', measure: h.measure || '', scope: hpScopeOf(h.scope)
-        }))
+        })),
+        // 4.4 / 接地线 / 勘察日期（commonMeasures、recorder 不做编辑字段，不提交 → 服务端保留旧值）
+        opsMeasures: f.opsMeasures || '', teamMeasures: f.teamMeasures || '',
+        ground10: f.ground10 || '', ground04: f.ground04 || '',
+        teamMeasureScopes: Array.isArray(f.teamMeasureScopes) ? f.teamMeasureScopes.slice() : [],
+        ground10Scopes: Array.isArray(f.ground10Scopes) ? f.ground10Scopes.slice() : [],
+        ground04Scopes: Array.isArray(f.ground04Scopes) ? f.ground04Scopes.slice() : [],
+        surveyDate: f.surveyDate || ''
       };
-      // 4.4 及以后：界面开启后才提交（未开启时不发，服务端沿用已存值，不会丢）
-      if (SX_LOWER_READY) {
-        body.opsMeasures = f.opsMeasures || ''; body.teamMeasures = f.teamMeasures || '';
-        body.commonMeasures = f.commonMeasures || ''; body.ground10 = f.ground10 || ''; body.ground04 = f.ground04 || '';
-        body.surveyDate = f.surveyDate || ''; body.recorder = f.recorder || '';
-      }
       surveyDlg.saving = true;
       try {
         const saved = await api.put('/api/workPlans/' + plan.id + '/survey', body);
@@ -846,7 +920,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SX_LOWER_READY, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1415,8 +1489,8 @@ const PlansView = {
       </template>
     </el-dialog>
 
-    <!-- 现场勘察记录编辑器（四期第二步：至 4.3 环境描述 + 危险点条目组） -->
-    <!-- 4.4 及以后（两组措施 / 通用措施 / 接地线 / 勘察日期 / 记录人 / 生成）下一批开启，见 SX_LOWER_READY -->
+    <!-- 现场勘察记录编辑器（四期第三步：字段到 4.4 两组措施 + 10kV/0.4kV 接地线 + 勘察日期，与勘察单模板槽位对齐） -->
+    <!-- 生成按钮属 4b，本批未加 -->
     <el-dialog v-model="surveyDlg.visible" title="现场勘察记录" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
@@ -1582,32 +1656,77 @@ const PlansView = {
             </div>
           </div>
 
-          <!-- ===== 4.4 及以后：下一批开启（SX_LOWER_READY = true 时渲染，数据字段已保留） ===== -->
-          <template v-if="SX_LOWER_READY">
-            <div class="survey-grid sg-tail">
-              <el-form-item label="4.4 运维人员采取的安全措施">
-                <el-input v-model="surveyDlg.form.opsMeasures" type="textarea" :rows="3" placeholder="选填" />
-              </el-form-item>
-              <el-form-item label="4.4 班组应采取的安全措施">
-                <el-input v-model="surveyDlg.form.teamMeasures" type="textarea" :rows="3" placeholder="选填" />
-              </el-form-item>
-              <el-form-item label="4.4 通用风险控制措施" class="sg-full">
-                <el-input v-model="surveyDlg.form.commonMeasures" type="textarea" :rows="3" placeholder="选填" />
-              </el-form-item>
-              <el-form-item label="10kV 接地线位置">
-                <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="每行一个位置" />
-              </el-form-item>
-              <el-form-item label="0.4kV 接地线位置">
-                <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="每行一个位置" />
-              </el-form-item>
-              <el-form-item label="勘察日期">
-                <el-date-picker v-model="surveyDlg.form.surveyDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" />
-              </el-form-item>
-              <el-form-item label="记录人">
-                <el-input v-model="surveyDlg.form.recorder" placeholder="默认当前登录用户，可修改" />
-              </el-form-item>
+          <!-- ===== 4.4 两组措施 / 10kV、0.4kV 接地线 / 勘察日期（四期第三步；记录人与通用措施在 4b 生成时处理） ===== -->
+          <el-form-item>
+            <template #label>
+              <span class="sv-lab">4.4 运维人员采取的安全措施<span v-if="svBadges.opsMeasures" class="sv-chip" :class="'sv-' + svBadges.opsMeasures.cls">{{ svBadges.opsMeasures.text }}</span></span>
+            </template>
+            <el-input v-model="surveyDlg.form.opsMeasures" type="textarea" :rows="3" placeholder="请填写运维人员采取的安全措施" />
+          </el-form-item>
+
+          <el-form-item>
+            <template #label>
+              <span class="sv-lab">4.4 班组应采取的安全措施<span v-if="svBadges.teamMeasures" class="sv-chip" :class="'sv-' + svBadges.teamMeasures.cls">{{ svBadges.teamMeasures.text }}</span></span>
+            </template>
+            <div class="sx-block">
+              <el-input v-model="surveyDlg.form.teamMeasures" type="textarea" :rows="4" placeholder="每行一条措施；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('teamMeasures', 'teamMeasureScopes', v)" />
+              <div v-if="svGrouped && sxLines(surveyDlg.form.teamMeasures).length" class="sx-lines">
+                <div class="sx-lines-head">逐行设置所属小组（共 {{ sxLines(surveyDlg.form.teamMeasures).length }} 条）</div>
+                <div v-for="(ln, i) in sxLines(surveyDlg.form.teamMeasures)" :key="'tm-' + i" class="sx-line">
+                  <span class="sx-line-no">{{ i + 1 }}.</span>
+                  <span class="sx-line-txt" :title="ln">{{ ln }}</span>
+                  <el-select v-model="surveyDlg.form.teamMeasureScopes[i]" size="small" class="sx-line-scope">
+                    <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
+                  </el-select>
+                </div>
+              </div>
             </div>
-          </template>
+          </el-form-item>
+
+          <el-form-item>
+            <template #label>
+              <span class="sv-lab">10kV 接地线位置（每行一个）<span v-if="svBadges.ground10" class="sv-chip" :class="'sv-' + svBadges.ground10.cls">{{ svBadges.ground10.text }}</span></span>
+            </template>
+            <div class="sx-block">
+              <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="每行一个位置；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('ground10', 'ground10Scopes', v)" />
+              <div v-if="svGrouped && sxLines(surveyDlg.form.ground10).length" class="sx-lines">
+                <div class="sx-lines-head">逐行设置所属小组（共 {{ sxLines(surveyDlg.form.ground10).length }} 处）</div>
+                <div v-for="(ln, i) in sxLines(surveyDlg.form.ground10)" :key="'g10-' + i" class="sx-line">
+                  <span class="sx-line-no">{{ i + 1 }}.</span>
+                  <span class="sx-line-txt" :title="ln">{{ ln }}</span>
+                  <el-select v-model="surveyDlg.form.ground10Scopes[i]" size="small" class="sx-line-scope">
+                    <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
+                  </el-select>
+                </div>
+              </div>
+            </div>
+          </el-form-item>
+
+          <el-form-item>
+            <template #label>
+              <span class="sv-lab">0.4kV 接地线位置（每行一个）<span v-if="svBadges.ground04" class="sv-chip" :class="'sv-' + svBadges.ground04.cls">{{ svBadges.ground04.text }}</span></span>
+            </template>
+            <div class="sx-block">
+              <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="每行一个位置；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('ground04', 'ground04Scopes', v)" />
+              <div v-if="svGrouped && sxLines(surveyDlg.form.ground04).length" class="sx-lines">
+                <div class="sx-lines-head">逐行设置所属小组（共 {{ sxLines(surveyDlg.form.ground04).length }} 处）</div>
+                <div v-for="(ln, i) in sxLines(surveyDlg.form.ground04)" :key="'g04-' + i" class="sx-line">
+                  <span class="sx-line-no">{{ i + 1 }}.</span>
+                  <span class="sx-line-txt" :title="ln">{{ ln }}</span>
+                  <el-select v-model="surveyDlg.form.ground04Scopes[i]" size="small" class="sx-line-scope">
+                    <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
+                  </el-select>
+                </div>
+              </div>
+            </div>
+          </el-form-item>
+
+          <el-form-item>
+            <template #label>
+              <span class="sv-lab">勘察日期<span v-if="svBadges.surveyDate" class="sv-chip" :class="'sv-' + svBadges.surveyDate.cls">{{ svBadges.surveyDate.text }}</span></span>
+            </template>
+            <el-date-picker v-model="surveyDlg.form.surveyDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择勘察日期" class="sx-date" />
+          </el-form-item>
         </el-form>
       </div>
       <template #footer>

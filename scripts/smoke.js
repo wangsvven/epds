@@ -598,7 +598,7 @@ async function listOk(p, token) {
     need(del2.status === 404, '无包删除应 404，实际 ' + del2.status);
     return 'zip→' + pk.id + ' / 7z 替换→' + r2.data.id + '（旧文件已删）/ 400x2 旧包不变 / 删除后 404';
   });
-  await step('plans', '现场勘察记录：分组/小组往返 → createdAt 稳定 → 非法 grouping 回落 → groups 截断 → 4.3 环境描述+危险点往返（scope 清洗/必填 400/50 条上限）→ 404', async () => {
+  await step('plans', '现场勘察记录：分组/小组往返 → createdAt 稳定 → 非法 grouping 回落 → groups 截断 → 4.3 环境描述+危险点往返 → 4.4 措施/接地线/勘察日期+逐行归属 → 404', async () => {
     const p = needOk(await api('POST', '/api/workPlans', {
       token, body: { name: '冒烟勘察计划', planType: '周计划', content: '冒烟工作内容', outageRange: '冒烟停电范围', team: '施工一队', surveyNo: '202610900' }
     }), 'plan POST');
@@ -687,10 +687,49 @@ async function listOk(p, token) {
     const s8 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, hazardPoints: many } }), '超 50 条');
     need(s8.hazardPoints.length === 50, 'hazardPoints 应截断到 50 条，实际 ' + s8.hazardPoints.length);
     need(s8.hazardPoints[49].title === '危险点49', '截断后应是前 50 条，第 50 条为 ' + s8.hazardPoints[49].title);
+    // 4.4 / 接地线 / 勘察日期：本批新字段往返（去首尾空白、保留换行、非法 scope 回落「全组」）
+    const s9 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
+      token, body: {
+        ...body2,
+        opsMeasures: ' 运维措施A\n运维措施B ', teamMeasures: '班组措施1\n班组措施2',
+        ground10: '10kV 1号杆', ground04: '0.4kV 配电箱',
+        teamMeasureScopes: ['1小组', '9小组'], ground10Scopes: ['2小组'], ground04Scopes: [],
+        surveyDate: '2026-10-26'
+      }
+    }), '写入 4.4');
+    need(s9.opsMeasures === '运维措施A\n运维措施B', 'opsMeasures 应去首尾空白并保留换行：' + JSON.stringify(s9.opsMeasures));
+    need(s9.teamMeasures === '班组措施1\n班组措施2' && s9.ground10 === '10kV 1号杆' && s9.ground04 === '0.4kV 配电箱',
+      '4.4/接地线文本未保存：' + brief([s9.teamMeasures, s9.ground10, s9.ground04]));
+    need(JSON.stringify(s9.teamMeasureScopes) === JSON.stringify(['1小组', '全组']), '非法 scope 应回落「全组」：' + brief(s9.teamMeasureScopes));
+    need(JSON.stringify(s9.ground10Scopes) === JSON.stringify(['2小组']) && JSON.stringify(s9.ground04Scopes) === JSON.stringify([]),
+      '接地线 scopes 往返不一致：' + brief([s9.ground10Scopes, s9.ground04Scopes]));
+    need(s9.surveyDate === '2026-10-26', 'surveyDate 未保存：' + brief(s9.surveyDate));
+    // 重读计划：4.4 全字段原样
+    const d9 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after 4.4');
+    need(d9.survey.surveyDate === '2026-10-26' && d9.survey.ground10 === '10kV 1号杆'
+      && JSON.stringify(d9.survey.teamMeasureScopes) === JSON.stringify(['1小组', '全组']), '重读计划时 4.4 字段不一致');
+    // 未传 scopes / 4.4 文本 → 沿用旧值
+    const s10 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2 } }), '不传 4.4');
+    need(JSON.stringify(s10.teamMeasureScopes) === JSON.stringify(['1小组', '全组']), '未传 scopes 应沿用旧值：' + brief(s10.teamMeasureScopes));
+    need(s10.opsMeasures === '运维措施A\n运维措施B' && s10.surveyDate === '2026-10-26', '未传的 4.4 字段应沿用旧值：' + brief([s10.opsMeasures, s10.surveyDate]));
+    // 勘察日期格式非法 → 400（且不破坏已存内容）
+    for (const badDay of ['2026-13-01', '2026-02-30', '20261026', '2026/10/26', 'abc']) {
+      const r = await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, surveyDate: badDay } });
+      need(r.status === 400, '非法勘察日期 ' + badDay + ' 应 400，实际 ' + r.status);
+    }
+    const d10 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after bad date');
+    need(d10.survey.surveyDate === '2026-10-26', '非法日期被拒后原值不应改变，实际 ' + brief(d10.survey.surveyDate));
+    // scopes 超 200 条 → 截断
+    const manyScopes = Array.from({ length: 205 }, () => '1小组');
+    const s11 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, teamMeasureScopes: manyScopes } }), 'scopes 超 200');
+    need(s11.teamMeasureScopes.length === 200, 'scopes 应截断到 200 条，实际 ' + s11.teamMeasureScopes.length);
+    // 显式传空数组 → 清空
+    const s12 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, teamMeasureScopes: [] } }), 'scopes 清空');
+    need(Array.isArray(s12.teamMeasureScopes) && s12.teamMeasureScopes.length === 0, '显式传空数组应清空，实际 ' + brief(s12.teamMeasureScopes));
     // 计划不存在 → 404
     const r404 = await api('PUT', '/api/workPlans/nope_not_exist/survey', { token, body: body1 });
     need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
-    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+2 条危险点往返一致、非法 scope 回落、必填 400、超 50 条截断';
+    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+危险点往返、4.4 两组措施+接地线+勘察日期往返、scopes 清洗/截断、非法日期 400、必填 400、超 50 条截断';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

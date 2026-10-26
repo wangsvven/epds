@@ -270,14 +270,35 @@ const SURVEY_TEXT_FIELDS = [
   'surveyUnit', 'team', 'surveyNo', 'dualName',
   'workLocation', 'workTask', 'outageScope', 'retainedLive', 'envDesc'
 ];
-// 4.4 及以后：本批界面暂不渲染（下一批开启），但已存数据必须原样保留 —— 请求未带该键时沿用旧值，不预建空字段
+// 4.4 / 接地线等：请求未带该键时沿用旧值，不预建空字段
+// commonMeasures / recorder 不做编辑字段（生成时组装 / 取当前登录用户），但仍保留旧值不丢
 const SURVEY_LOWER_FIELDS = [
-  'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'surveyDate', 'recorder'
+  'opsMeasures', 'teamMeasures', 'commonMeasures', 'ground10', 'ground04', 'recorder'
 ];
 // 4.3 危险点条目：归属只有四种取值，非法回落「全组」；条数上限 50
 const SURVEY_HP_SCOPES = ['全组', '1小组', '2小组', '3小组'];
 const SURVEY_HP_MAX = 50;
 const SURVEY_GROUPINGS = ['不分小组', '分2个小组', '分3个小组'];
+// 4.4 班组措施 / 10kV、0.4kV 接地线：逐行归属数组（与文本非空行按序对齐），长度上限 200
+const SURVEY_SCOPE_LISTS = ['teamMeasureScopes', 'ground10Scopes', 'ground04Scopes'];
+const SURVEY_SCOPE_MAX = 200;
+// 勘察日期必须是真实存在的 YYYY-MM-DD
+function isYmd(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s == null ? '' : s));
+  if (!m) return false;
+  const y = +m[1], mo = +m[2], d = +m[3];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+// 归属数组清洗：非数组按空数组；超 200 截断；每项只认四种枚举，非法回落「全组」
+function cleanScopeList(raw) {
+  const arr = Array.isArray(raw) ? raw.slice(0, SURVEY_SCOPE_MAX) : [];
+  return arr.map(v => {
+    const s = String(v == null ? '' : v).trim();
+    return SURVEY_HP_SCOPES.indexOf(s) > -1 ? s : '全组';
+  });
+}
 function planSurvey(p) {
   const v = p && p.survey;
   return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
@@ -307,6 +328,19 @@ app.put('/api/workPlans/:id/survey', (req, res) => {
   SURVEY_LOWER_FIELDS.forEach(k => {
     if (b[k] !== undefined) survey[k] = String(b[k] == null ? '' : b[k]).trim();
     else if (prev[k] !== undefined) survey[k] = String(prev[k] == null ? '' : prev[k]);
+  });
+  // 勘察日期：YYYY-MM-DD，非法 → 400；显式传空串 = 清空
+  if (b.surveyDate !== undefined) {
+    const sd = String(b.surveyDate == null ? '' : b.surveyDate).trim();
+    if (sd && !isYmd(sd)) return res.status(400).json({ error: '勘察日期格式应为 YYYY-MM-DD，实际：' + sd });
+    survey.surveyDate = sd;
+  } else if (prev.surveyDate !== undefined) {
+    survey.surveyDate = String(prev.surveyDate == null ? '' : prev.surveyDate);
+  }
+  // 逐行归属数组：显式传才更新，未传沿用旧值
+  SURVEY_SCOPE_LISTS.forEach(k => {
+    if (b[k] !== undefined) survey[k] = cleanScopeList(b[k]);
+    else if (prev[k] !== undefined) survey[k] = cleanScopeList(prev[k]);
   });
   // 作业分组：只接受三个枚举值，非法回落「不分小组」
   const g = String(b.grouping == null ? '' : b.grouping).trim();
