@@ -272,7 +272,9 @@ function migrateDB() {
     DB.documents.files.forEach(f => { if (f && f.category === '未分类') f.category = '危险点'; });
     DB.documents.files = DB.documents.files.filter(f => f && typeof f.path === 'string' && f.path);
     // 历史 surveyTemplate 若指向的文件已不存在，则清理引用（不再自动重建）
-    if (DB.documents.surveyTemplate && DB.documents.surveyTemplate.path && !fs.existsSync(path.join(__dirname, DB.documents.surveyTemplate.path))) {
+    // 注意：path 是相对 data/ 的路径（如 uploads/xxx.docx），基准必须同为 ROOT/data
+    //（与 core/doc-templates.js 的 resolveDocPath 一致）；用 __dirname 会落到 server/core 下误判不存在
+    if (DB.documents.surveyTemplate && DB.documents.surveyTemplate.path && !fs.existsSync(path.join(DATA_DIR, DB.documents.surveyTemplate.path))) {
       delete DB.documents.surveyTemplate;
     }
   }
