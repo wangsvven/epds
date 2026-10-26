@@ -213,6 +213,15 @@ const PlansView = {
         ElementPlus.ElMessage.success('已取消'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
+    // 恢复：已取消的计划 → 状态回到「未执行」，重新出现在「周计划管理」
+    async function restorePlan(row) {
+      try {
+        await ElementPlus.ElMessageBox.confirm('确认恢复作业计划「' + row.name + '」？恢复后将回到「周计划管理」。', '提示', { type: 'warning' });
+        await api.put('/api/workPlans/' + row.id, { status: '未执行' });
+        ElementPlus.ElMessage.success('已恢复，计划已回到周计划管理');
+        load();
+      } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
+    }
     async function notePlan(row) {
       try {
         const { value } = await ElementPlus.ElMessageBox.prompt('请输入备注内容', '备注', { inputValue: row.planNote || '', inputType: 'textarea', inputPlaceholder: '选填' });
@@ -422,7 +431,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -507,12 +516,19 @@ const PlansView = {
         <el-table-column label="操作" width="160" fixed="right">
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
-              <el-button link type="warning" size="small" @click="addMaterialFor(row)">添加资料</el-button>
-              <el-button link type="warning" size="small" @click="openEdit(row)">编辑</el-button>
-              <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
-              <el-button link type="warning" size="small" @click="execPlan(row)">执行</el-button>
-              <el-button link type="warning" size="small" @click="notePlan(row)">备注</el-button>
-              <el-button link type="danger" size="small" @click="cancelPlan(row)">取消</el-button>
+              <template v-if="tab === 'canceled'">
+                <el-button link type="warning" size="small" @click="addMaterialFor(row)">添加资料</el-button>
+                <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
+                <el-button link type="primary" size="small" @click="restorePlan(row)">恢复</el-button>
+              </template>
+              <template v-else>
+                <el-button link type="warning" size="small" @click="addMaterialFor(row)">添加资料</el-button>
+                <el-button link type="warning" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
+                <el-button link type="warning" size="small" @click="execPlan(row)">执行</el-button>
+                <el-button link type="warning" size="small" @click="notePlan(row)">备注</el-button>
+                <el-button link type="danger" size="small" @click="cancelPlan(row)">取消</el-button>
+              </template>
             </div>
             <el-button v-else-if="canWrite('planQuantities')" link type="primary" size="small" @click="openQuantities(row)">填写施工量</el-button>
             <span v-else style="color:var(--text-3)">-</span>
