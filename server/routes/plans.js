@@ -264,7 +264,47 @@ app.delete('/api/workPlans/:id/package', (req, res) => {
   res.json({ ok: true });
 });
 
-// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings /:id/package 注册）
+// ---------- 施工资料 · 现场勘察记录（挂在计划记录上；老记录无 survey 字段按 null 处理） ----------
+// 部门（班组）与勘察编号不落库，生成时再从计划读 team / surveyNo
+const SURVEY_TEXT_FIELDS = ['dualName', 'workTask', 'outageScope', 'retainedLive', 'ground10', 'ground04', 'surveyDate'];
+function planSurvey(p) {
+  const v = p && p.survey;
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+}
+app.put('/api/workPlans/:id/survey', (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  const b = req.body || {};
+  // 白名单收字段：字符串去空白，危险点逐条清洗
+  const survey = {};
+  SURVEY_TEXT_FIELDS.forEach(k => { survey[k] = String(b[k] == null ? '' : b[k]).trim(); });
+  const raw = Array.isArray(b.hazardPoints) ? b.hazardPoints : [];
+  const points = [];
+  for (let i = 0; i < raw.length; i++) {
+    const h = raw[i] || {};
+    const title = String(h.title == null ? '' : h.title).trim();
+    const measure = String(h.measure == null ? '' : h.measure).trim();
+    if (!title) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点缺少标题' });
+    if (!measure) return res.status(400).json({ error: '第 ' + (i + 1) + ' 条危险点「' + title + '」缺少对应安全措施' });
+    points.push({
+      id: h.id ? String(h.id) : genId('hp'),
+      hazardId: h.hazardId ? String(h.hazardId) : '',
+      title,
+      situation: String(h.situation == null ? '' : h.situation).trim(),
+      measure
+    });
+  }
+  survey.hazardPoints = points;
+  // 首次创建保留原 createdAt；更新只刷新 updatedAt
+  const prev = planSurvey(p);
+  survey.createdAt = (prev && prev.createdAt) || nowISO();
+  survey.updatedAt = nowISO();
+  p.survey = survey;
+  saveDB();
+  res.json(p.survey);
+});
+
+// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings /:id/package /:id/survey 注册）
 ['plans', 'borrowWorks', 'workPlans'].forEach(c => {
   crud(c, c, { biz: true, soft: true });
 });

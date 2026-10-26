@@ -598,6 +598,46 @@ async function listOk(p, token) {
     need(del2.status === 404, '无包删除应 404，实际 ' + del2.status);
     return 'zip→' + pk.id + ' / 7z 替换→' + r2.data.id + '（旧文件已删）/ 400x2 旧包不变 / 删除后 404';
   });
+  await step('plans', '现场勘察记录：创建 → 更新（createdAt 不变）→ 缺措施/缺标题 400 → 计划不存在 404', async () => {
+    const p = needOk(await api('POST', '/api/workPlans', {
+      token, body: { name: '冒烟勘察计划', planType: '周计划', content: '冒烟工作内容', outageRange: '冒烟停电范围', team: '施工一队' }
+    }), 'plan POST');
+    const before = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail');
+    need(before.survey === undefined || before.survey === null, '新建计划不应已有 survey');
+    const body1 = {
+      dualName: '10kV 冒烟线 001 号杆', workTask: '冒烟工作内容', outageScope: '冒烟停电范围',
+      retainedLive: '', ground10: '1 号杆', ground04: '', surveyDate: '2026-10-26',
+      hazardPoints: [{ id: 'hp1', hazardId: 'hx1', title: '触电', situation: '现场情况', measure: '验电接地' }]
+    };
+    const s1 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body1 }), 'survey PUT');
+    need(s1 && s1.createdAt && s1.updatedAt, '保存结果缺少 createdAt/updatedAt');
+    need(Array.isArray(s1.hazardPoints) && s1.hazardPoints.length === 1, '危险点未保存');
+    need(s1.hazardPoints[0].id === 'hp1' && s1.hazardPoints[0].hazardId === 'hx1', '危险点 id/hazardId 未按传入保留');
+    need(s1.hazardPoints[0].title === '触电' && s1.hazardPoints[0].measure === '验电接地', '危险点字段不符');
+    const createdAt = s1.createdAt;
+    const d1 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after survey');
+    need(d1.survey && d1.survey.dualName === '10kV 冒烟线 001 号杆', '保存后重读计划拿不到 survey');
+    // 二次 PUT：内容更新，createdAt 不变
+    const body2 = { ...body1, workTask: '改后的工作内容', hazardPoints: [...body1.hazardPoints, { id: 'hp2', hazardId: '', title: '自定义危险点', situation: '', measure: '自定义措施' }] };
+    const s2 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body2 }), 'survey PUT 2');
+    need(s2.createdAt === createdAt, '二次保存 createdAt 应保持不变（' + createdAt + ' → ' + s2.createdAt + '）');
+    need(s2.updatedAt >= createdAt, 'updatedAt 应刷新');
+    need(s2.workTask === '改后的工作内容' && s2.hazardPoints.length === 2, '二次保存内容不符');
+    // 某条 measure 为空 → 400，且已存记录不被改动
+    const badMsr = { ...body2, hazardPoints: [...body2.hazardPoints, { id: 'hp3', hazardId: '', title: '缺措施的条', situation: '', measure: '   ' }] };
+    const r400 = await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: badMsr });
+    need(r400.status === 400, '缺措施应 400，实际 ' + r400.status + ' ' + brief(r400.data));
+    need(/安全措施/.test(String((r400.data || {}).error)), '400 文案应提到安全措施：' + brief(r400.data));
+    const d3 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after 400');
+    need(d3.survey.hazardPoints.length === 2, '400 后已存记录不应被改动');
+    // 标题为空 → 400
+    const r400b = await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, hazardPoints: [{ id: 'hp4', hazardId: '', title: '  ', situation: '', measure: '措施' }] } });
+    need(r400b.status === 400, '缺标题应 400，实际 ' + r400b.status + ' ' + brief(r400b.data));
+    // 计划不存在 → 404
+    const r404 = await api('PUT', '/api/workPlans/nope_not_exist/survey', { token, body: body1 });
+    need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
+    return 'createdAt 稳定 ' + createdAt + '；缺措施/缺标题 400、不存在 404 均正确';
+  });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {
       token, body: { team: '冒烟班组', direction: '借出', reason: '冒烟测试', people: 2, status: '待审批' }
