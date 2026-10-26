@@ -502,18 +502,18 @@ const PlansView = {
       </div>
 
       <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
-        <el-table-column type="index" label="序号" width="50" align="center" />
-        <el-table-column prop="name" label="作业计划名称" min-width="160" show-overflow-tooltip />
-        <el-table-column prop="team" label="作业班组" min-width="100" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="leader" label="班组长" width="84" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="startDate" label="计划开始" width="100" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="endDate" label="计划结束" width="100" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="ticketType" label="工作票类型" min-width="140" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="voltage" label="电压等级" width="84" align="center" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="station" label="变电站/线路" min-width="110" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePerson" label="工作负责人" width="96" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="142" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column type="index" label="序号" width="52" align="center" />
+        <el-table-column prop="name" label="作业计划名称" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="team" label="作业班组" min-width="92" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="leader" label="班组长" width="76" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="startDate" label="计划开始" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="endDate" label="计划结束" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="ticketType" label="工作票类型" min-width="132" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="voltage" label="电压等级" width="78" align="center" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="station" label="变电站/线路" min-width="100" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePerson" label="工作负责人" width="92" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="144" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column label="操作" width="184" fixed="right">
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">

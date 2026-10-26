@@ -892,12 +892,14 @@
   .plan-toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
   .plan-toolbar .el-button { margin-left:0; }
   .plan-table { border-radius:10px; overflow:hidden; }
-  .plan-table th.el-table__cell { background:var(--surface-3) !important; color:var(--text-2); font-weight:600; font-size:12.5px; }
+  .plan-table th.el-table__cell { background:var(--surface-3) !important; color:var(--text-2); font-weight:600; font-size:12.5px; padding:7px 0; }
   .plan-table th.el-table__cell > .cell { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .plan-table td.el-table__cell { font-size:13px; }
-  /* 操作列：多链接紧凑排布，避免把行高撑到 90px+ */
-  .plan-acts { display:flex; flex-wrap:wrap; gap:2px 4px; }
-  .plan-acts .el-button { margin-left:0; font-size:12.5px; padding:0 2px; height:20px; }
+  .plan-table td.el-table__cell { font-size:13px; padding:7px 0; }
+  .plan-table .cell { line-height:20px; font-variant-numeric:tabular-nums; }
+  .plan-table .pf-nowrap .cell { white-space:nowrap; }
+  /* 操作列：3 列等宽网格，6 个动作固定两行、上下对齐（已取消页签 3 个动作则一行） */
+  .plan-acts { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:1px 4px; }
+  .plan-acts .el-button { margin-left:0; font-size:12.5px; padding:0; height:19px; justify-content:flex-start; }
   .plan-empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:28px 0 32px; color:var(--text-3); font-size:13px; }
   .plan-empty svg { width:52px; height:52px; color:var(--line-strong); }
   .plan-pager { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:10px; margin-top:14px; }
