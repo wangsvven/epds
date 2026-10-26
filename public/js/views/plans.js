@@ -229,17 +229,86 @@ const PlansView = {
         ElementPlus.ElMessage.success('备注已保存'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
-    // ---------- 施工资料弹窗（本期只做入口与骨架：勘察流程/图纸上传/压缩包/一键生成均为后续分项） ----------
+    // ---------- 施工资料弹窗（图纸区已接真实接口；勘察流程/生成资料/压缩包仍为后续分项） ----------
     const matDlg = reactive({
       visible: false,
       plan: null,
       genFiles: [],       // 生成资料（工作票资料）：后续分项填真实数据
-      drawingFiles: [],   // 图纸
-      packFiles: []       // 资料压缩包
+      packFiles: []       // 资料压缩包：后续分项填真实数据
     });
-    function openPlanMaterials(row) { matDlg.plan = row || null; matDlg.visible = true; }
-    // 占位：本期所有区块动作统一走这里，不假装执行真实动作
+    const matDrawingInput = ref(null);                                  // 图纸上传的隐藏 file 控件
+    // 图纸表直接绑当前计划的 drawings（老记录没有该字段按空数组）
+    const matDrawings = computed(() => (matDlg.plan && Array.isArray(matDlg.plan.drawings)) ? matDlg.plan.drawings : []);
+    // 打开弹窗时以服务端最新数据为准，保证刚上传完关掉重开能看到
+    async function openPlanMaterials(row) {
+      matDlg.plan = row || null;
+      matDlg.visible = true;
+      if (!row || !row.id) return;
+      try {
+        const fresh = await api.get('/api/workPlans/' + row.id);
+        if (fresh && matDlg.plan && matDlg.plan.id === row.id) {
+          if (!Array.isArray(fresh.drawings)) fresh.drawings = [];
+          matDlg.plan = fresh;
+        }
+      } catch (e) { /* 取最新失败就沿用列表里的数据，不打断弹窗 */ }
+    }
+    // 占位：勘察 / 生成资料 / 资料压缩包本期仍未接后端，统一走这里，不假装执行真实动作
     function matTodo() { ElementPlus.ElMessage.info('施工资料功能分项开发中'); }
+
+    // ---- 图纸：上传 / 下载 / 删除（单文件、不限类型，服务端 upload 单文件上限 20MB） ----
+    function triggerDrawingUpload() {
+      if (!matDlg.plan || !matDlg.plan.id) return;
+      if (matDrawingInput.value) { matDrawingInput.value.value = ''; matDrawingInput.value.click(); }
+    }
+    async function onDrawingUpload(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!file || !matDlg.plan) return;
+      if (file.size > 20 * 1024 * 1024) { ElementPlus.ElMessage.error('文件过大，单个图纸不超过 20MB'); return; }
+      const fd = new FormData();
+      fd.append('file', file);
+      try {
+        const item = await api.upload('/api/workPlans/' + matDlg.plan.id + '/drawings', fd);
+        if (!Array.isArray(matDlg.plan.drawings)) matDlg.plan.drawings = [];
+        matDlg.plan.drawings.push(item);
+        ElementPlus.ElMessage.success(file.name + ' 上传成功');
+      } catch (e) {
+        ElementPlus.ElMessage.error(e.message || '上传失败');
+      }
+    }
+    // 创建时间：与文档中心文件表同一格式（YYYY-MM-DD HH:mm，本地时区）
+    function matFmtTime(s) {
+      if (!s) return '-';
+      const d = new Date(s);
+      if (isNaN(d)) return s;
+      const p = n => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+    async function matDownloadDrawing(f) {
+      try {
+        const r = await fetch('/api/workPlans/' + matDlg.plan.id + '/drawings/' + f.id + '/download', {
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '下载失败'); }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = f.name || '图纸';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      } catch (e) { ElementPlus.ElMessage.error(e.message || '下载失败'); }
+    }
+    async function matDeleteDrawing(f) {
+      try {
+        await ElementPlus.ElMessageBox.confirm('确认删除图纸「' + f.name + '」？删除后文件不可恢复。', '删除图纸', { type: 'warning' });
+      } catch (e) { return; }
+      try {
+        await api.del('/api/workPlans/' + matDlg.plan.id + '/drawings/' + f.id);
+        matDlg.plan.drawings = (matDlg.plan.drawings || []).filter(x => x.id !== f.id);
+        ElementPlus.ElMessage.success('已删除');
+      } catch (e) { ElementPlus.ElMessage.error(e.message || '删除失败'); }
+    }
     // ---------- 人员安排：从作业人员名单勾选（按班组/身份分组，全选支持） ----------
     const workersFull = ref([]);
     const contacts = ref([]);
@@ -441,7 +510,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -959,13 +1028,20 @@ const PlansView = {
         <div style="border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:18px;background:var(--surface-2)">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
             <span style="font-size:15px;font-weight:600">图纸</span>
-            <el-button size="small" @click="matTodo">上传图纸</el-button>
+            <el-button size="small" @click="triggerDrawingUpload">上传图纸</el-button>
           </div>
-          <el-table :data="matDlg.drawingFiles" class="mat-file-table" size="small" border empty-text="暂无图纸" style="width:100%">
+          <el-table :data="matDrawings" class="mat-file-table" size="small" border empty-text="暂无图纸" style="width:100%">
             <el-table-column prop="category" label="资料类别" width="180" />
             <el-table-column prop="name" label="文件名称" min-width="260" show-overflow-tooltip />
-            <el-table-column prop="createdAt" label="创建时间" width="180" />
-            <el-table-column label="操作" width="140" />
+            <el-table-column label="创建时间" width="180">
+              <template #default="{ row }"><span style="color:var(--text-2)">{{ matFmtTime(row.uploadedAt) }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" @click="matDownloadDrawing(row)">下载</el-button>
+                <el-button link type="danger" size="small" @click="matDeleteDrawing(row)">删除</el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </div>
 
@@ -984,6 +1060,7 @@ const PlansView = {
           </el-table>
         </div>
       </div>
+      <input ref="matDrawingInput" type="file" style="display:none" @change="onDrawingUpload" />
       <template #footer>
         <el-button @click="matDlg.visible=false">关 闭</el-button>
       </template>

@@ -1,5 +1,9 @@
 /* ========== routes/plans ========== */
-/* 计划管理：作业计划（导入 / 导出 / 班组长当日计划工作量）与 plans、borrowWorks、workPlans 集合 CRUD。 */
+/* 计划管理：作业计划（导入 / 导出 / 班组长当日计划工作量 / 施工资料图纸）与 plans、borrowWorks、workPlans 集合 CRUD。 */
+const fs = require('fs');
+const path = require('path');
+const ROOT = path.join(__dirname, '..', '..');
+
 const xlsx = require('xlsx');
 
 const app = require('../core/app');
@@ -107,7 +111,75 @@ app.put('/api/workPlans/:id/quantities', (req, res) => {
   res.json(p);
 });
 
-// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities 注册）
+// ---------- 施工资料 · 图纸（挂在计划记录上；老记录无 drawings 字段一律按空数组处理） ----------
+// 命名与磁盘落盘方式沿用 routes/projects.js 的同款做法（uploads/plans/<计划id>/<时间戳>_<安全文件名>）
+function planDrawings(p) {
+  if (!Array.isArray(p.drawings)) p.drawings = [];
+  return p.drawings;
+}
+function findPlan(id) {
+  const p = (DB.workPlans || []).find(x => x.id === id);
+  if (!p || p.deleted) return null;
+  return p;
+}
+function planFileSafeName(name) {
+  return String(name).replace(/[/\\?%*:|"<>\x00-\x1f]/g, '_').slice(-120);
+}
+app.post('/api/workPlans/:id/drawings', upload.single('file'), (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  if (!req.file) return res.status(400).json({ error: '未收到文件' });
+  const dir = path.join(ROOT, 'data', 'uploads', 'plans', p.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const diskName = Date.now() + '_' + planFileSafeName(req.file.originalname);
+  fs.writeFileSync(path.join(dir, diskName), req.file.buffer);
+  const item = {
+    id: genId('dw'),
+    category: '图纸',
+    name: req.file.originalname,
+    size: req.file.size,
+    path: 'uploads/plans/' + p.id + '/' + diskName,
+    uploadedAt: nowISO()
+  };
+  planDrawings(p).push(item);
+  saveDB();
+  res.json(item);
+});
+// 下载：与 /api/projects/:id/files/:fid/download 同一套（uploads 不做静态托管，只能走接口）
+// ?inline=1 时对 PDF/图片给可预览的 Content-Type，供前端「打开」用
+const DRAWING_INLINE_MIME = {
+  pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+  txt: 'text/plain; charset=utf-8'
+};
+app.get('/api/workPlans/:id/drawings/:fileId/download', (req, res) => {
+  const p = findPlan(req.params.id);
+  // 下载是只读接口：不初始化 drawings（避免 GET 顺手改记录）
+  const f = p && (Array.isArray(p.drawings) ? p.drawings : []).find(x => x.id === req.params.fileId);
+  const fp = f && path.join(ROOT, 'data', f.path);
+  if (!f || !fs.existsSync(fp)) return res.status(404).json({ error: '文件不存在' });
+  const ext = String(f.name || '').split('.').pop().toLowerCase();
+  const inline = req.query.inline === '1' && DRAWING_INLINE_MIME[ext];
+  res.setHeader('Content-Type', inline || 'application/octet-stream');
+  res.setHeader('Content-Disposition', (inline ? 'inline' : 'attachment') + '; filename="' + encodeURIComponent(f.name) + '"');
+  fs.createReadStream(fp).pipe(res);
+});
+app.delete('/api/workPlans/:id/drawings/:fileId', (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  const list = planDrawings(p);
+  const idx = list.findIndex(x => x.id === req.params.fileId);
+  if (idx < 0) return res.status(404).json({ error: '未找到图纸' });
+  const [f] = list.splice(idx, 1);
+  // 只删本模块目录下的文件；unlink 失败静默（记录已移除，不留脏数据）
+  if (f && typeof f.path === 'string' && f.path.startsWith('uploads/plans/')) {
+    try { fs.unlinkSync(path.join(ROOT, 'data', f.path)); } catch (e) {}
+  }
+  saveDB();
+  res.json({ ok: true });
+});
+
+// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings 注册）
 ['plans', 'borrowWorks', 'workPlans'].forEach(c => {
   crud(c, c, { biz: true, soft: true });
 });

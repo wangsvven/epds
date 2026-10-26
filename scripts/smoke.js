@@ -499,6 +499,39 @@ async function listOk(p, token) {
     need(one.project === '冒烟测试项目', 'detail.project 不匹配');
     return 'id=' + d.id;
   });
+  await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
+    const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');
+    need(p && p.id, '响应缺少 id');
+    // 老记录（刚建、无 drawings 字段）详情不应报错
+    const before = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'plan detail');
+    need(!before.drawings || Array.isArray(before.drawings), 'drawings 应为数组或不存在');
+    // 1x1 PNG
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const fd = new FormData();
+    fd.append('file', new Blob([png], { type: 'image/png' }), '冒烟图纸.png');
+    const upRes = await fetch(base + '/api/workPlans/' + p.id + '/drawings', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd, signal: AbortSignal.timeout(10000)
+    });
+    const dw = await upRes.json();
+    need(upRes.status === 200 && dw && dw.id, '图纸上传失败：' + brief(dw));
+    need(/^dw/.test(dw.id), '图纸 id 前缀应为 dw，实际 ' + brief(dw.id));
+    need(dw.category === '图纸' && dw.name === '冒烟图纸.png', '类别/文件名不符：' + brief({ c: dw.category, n: dw.name }));
+    need(dw.size === png.length, 'size 应为 ' + png.length + '，实际 ' + brief(dw.size));
+    need(String(dw.path).startsWith('uploads/plans/' + p.id + '/'), 'path 不符：' + brief(dw.path));
+    need(!!dw.uploadedAt, '缺少 uploadedAt');
+    // 下载能拿回原字节
+    const dl = await fetch(base + '/api/workPlans/' + p.id + '/drawings/' + dw.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(dl.status === 200, '下载期望 200，实际 ' + dl.status);
+    const got = Buffer.from(await dl.arrayBuffer());
+    need(got.length === png.length && got.equals(png), '下载内容与上传不一致');
+    // 删除后记录消失、文件不可再下载
+    needOk(await api('DELETE', '/api/workPlans/' + p.id + '/drawings/' + dw.id, { token }), 'drawings DELETE');
+    const after = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'plan detail after');
+    need(!(after.drawings || []).some(x => x.id === dw.id), '删除后 drawings 仍含该记录');
+    const dl2 = await fetch(base + '/api/workPlans/' + p.id + '/drawings/' + dw.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
+    return 'id=' + dw.id + ' size=' + dw.size + ' 删除后 404';
+  });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {
       token, body: { team: '冒烟班组', direction: '借出', reason: '冒烟测试', people: 2, status: '待审批' }
