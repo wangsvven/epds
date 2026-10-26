@@ -906,6 +906,8 @@
   .pp-total { font-size:12.5px; color:var(--text-3); }
   .pp-size { width:110px; }
   .plan-pager .el-button { margin-left:0; }
+  /* 施工资料弹窗·文件表：空态文字按正常行距换行（EP 默认 .el-table__empty-text 行高 60px，窄屏换行后会出现大空档） */
+  .mat-file-table .el-table__empty-text { line-height: 1.7; padding: 6px 0; }
   /* 项目详情 · 周计划表格：7 列紧凑排布，时间/编号单行不换行，数字等宽 */
   .proj-plan-table { border-radius:8px; overflow:hidden; }
   .proj-plan-table th.el-table__cell { background:var(--surface-3) !important; color:var(--text-2); font-weight:600; font-size:12.5px; padding:7px 0; }

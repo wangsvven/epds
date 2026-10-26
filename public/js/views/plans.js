@@ -229,7 +229,17 @@ const PlansView = {
         ElementPlus.ElMessage.success('备注已保存'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
-    function addMaterialFor(row) { ElementPlus.ElMessage.info('请在「项目列表」对应项目详情中上传该计划的施工资料'); }
+    // ---------- 施工资料弹窗（本期只做入口与骨架：勘察流程/图纸上传/压缩包/一键生成均为后续分项） ----------
+    const matDlg = reactive({
+      visible: false,
+      plan: null,
+      genFiles: [],       // 生成资料（工作票资料）：后续分项填真实数据
+      drawingFiles: [],   // 图纸
+      packFiles: []       // 资料压缩包
+    });
+    function openPlanMaterials(row) { matDlg.plan = row || null; matDlg.visible = true; }
+    // 占位：本期所有区块动作统一走这里，不假装执行真实动作
+    function matTodo() { ElementPlus.ElMessage.info('施工资料功能分项开发中'); }
     // ---------- 人员安排：从作业人员名单勾选（按班组/身份分组，全选支持） ----------
     const workersFull = ref([]);
     const contacts = ref([]);
@@ -431,7 +441,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -517,12 +527,12 @@ const PlansView = {
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">
-                <el-button link type="warning" size="small" @click="addMaterialFor(row)">添加资料</el-button>
+                <el-button link type="warning" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
                 <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
                 <el-button link type="primary" size="small" @click="restorePlan(row)">恢复</el-button>
               </template>
               <template v-else>
-                <el-button link type="warning" size="small" @click="addMaterialFor(row)">添加资料</el-button>
+                <el-button link type="warning" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
                 <el-button link type="warning" size="small" @click="openEdit(row)">编辑</el-button>
                 <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
                 <el-button link type="warning" size="small" @click="execPlan(row)">执行</el-button>
@@ -914,6 +924,68 @@ const PlansView = {
       <template #footer>
         <el-button @click="staffPick.visible=false">取 消</el-button>
         <el-button type="primary" @click="confirmStaffPick">确 定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 施工资料：本期只做入口与弹窗骨架（勘察流程 / 图纸 / 压缩包 / 一键生成均为后续分项，动作统一占位） -->
+    <el-dialog v-model="matDlg.visible" :title="'施工资料 - ' + ((matDlg.plan && (matDlg.plan.project || matDlg.plan.name)) || '')" width="min(1120px, 94%)" top="5vh">
+      <div style="max-height:70vh;overflow:auto;padding-right:4px">
+        <!-- 现场勘察记录 -->
+        <div style="border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:18px;background:var(--surface-2)">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <span style="font-size:15px;font-weight:600">现场勘察记录</span>
+            <el-link type="primary" :underline="false" @click="matTodo">未勘察 · 开始勘察</el-link>
+          </div>
+        </div>
+
+        <!-- 生成资料 -->
+        <div style="border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:18px;background:var(--surface-2)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+            <span style="font-size:15px;font-weight:600">生成资料</span>
+            <div style="display:flex;gap:10px">
+              <el-button type="primary" size="small" @click="matTodo">修改签字页</el-button>
+              <el-button type="primary" size="small" @click="matTodo">一键生成作业资料</el-button>
+            </div>
+          </div>
+          <el-table :data="matDlg.genFiles" class="mat-file-table" size="small" border empty-text="完成现场勘察后，可生成工作票资料" style="width:100%">
+            <el-table-column prop="category" label="资料类别" width="180" />
+            <el-table-column prop="name" label="文件名称" min-width="260" show-overflow-tooltip />
+            <el-table-column prop="createdAt" label="创建时间" width="180" />
+            <el-table-column label="操作" width="140" />
+          </el-table>
+        </div>
+
+        <!-- 图纸 -->
+        <div style="border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:18px;background:var(--surface-2)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+            <span style="font-size:15px;font-weight:600">图纸</span>
+            <el-button size="small" @click="matTodo">上传图纸</el-button>
+          </div>
+          <el-table :data="matDlg.drawingFiles" class="mat-file-table" size="small" border empty-text="暂无图纸" style="width:100%">
+            <el-table-column prop="category" label="资料类别" width="180" />
+            <el-table-column prop="name" label="文件名称" min-width="260" show-overflow-tooltip />
+            <el-table-column prop="createdAt" label="创建时间" width="180" />
+            <el-table-column label="操作" width="140" />
+          </el-table>
+        </div>
+
+        <!-- 资料压缩包 -->
+        <div style="border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:18px;background:var(--surface-2)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+            <span style="font-size:15px;font-weight:600">资料压缩包</span>
+            <el-button size="small" @click="matTodo">上传压缩包</el-button>
+          </div>
+          <div style="font-size:12.5px;color:var(--text-3);margin:-2px 0 10px">ZIP、7z、RAR，单文件不超过 1MB。上传成功后替换当前包；上传失败时旧包仍可使用。</div>
+          <el-table :data="matDlg.packFiles" class="mat-file-table" size="small" border empty-text="暂无资料压缩包" style="width:100%">
+            <el-table-column prop="category" label="资料类别" width="180" />
+            <el-table-column prop="name" label="文件名称" min-width="260" show-overflow-tooltip />
+            <el-table-column prop="createdAt" label="创建时间" width="180" />
+            <el-table-column label="操作" width="140" />
+          </el-table>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="matDlg.visible=false">关 闭</el-button>
       </template>
     </el-dialog>
   </div>`
