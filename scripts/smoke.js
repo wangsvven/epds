@@ -429,6 +429,64 @@ async function listOk(p, token) {
     return `组 ${agg.kindCount} / 已到 ${agg.arrivedKindCount} / 未到 ${agg.notArrivedKindCount} · D1 未与同名异码合并 · 动态 ${rr.length} 条`;
   });
 
+  /* ---------- 计划编号（纯函数与前端共用） ---------- */
+  const planNo = (() => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'plan-no.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    return sandbox.window.PlanNo;
+  })();
+
+  await step('plans', '编号规则：勘察按月取最大流水 +1，跨月归零', async () => {
+    const ym = '202610';
+    const plans = [
+      { surveyNo: '202610001' }, { surveyNo: '202610004' }, { surveyNo: ' 202610007 ' },
+      { surveyNo: '202609009' }, { surveyNo: '202611002' }, { surveyNo: '20261001' }, { surveyNo: '' }
+    ];
+    need(planNo.nextSurveyNo(plans, ym) === '202610008', '当月最大 007 → 应为 202610008，实际 ' + planNo.nextSurveyNo(plans, ym));
+    need(planNo.nextSurveyNo(plans, '202612') === '202612001', '跨月应归零到 001，实际 ' + planNo.nextSurveyNo(plans, '202612'));
+    need(planNo.nextSurveyNo([], ym) === '202610001', '无记录时应为 001');
+    return `202610 → ${planNo.nextSurveyNo(plans, ym)} · 202612 → 202612001`;
+  });
+
+  await step('plans', '编号规则：工作票按类型各走各的流水（不同类型各出 001）', async () => {
+    const ym = '202610';
+    const T = planNo.TICKET_TYPES;
+    need(T.length === 5, '工作票类型应为 5 种，实际 ' + T.length);
+    need(Object.keys(planNo.TICKET_NO_CODE).length === 5, '类型码应为 5 条');
+    const plans = [
+      { ticketType: T[0], workTicketNo: '20261068001' },
+      { ticketType: T[0], workTicketNo: '20261068002' },
+      { ticketType: T[3], workTicketNo: '20261067001' },
+      { ticketType: T[1], workTicketNo: '20260978005' }   // 上个月的不算
+    ];
+    need(planNo.nextTicketNo(plans, ym, T[0]) === '20261068003', '配电第一种应 68003，实际 ' + planNo.nextTicketNo(plans, ym, T[0]));
+    need(planNo.nextTicketNo(plans, ym, T[3]) === '20261067002', '线路第一种应独立算 67002，实际 ' + planNo.nextTicketNo(plans, ym, T[3]));
+    need(planNo.nextTicketNo(plans, ym, T[1]) === '20261078001', '配电第二种当月无记录应 78001，实际 ' + planNo.nextTicketNo(plans, ym, T[1]));
+    need(planNo.nextTicketNo(plans, ym, T[2]) === '20261098001', '配电低压应 98001');
+    need(planNo.nextTicketNo(plans, ym, T[4]) === '20261077001', '线路第二种应 77001');
+    need(planNo.nextTicketNo(plans, ym, '未映射的类型') === ym, '映射表外应只带年月');
+    return T.map(t => planNo.TICKET_NO_CODE[t] + '→' + planNo.nextTicketNo(plans, ym, t)).join(' ');
+  });
+
+  await step('plans', '编号规则：格式不符的手填编号不干扰解析', async () => {
+    const ym = '202610';
+    const plans = [
+      { surveyNo: '202610003' },
+      { surveyNo: '2026100' }, { surveyNo: '2026100003' }, { surveyNo: 'ABC' }, { surveyNo: '20261000X' }, { surveyNo: null },
+      { ticketType: '配电：配电第一种工作票', workTicketNo: '20261068005' },
+      { ticketType: '配电：配电第一种工作票', workTicketNo: '20261068' },
+      { ticketType: '配电：配电第一种工作票', workTicketNo: '2026106800X' },
+      { ticketType: '配电：配电第一种工作票', workTicketNo: '202610680005' },
+      { ticketType: '配电：配电第一种工作票', workTicketNo: '' }
+    ];
+    need(planNo.nextSurveyNo(plans, ym) === '202610004', '勘察应为 004，实际 ' + planNo.nextSurveyNo(plans, ym));
+    need(planNo.nextTicketNo(plans, ym, '配电：配电第一种工作票') === '20261068006', '工作票应为 68006，实际 ' + planNo.nextTicketNo(plans, ym, '配电：配电第一种工作票'));
+    return '脏编号被忽略：勘察 → 202610004、工作票 → 20261068006';
+  });
+
   /* ---------- plans / borrow ---------- */
   await step('plans', '计划列表 GET /api/plans', async () => listOk('/api/plans', token).then(d => d.length + ' 条'));
   await step('plans', '作业计划 新增 → 详情', async () => {

@@ -8,7 +8,8 @@ const PlansView = {
       { key: 'week', label: '周计划管理' }, { key: 'month', label: '月计划管理' }, { key: 'archived', label: '已归档月计划' },
       { key: 'executed', label: '已执行' }, { key: 'settled', label: '已结算零星计划' }, { key: 'canceled', label: '已取消周计划' }
     ];
-    const TICKET_TYPES = ['配电：配电第一种工作票', '配电：配电第二种工作票', '低压：低压工作票', '线路：线路第一种工作票', '线路：线路第二种工作票', '配电：低压工作票'];
+    // 工作票类型与类型码集中在 js/plan-no.js（与编号纯函数同源，避免两处漂移）
+    const TICKET_TYPES = PlanNo.TICKET_TYPES;
     const VOLTAGE_LEVELS = ['0.4kV', '10kV', '20kV', '35kV', '110kV', '220kV'];
     const WORK_TYPES = ['配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程', '借工'];
     const SPECIALTIES = ['运检', '营销'];
@@ -68,7 +69,7 @@ const PlansView = {
     const projects = ref([]); const projectsFull = ref([]); const teams = ref([]); const workers = ref([]);
     const filters = reactive({ startDate: '', endDate: '', name: '', content: '', noProject: false, team: '', leader: '', ticketType: '', projectScope: [] });
     const page = ref(1); const pageSize = ref(20);
-    const dlg = reactive({ visible: false, editingId: null, form: null });
+    const dlg = reactive({ visible: false, editingId: null, form: null, ticketNoDirty: false });
     const emptyForm = () => ({
       name: '', content: '', shadowContent: '', planType: '周计划',
       project: '', subProject: '', workType: '配农网工程',
@@ -190,6 +191,10 @@ const PlansView = {
         const body = JSON.parse(JSON.stringify(row));
         delete body.id; delete body.createdAt;
         body.name = (row.name || '') + '（副本）'; body.status = '未执行';
+        // 编号按规则重新生成，不连号复制：年月取复制当天，工作票走被复制记录那条类型线
+        const ym = PlanNo.ymOf(new Date());
+        body.surveyNo = PlanNo.nextSurveyNo(list.value, ym);
+        body.workTicketNo = PlanNo.nextTicketNo(list.value, ym, body.ticketType);
         await api.post('/api/workPlans', body);
         ElementPlus.ElMessage.success('已复制为新计划'); load();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
@@ -278,14 +283,17 @@ const PlansView = {
       const fb = unitsByType('分包单位'); if (fb.length) dlg.form.subcontractors = [fb[0].name];
       const sj = unitsByType('监理单位'); if (sj.length) dlg.form.supervisor = sj[0].name;
       const cs = unitsByType('抄送单位'); if (cs.length) dlg.form.ccUnits = cs.slice(0, 2).map(u => u.name);
-      // 编号规则：年+月+流水号，自动带出年+月（如 202610），流水号由用户续填
-      const d0 = new Date();
-      const ym = d0.getFullYear() + String(d0.getMonth() + 1).padStart(2, '0');
-      dlg.form.surveyNo = ym; dlg.form.workTicketNo = ym;
+      // 编号自动生成：勘察 = 年月 + 当月最大流水 +1；工作票 = 年月 + 类型码 + 该类型最大流水 +1
+      // 统计口径 = list（GET /api/workPlans 的全量存活记录，不受页签/筛选/分页影响）
+      const ym = PlanNo.ymOf(new Date());
+      dlg.form.surveyNo = PlanNo.nextSurveyNo(list.value, ym);
+      dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, ym, dlg.form.ticketType);
+      dlg.ticketNoDirty = false;
       dlg.visible = true;
     }
     function openEdit(row) {
       dlg.editingId = row.id; dlg.form = JSON.parse(JSON.stringify(row)); dlg.visible = true;
+      dlg.ticketNoDirty = false;   // 编辑模式不重算编号，也不因切换类型而改写
       if (!dlg.form.controlMeasures && (dlg.form.riskFactors || []).length) dlg.form.controlMeasures = genMeasures(dlg.form.riskFactors);
       // 字段规范化（老数据补齐）
       ['subcontractors', 'ccUnits', 'chargePersons'].forEach(k => { if (!Array.isArray(dlg.form[k])) dlg.form[k] = []; });
@@ -407,7 +415,15 @@ const PlansView = {
       finally { qtyDlg.busy = false; }
     }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, substations, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities };
+    // 新增模式切换工作票类型 → 立即按新类型重算；用户手改过编号（脏标记）后不再覆盖；编辑模式一律不动
+    function onTicketTypeChange(v) {
+      if (dlg.editingId || dlg.ticketNoDirty) return;
+      const type = v || (dlg.form && dlg.form.ticketType);
+      dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, PlanNo.ymOf(new Date()), type);
+    }
+    function onTicketNoInput() { dlg.ticketNoDirty = true; }
+
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, notePlan, addMaterialFor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, substations, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -608,7 +624,7 @@ const PlansView = {
           </el-col>
           <el-col :xs="24" :sm="12">
             <el-form-item label="工作票类型">
-              <el-select v-model="dlg.form.ticketType" style="width:100%">
+              <el-select v-model="dlg.form.ticketType" style="width:100%" @change="onTicketTypeChange">
                 <el-option v-for="t in TICKET_TYPES" :key="t" :label="t" :value="t" />
               </el-select>
             </el-form-item>
@@ -852,12 +868,12 @@ const PlansView = {
           </el-col>
           <el-col :xs="24" :sm="12">
             <el-form-item label="勘察编号">
-              <el-input v-model="dlg.form.surveyNo" placeholder="年+月+流水号（年月已自动带出）" />
+              <el-input v-model="dlg.form.surveyNo" placeholder="自动生成，可手动修改" />
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
             <el-form-item label="工作票编号">
-              <el-input v-model="dlg.form.workTicketNo" placeholder="年+月+流水号（年月已自动带出）" />
+              <el-input v-model="dlg.form.workTicketNo" placeholder="自动生成，可手动修改" @input="onTicketNoInput" />
             </el-form-item>
           </el-col>
         </el-row>
