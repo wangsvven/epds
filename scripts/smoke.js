@@ -831,8 +831,9 @@ async function listOk(p, token) {
     // 4b) 填了的槽位正常落值
     need(gt.indexOf('冒烟供电所') > -1, '槽位1 勘察单位缺失');
     need(gt.indexOf('佛荫供电所202610001') > -1, '槽位3 编号应为「部门+编号」拼法：' + gt.slice(0, 160));
-    need(gt.indexOf('1小组：1 号杆') > -1 && gt.indexOf('2小组：2 号杆') > -1, '槽位5 工作地点未按小组拼接');
     need(gt.indexOf('1小组：立杆') > -1 && gt.indexOf('2小组：放线') > -1, '槽位6 工作内容未按小组拼接');
+    // 4b') 槽位5「工作地点」整段不输出（参考文档第 3 项只有工作内容一行）
+    need(gt.indexOf('工作地点：') < 0 && gt.indexOf('1小组：1 号杆') < 0, '槽位5 工作地点整段不应输出：' + gt.slice(0, 200));
     // 4c) 多行逐段：4.3 环境描述与两条危险点各自独立成段
     const pe = paras.indexOf('现场有跨越，邻近 10kV 线路');
     need(pe > -1, '槽位9 环境描述缺失');
@@ -855,12 +856,12 @@ async function listOk(p, token) {
     // 4g) 日期与记录人
     need(gt.indexOf('|2026|10|19') > -1, '槽位15-17 勘察日期应为 2026/10/19 三个数字槽：' + gt.slice(-60));
     need(gt.indexOf('|' + recName) > -1, '槽位14 记录人应为当前登录用户（' + recName + '）');
-    // 4b) 槽位5 改取计划作业地址原值（不再用 survey.workLocation / 分组拼接）；槽位6 仍按小组拼工作内容
+    // 4b) 槽位5「工作地点」整段不输出：改计划地址后产物里也不应出现该行；槽位6 仍按小组拼工作内容
     needOk(await api('PUT', '/api/workPlans/' + p.id, { token, body: { address: '冒烟作业地址' } }), 'plan address PUT');
     needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate after address');
     const gtA = [...unzipEntry(fs.readFileSync(absG), 'word/document.xml').toString('utf8')
       .matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map(m => m[1]).join('|');
-    need(gtA.indexOf('冒烟作业地址') > -1, '槽位5 应取计划作业地址：' + gtA.slice(0, 160));
+    need(gtA.indexOf('冒烟作业地址') < 0, '槽位5 工作地点整段不应输出（计划地址也不应出现）：' + gtA.slice(0, 160));
     need(gtA.indexOf('1小组：立杆') > -1 && gtA.indexOf('2小组：放线') > -1, '槽位6 工作内容仍应按小组拼接');
     // 5) 改一处内容再生成 → 原地覆盖同一份，不新增勘察单
     needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
@@ -892,7 +893,7 @@ async function listOk(p, token) {
     need(d2.generatedFiles.length === 0, '删除后应没有生成记录：' + brief(d2.generatedFiles.map(x => x.id)));
     const dl2 = await fetch(base + '/api/workPlans/' + p.id + '/generated/' + gf1.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
     need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
-    return '空槽保留 XXXX（仅 4.5 1 处）/ 运维空值置空 / 编号拼法 / 小组拼接 / 4.3 与通用风险逐行成段 / 接地线并入通用风险（N+1 编号 + 分别在/逐行/验明…）/ 日期 2026-10-19 / 记录人 ' + recName + ' / 重复生成原地覆盖（1 条）/ 删除后清空';
+    return '空槽保留 XXXX（仅 4.5 1 处）/ 运维空值置空 / 工作地点整段不输出 / 编号拼法 / 工作内容按小组拼 / 4.3 与通用风险逐行成段 / 接地线并入通用风险（N+1 编号 + 分别在/逐行/验明…）/ 日期 2026-10-19 / 记录人 ' + recName + ' / 重复生成原地覆盖（1 条）/ 删除后清空';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

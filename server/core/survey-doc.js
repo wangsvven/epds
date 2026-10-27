@@ -124,9 +124,9 @@ function surveySlots(plan, survey, recorder) {
     str(sv.team) || str(plan && plan.team),          // 2 部门（班组）
     surveyNoText(plan, sv),                          // 3 编号（survey 里已是完整编号，直接用；未带部门前缀时才拼）
     str(sv.dualName),                                // 4 双重名称
-    // 5 工作地点：取计划的作业地址原值（编辑器不再单独存「工作地点」）；
-    //   计划无地址的老数据回落 survey.workLocation / 分组拼接，避免空白
-    str(plan && plan.address) || groupOrFallback(sv, 'workLocation'),
+    // 5 工作地点：参考文档第 3 项只输出「工作内容：…」一行，没有「工作地点：…」这一行
+    //   → 该槽位连同模板里的固定标签整段不输出（见 DROP_SLOT_PARAS），值本身不再参与生成
+    '',
     groupOrFallback(sv, 'workTask'),                 // 6 工作内容（= 编辑器「3.工作任务」合并框）
     str(sv.outageScope),                             // 7 4.1 停电范围
     str(sv.retainedLive),                            // 8 4.2 保留带电部位
@@ -178,13 +178,19 @@ function expandParagraph(xml, at, ls) {
 // 逐个按序替换 XXXX（只替换到 17 处，替换进来的文本不会被再次扫描）
 //   空值：保留模板 XXXX（打印后手填）；只有槽位 10「运维人员措施」空值才替换为空字符串
 //   多行：逐行成段（见 expandParagraph）
+//   整段不输出：槽位 5「工作地点」——参考文档第 3 项没有这一行，模板里的「工作地点：」标签一并去掉
 const EMPTY_KEEPS_XXXX_EXCEPT = 10;
+const DROP_SLOT_PARAS = [5];
 function fillTemplate(xml, slots) {
   let out = xml;
   let from = 0;
   for (let i = 0; i < SLOT_COUNT; i++) {
     const at = out.indexOf('XXXX', from);
     if (at < 0) break;
+    if (DROP_SLOT_PARAS.indexOf(i + 1) > -1) {      // 整段删掉（含段落里的固定标签）
+      const r = paraRangeAt(out, at);
+      if (r) { out = out.slice(0, r.pStart) + out.slice(r.pEnd); from = r.pStart; continue; }
+    }
     const raw = String(slots[i] == null ? '' : slots[i]);
     if (!raw && (i + 1) !== EMPTY_KEEPS_XXXX_EXCEPT) { from = at + 4; continue; }
     const ls = raw.replace(/\r\n?/g, '\n').split('\n');
