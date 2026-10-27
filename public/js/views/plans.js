@@ -442,6 +442,14 @@ const PlansView = {
     const SV_BANNER_SAVED = '在线编辑内容已保存';
     const SV_BANNER_GENERATED = '已生成「现场勘察记录.docx」；继续修改后再次点「保存并生成」会覆盖更新同一份，不会新增勘察单。';
     const SV_BANNER_UPDATED = '已更新「现场勘察记录.docx」（覆盖同一份，未新增勘察单）。';
+    // 编辑器标题：现场勘察记录在线编辑（结构化槽位） - {关联项目名}
+    const surveyTitle = computed(() => {
+      const p = matDlg.plan || {};
+      const proj = String(p.project || '').trim();
+      const sub = String(p.subProject || '').trim();
+      const name = proj && sub ? proj + ' / ' + sub : (proj || sub);
+      return '现场勘察记录在线编辑（结构化槽位）' + (name ? ' - ' + name : '');
+    });
     const hazardPick = ref('');
     const hpOpen = reactive({});           // 危险点卡展开状态（key = 条目 id；默认全部折叠，不落库）
     function toggleHp(hp) { if (hp) hpOpen[hp.id] = !hpOpen[hp.id]; }
@@ -470,22 +478,28 @@ const PlansView = {
       const el = document.getElementById('hp-' + id);
       if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     }
-    // 计划/项目里已有的信息 → 勘察记录可自动带入的字段（能带的全带上，带入值用户可改）
-    // 4.3 环境描述不属于可推导字段：模板要求写「工作环境：…」这类现场条件叙述（如车流量、人流量、
-    // 交叉/邻近线路、多电源自发电、地下管网等），必须现场勘察后人工填写，因此不做自动带入。
-    function surveyAutoFill(plan) {
+    // 首次带入值 = 计划字段「原样搬运」，不做任何推导/拼装/兜底：
+    //   部门（班组）=plan.team｜编号=部门+plan.surveyNo｜3.工作任务=plan.content
+    //   4.1=plan.outageRange｜勘察日期=plan.startDate 前 10 位｜4.4 班组措施=plan.teamSafetyMeasures
+    // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位；
+    // 4.3 环境描述属现场条件叙述（车流量/人流量/交叉邻近线路/多电源自发电/地下管网等），同样手填。
+    function surveySeed(plan) {
       const p = plan || {};
       const s = v => String(v == null ? '' : v).trim();
-      const volt = s(p.voltage), st = s(p.station);
-      // 双重名称：站/线路名已带电压等级时不重复拼
-      const dev = st ? ((volt && st.indexOf(volt) !== 0) ? volt + st : st) : '';
+      const team = s(p.team);
+      let no = s(p.surveyNo);
+      // 编号：编辑器里存的就是拼好的完整编号（部门+编号）；已带部门前缀不重复拼，部门为空则裸号
+      if (team && no && no.indexOf(team) !== 0) no = team + no;
+      const day = s(p.startDate).slice(0, 10);
       return {
-        // 勘察单位：优先县级实施单位，其次市级实施单位、建管单位
-        surveyUnit: s(p.execCounty) || s(p.execCity) || s(p.buildCounty) || s(p.buildCity),
-        dualName: dev,
+        team: team,
+        surveyNo: no,
+        workTask: s(p.content),
+        outageScope: s(p.outageRange),
         // 计划「班组应采取的安全措施」= 勘察记录 4.4 班组措施
         // （不能用「风险管控措施」——那是按风险因素自动生成的逐条控制措施，对应 4.4「通用风险控制措施」）
-        teamMeasures: s(p.teamSafetyMeasures)
+        teamMeasures: s(p.teamSafetyMeasures),
+        surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
       };
     }
     // 小组人员选项：作业人员名单（GET /api/workers，即「用户管理-作业人员名单」那套数据），排除状态「待定」
@@ -593,85 +607,78 @@ const PlansView = {
     }
     function onGroupingChange() { padGroups(svGroupCount.value); padScopes(); }
     function svMembersText(g) { return '已选 ' + ((g && Array.isArray(g.members)) ? g.members.length : 0) + ' 人'; }
-    // 模板 17 个槽位覆盖的表单字段（顺序/口径 = server/core/survey-doc.js 的 surveySlots）：
-    //   1 勘察单位｜2 部门（班组）｜3 编号｜4 双重名称｜5 工作地点｜6 工作内容｜7 4.1 停电范围｜8 4.2 保留带电部位
-    //   9 4.3（环境描述 + 危险点条目）｜10 4.4 运维措施｜11 4.4 班组措施 + 10kV/0.4kV 接地线｜12 通用措施（由危险点措施现算）
-    //   13 4.5 附图与说明（模板留空）｜14 记录人（生成时取当前用户）｜15-17 勘察日期（年月日）
-    // 改模板槽位时这里要同步；不在清单内的字段（作业分组/小组长/本组人员等纯控制项）不进模板，只算人工填写。
-    const SURVEY_SLOT_FIELDS = [
-      'surveyUnit', 'team', 'surveyNo', 'dualName',
-      'workLocation', 'workTask', 'outageScope', 'retainedLive',
-      'envDesc', 'opsMeasures', 'teamMeasures',
-      'ground10', 'ground04', 'surveyDate'
+    // 徽标：只表达「这个值是怎么来的」，实时计算、不落库
+    //   带入字段（部门/编号/3.工作任务/4.1/勘察日期/4.4班组措施）：
+    //     计划给了带入值 且 当前值 === 带入值 → 「周计划自动带入」；被改动或清空 → 「人工填写」
+    //     计划本身没给带入值 → 空则「待填写」，填了算「人工填写」
+    //   非带入字段（勘察单位/双重名称/4.2/环境描述/运维措施/接地线）：为空 → 「待填写」；有值不挂徽标
+    //   作业分组是模板外的纯控制项，不挂任何徽标
+    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures'];
+    const SV_BADGE_FIELDS = [
+      'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
+      'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
     ];
-    // 徽标口径（三态，实时计算、不落库）：
-    //   模板里没有该字段            → 「人工填写」（纯控制项，只能人工）
-    //   模板里有该字段但没填        → 「待填入」
-    //   模板里有且值 = 规则带入值    → 「规则自动带入」；被人工改过 → 「人工填写」
     const svBadges = computed(() => {
       const f = surveyDlg.form; const seed = surveyDlg.seed || {};
       if (!f) return {};
       const str = v => (v == null ? '' : String(v)).trim();
-      const chip = k => {
-        if (SURVEY_SLOT_FIELDS.indexOf(k) < 0) return { text: '人工填写', cls: 'manual' };
-        const cur = str(f[k]);
-        if (!cur) return { text: '待填入', cls: 'todo' };
-        const s = str(seed[k]);
-        return (s && cur === s) ? { text: '规则自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
-      };
       const out = {};
-      SURVEY_SLOT_FIELDS.forEach(k => { out[k] = chip(k); });
+      SV_BADGE_FIELDS.forEach(k => {
+        const cur = str(f[k]);
+        const seeded = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
+        if (seeded) out[k] = (cur === seeded) ? { text: '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
+        else if (cur) out[k] = null;
+        else out[k] = { text: '待填写', cls: 'todo' };
+      });
       return out;
     });
-    // 打开编辑器：已保存内容原样加载（不覆盖已填项）；当时没填的字段（勘察单位/双重名称/环境描述/班组措施）补一次计划带入
+    // 打开编辑器：首次打开按 surveySeed 带入（部门/完整编号/3.工作任务/4.1/勘察日期/4.4班组措施）；
+    // 已保存的 survey 原样加载（不覆盖已填内容），旧数据 workLocation 一次性并入 workTask。
     async function openSurveyEditor() {
       const plan = matDlg.plan;
       if (!plan || !plan.id) return;
-      // 带入值（surveyAutoFill 补齐）：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、
-      // 工作内容=plan.content、4.1=plan.outageRange、勘察日期=plan.startDate（取前 10 位，取不到回落今天）
-      // 勘察单位=县级/市级实施单位→建管单位、双重名称=电压+站线名、4.4 班组措施=计划「班组应采取的安全措施」
-      // 4.3 环境描述不自动带入（属现场条件叙述，须人工填写）
-      const planDay = String(plan.startDate || '').trim().slice(0, 10);
-      const planDayOk = /^\d{4}-\d{2}-\d{2}$/.test(planDay) ? planDay : '';
-      const auto = surveyAutoFill(plan);
-      surveyDlg.seed = {
-        team: plan.team || '', surveyNo: plan.surveyNo || '',
-        workLocation: plan.address || '', workTask: plan.content || '', outageScope: plan.outageRange || '',
-        surveyDate: planDayOk,
-        surveyUnit: auto.surveyUnit, dualName: auto.dualName,
-        teamMeasures: auto.teamMeasures
-      };
+      // 首次带入值 = 计划字段原样搬运（部门/完整编号/3.工作任务/4.1/勘察日期/4.4班组措施）；
+      // 勘察单位、双重名称、4.2 一律不带入，首次打开为空，等现场勘察时填。
+      const seed = surveySeed(plan);
+      surveyDlg.seed = seed;
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
-      // 模板槽位字段统一「已填保留、为空则回落规则带入值」——模板里有的都自动带入，带不出的才是待填入
-      const seed = surveyDlg.seed || {};   // 必须取自 surveyDlg.seed，不能裸用 seed（上方 svBadges 里的 seed 是另一个作用域）
-      const fld = k => (saved && saved[k]) || seed[k] || '';
+      const str = v => (v == null ? '' : String(v)).trim();
+      // 旧数据兼容：4a 阶段 survey 里 workLocation（工作地点）与 workTask（工作内容）是两个分开的框，
+      // 本批起合并为一个「3.工作任务」框 —— 打开时按「工作地点 + 换行 + 工作内容」拼接显示，
+      // 保存时只落 workTask、并把 workLocation 置空（一次性并入，重开不再重复拼接）。
+      const savedLoc = saved ? str(saved.workLocation) : '';
+      const savedTask = saved ? str(saved.workTask) : '';
+      const mergedTask = savedLoc
+        ? (savedTask ? savedLoc + '\n' + savedTask : savedLoc)
+        : (savedTask || seed.workTask);
       // 4.4 班组措施：旧版本自动带入的是计划「风险管控措施」，与「通用风险控制措施」逐条重复。
       // 现值仍等于那个旧带入值时说明没人改过 → 改用新来源（计划「班组应采取的安全措施」）重新带入；
       // 被人工改过的内容一律保留。
       const oldTeamAuto = String(plan.controlMeasures || '').trim();
-      const savedTeam = saved ? String(saved.teamMeasures || '').trim() : '';
-      const teamMeasuresVal = (savedTeam && savedTeam !== oldTeamAuto) ? savedTeam : (seed.teamMeasures || '');
+      const savedTeam = saved ? str(saved.teamMeasures) : '';
+      const teamMeasuresVal = (savedTeam && savedTeam !== oldTeamAuto) ? savedTeam : seed.teamMeasures;
       if (saved) {
         surveyDlg.form = {
           grouping: SURVEY_GROUPING_OPTS.indexOf(saved.grouping) > -1 ? saved.grouping : '不分小组',
-          surveyUnit: fld('surveyUnit'), team: fld('team'), surveyNo: fld('surveyNo'),
-          dualName: fld('dualName'),
-          workLocation: fld('workLocation'), workTask: fld('workTask'),
-          outageScope: fld('outageScope'), retainedLive: saved.retainedLive || '',
+          // 勘察单位 / 双重名称 / 4.2 不带入：已保存原样加载，没有就是空
+          surveyUnit: str(saved.surveyUnit), team: str(saved.team) || seed.team, surveyNo: str(saved.surveyNo) || seed.surveyNo,
+          dualName: str(saved.dualName),
+          workLocation: '', workTask: mergedTask,
+          outageScope: str(saved.outageScope) || seed.outageScope, retainedLive: str(saved.retainedLive),
           groups: (Array.isArray(saved.groups) ? saved.groups : []).map(g => ({
             leader: g.leader || '',
             members: Array.isArray(g.members) ? g.members.slice() : [],
             workLocation: g.workLocation || '', workTask: g.workTask || ''
           })),
-          // 4.3 / 4.4：已保存内容原样加载；仅「当时没填」的字段补一次计划带入，不覆盖已有内容
-          envDesc: fld('envDesc'),
-          opsMeasures: saved.opsMeasures || '',
+          // 4.3 / 4.4：已保存内容原样加载；仅「当时没填」的班组措施补一次计划带入，不覆盖已有内容
+          envDesc: str(saved.envDesc),
+          opsMeasures: str(saved.opsMeasures),
           teamMeasures: teamMeasuresVal,
-          ground10: saved.ground10 || '', ground04: saved.ground04 || '',
+          ground10: str(saved.ground10), ground04: str(saved.ground04),
           teamMeasureScopes: Array.isArray(saved.teamMeasureScopes) ? saved.teamMeasureScopes.slice() : [],
           ground10Scopes: Array.isArray(saved.ground10Scopes) ? saved.ground10Scopes.slice() : [],
           ground04Scopes: Array.isArray(saved.ground04Scopes) ? saved.ground04Scopes.slice() : [],
-          surveyDate: fld('surveyDate') || todayYmd(),
+          surveyDate: str(saved.surveyDate) || todayYmd(),
           hazardPoints: (Array.isArray(saved.hazardPoints) ? saved.hazardPoints : []).map(h => ({
             id: h.id || newHpId(),
             hazardId: h.hazardId || '',
@@ -685,12 +692,12 @@ const PlansView = {
         await ensureHazards();   // 预置标准危险点依赖危险点库，未加载先取一次
         surveyDlg.form = {
           grouping: '不分小组',
-          surveyUnit: fld('surveyUnit'), team: fld('team'), surveyNo: fld('surveyNo'), dualName: fld('dualName'),
-          workLocation: fld('workLocation'), workTask: fld('workTask'),
-          outageScope: fld('outageScope'), retainedLive: '', groups: [],
-          envDesc: fld('envDesc'), opsMeasures: '', teamMeasures: teamMeasuresVal, ground10: '', ground04: '',
+          surveyUnit: '', team: seed.team, surveyNo: seed.surveyNo, dualName: '',
+          workLocation: '', workTask: seed.workTask,
+          outageScope: seed.outageScope, retainedLive: '', groups: [],
+          envDesc: '', opsMeasures: '', teamMeasures: teamMeasuresVal, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
-          surveyDate: fld('surveyDate') || todayYmd(), hazardPoints: seedHazardPoints()
+          surveyDate: seed.surveyDate || todayYmd(), hazardPoints: seedHazardPoints()
         };
       }
       Object.keys(hpOpen).forEach(k => { delete hpOpen[k]; });   // 每次打开一律折叠
@@ -795,7 +802,8 @@ const PlansView = {
         grouping: f.grouping || '不分小组',
         surveyUnit: f.surveyUnit || '', team: f.team || '', surveyNo: f.surveyNo || '',
         dualName: f.dualName || '',
-        workLocation: f.workLocation || '', workTask: f.workTask || '',
+        // 3.工作任务已合并为一个框（workTask）：workLocation 一律置空，避免旧数据重复拼接
+        workLocation: '', workTask: f.workTask || '',
         outageScope: f.outageScope || '', retainedLive: f.retainedLive || '',
         groups: (f.groups || []).map(g => ({
           leader: g.leader || '',
@@ -1062,7 +1070,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1646,14 +1654,11 @@ const PlansView = {
     </el-dialog>
 
     <!-- 现场勘察记录编辑器（四期收官：字段与勘察单模板全槽位对齐 + 保存并生成 docx） -->
-    <el-dialog v-model="surveyDlg.visible" title="现场勘察记录" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
+    <el-dialog v-model="surveyDlg.visible" :title="surveyTitle" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
       <div v-if="surveyDlg.banner.text" class="sv-banner" :class="'sv-banner-' + surveyDlg.banner.type">{{ surveyDlg.banner.text }}</div>
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
-          <el-form-item>
-            <template #label>
-              <span class="sv-lab">作业分组<span class="sv-chip sv-manual">人工填写</span></span>
-            </template>
+          <el-form-item label="作业分组">
             <el-select v-model="surveyDlg.form.grouping" style="width:220px" @change="onGroupingChange">
               <el-option v-for="g in SURVEY_GROUPING_OPTS" :key="g" :label="g" :value="g" />
             </el-select>
@@ -1665,7 +1670,7 @@ const PlansView = {
               <template #label>
                 <span class="sv-lab">勘察单位<span v-if="svBadges.surveyUnit" class="sv-chip" :class="'sv-' + svBadges.surveyUnit.cls">{{ svBadges.surveyUnit.text }}</span></span>
               </template>
-              <el-input v-model="surveyDlg.form.surveyUnit" placeholder="请填写勘察单位" />
+              <el-input v-model="surveyDlg.form.surveyUnit" placeholder="请选择勘察单位" />
             </el-form-item>
             <el-form-item>
               <template #label>
@@ -1688,32 +1693,24 @@ const PlansView = {
             <el-input v-model="surveyDlg.form.dualName" type="textarea" :rows="3" placeholder="请输入勘察设备的双重名称" />
           </el-form-item>
 
-          <!-- 3.工作任务：不分组 = 工作地点 + 工作内容；分组 = N 张小组卡 -->
-          <div class="sv-sec">
+          <!-- 3.工作任务：不分组 = 单个合并框（工作地点 + 工作内容）；分组 = N 张小组卡 -->
+          <template v-if="!svGrouped">
+            <el-form-item>
+              <template #label>
+                <span class="sv-lab">3.工作任务[工作地点（地段）以及工作内容]：<span v-if="svBadges.workTask" class="sv-chip" :class="'sv-' + svBadges.workTask.cls">{{ svBadges.workTask.text }}</span></span>
+              </template>
+              <el-input v-model="surveyDlg.form.workTask" type="textarea" :rows="4" placeholder="请填写工作地点（地段）以及工作内容" />
+            </el-form-item>
+          </template>
+
+          <div v-else class="sv-sec">
             <div class="sv-sec-head">
               <span class="sv-sec-title">3.工作任务</span>
               <span class="sv-sec-sub">[工作地点（地段）以及工作内容]</span>
-              <span v-if="svGrouped" class="sv-chip sv-split">按小组拆分</span>
+              <span class="sv-chip sv-split">按小组拆分</span>
             </div>
 
-            <template v-if="!svGrouped">
-              <div class="sv-row2">
-                <el-form-item>
-                  <template #label>
-                    <span class="sv-lab">工作地点（地段）<span v-if="svBadges.workLocation" class="sv-chip" :class="'sv-' + svBadges.workLocation.cls">{{ svBadges.workLocation.text }}</span></span>
-                  </template>
-                  <el-input v-model="surveyDlg.form.workLocation" type="textarea" :rows="3" placeholder="请填写工作地点（地段）" />
-                </el-form-item>
-                <el-form-item>
-                  <template #label>
-                    <span class="sv-lab">工作内容<span v-if="svBadges.workTask" class="sv-chip" :class="'sv-' + svBadges.workTask.cls">{{ svBadges.workTask.text }}</span></span>
-                  </template>
-                  <el-input v-model="surveyDlg.form.workTask" type="textarea" :rows="3" placeholder="请填写工作内容" />
-                </el-form-item>
-              </div>
-            </template>
-
-            <template v-else>
+            <template v-if="svGrouped">
               <div v-if="String(surveyDlg.form.workTask || '').trim()" class="sv-notice">
                 <div class="sv-notice-t">原作业内容无法按当前小组数自动拆分，请手动分配到各组；原文已保留。</div>
                 <el-input :model-value="surveyDlg.form.workTask" type="textarea" :rows="3" readonly class="sv-notice-text" />

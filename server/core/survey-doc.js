@@ -43,7 +43,8 @@ function groupOrFallback(sv, key) {
   }
   return out.length ? out.join('\n') : lines(sv && sv[key]).join('\n');
 }
-// 编号：survey 优先、空则回落计划；已以部门(班组)开头的不重复拼
+// 编号：survey.surveyNo 已是完整编号（部门+编号），直接用；
+// 仅当它不以部门(班组)开头时才按旧规则拼一次（防御旧数据：4a 阶段存的是裸号）
 function surveyNoText(plan, sv) {
   const team = str(sv.team) || str(plan && plan.team);
   let no = str(sv.surveyNo) || str(plan && plan.surveyNo);
@@ -109,10 +110,12 @@ function surveySlots(plan, survey, recorder) {
   return [
     str(sv.surveyUnit),                              // 1 勘察单位
     str(sv.team) || str(plan && plan.team),          // 2 部门（班组）
-    surveyNoText(plan, sv),                          // 3 编号（可能拼部门前缀）
+    surveyNoText(plan, sv),                          // 3 编号（survey 里已是完整编号，直接用；未带部门前缀时才拼）
     str(sv.dualName),                                // 4 双重名称
-    groupOrFallback(sv, 'workLocation'),             // 5 工作地点
-    groupOrFallback(sv, 'workTask'),                 // 6 工作内容
+    // 5 工作地点：取计划的作业地址原值（编辑器不再单独存「工作地点」）；
+    //   计划无地址的老数据回落 survey.workLocation / 分组拼接，避免空白
+    str(plan && plan.address) || groupOrFallback(sv, 'workLocation'),
+    groupOrFallback(sv, 'workTask'),                 // 6 工作内容（= 编辑器「3.工作任务」合并框）
     str(sv.outageScope),                             // 7 4.1 停电范围
     str(sv.retainedLive),                            // 8 4.2 保留带电部位
     hazardText43(sv),                                // 9 4.3

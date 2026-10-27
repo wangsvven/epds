@@ -726,10 +726,16 @@ async function listOk(p, token) {
     // 显式传空数组 → 清空
     const s12 = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, teamMeasureScopes: [] } }), 'scopes 清空');
     need(Array.isArray(s12.teamMeasureScopes) && s12.teamMeasureScopes.length === 0, '显式传空数组应清空，实际 ' + brief(s12.teamMeasureScopes));
+    // 本批口径：surveyNo 里存的就是「部门+编号」完整编号，原样往返、不再二次拼
+    const sNo = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, surveyNo: '施工一队202610900' } }), '完整编号往返');
+    need(sNo.surveyNo === '施工一队202610900', '完整编号应原样保存，实际 ' + brief(sNo.surveyNo));
+    // 3.工作任务合并后 workLocation 一律置空
+    const sLoc = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body2, workLocation: '', workTask: '合并后的工作任务' } }), 'workLocation 置空');
+    need(sLoc.workLocation === '' && sLoc.workTask === '合并后的工作任务', 'workLocation 应置空、workTask 独立保存：' + brief([sLoc.workLocation, sLoc.workTask]));
     // 计划不存在 → 404
     const r404 = await api('PUT', '/api/workPlans/nope_not_exist/survey', { token, body: body1 });
     need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
-    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+危险点往返、4.4 两组措施+接地线+勘察日期往返、scopes 清洗/截断、非法日期 400、必填 400、超 50 条截断';
+    return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+危险点往返、4.4 两组措施+接地线+勘察日期往返、scopes 清洗/截断、非法日期 400、必填 400、超 50 条截断、完整编号往返、workLocation 置空';
   });
   await step('plans', '生成资料：无 survey → 400 → 生成勘察记录 docx（17 槽位全替换/无 XXXX）→ 再生成 +1 → 下载 PK → 删除后文件同消/404', async () => {
     const me = needOk(await api('GET', '/api/me', { token }), 'me');
@@ -797,6 +803,13 @@ async function listOk(p, token) {
     need(gt.indexOf('（1）高空坠落风险的安全措施：正确使用安全带') > -1, '槽位12 通用措施未组装');
     need(gt.indexOf('|2026|10|19') > -1, '槽位15-17 勘察日期应为 2026/10/19 三个数字槽：' + gt.slice(-60));
     need(gt.indexOf('|' + recName) > -1, '槽位14 记录人应为当前登录用户（' + recName + '）');
+    // 4b) 槽位5 改取计划作业地址原值（不再用 survey.workLocation / 分组拼接）；槽位6 仍按小组拼工作内容
+    needOk(await api('PUT', '/api/workPlans/' + p.id, { token, body: { address: '冒烟作业地址' } }), 'plan address PUT');
+    needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate after address');
+    const gtA = [...unzipEntry(fs.readFileSync(absG), 'word/document.xml').toString('utf8')
+      .matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map(m => m[1]).join('|');
+    need(gtA.indexOf('冒烟作业地址') > -1, '槽位5 应取计划作业地址：' + gtA.slice(0, 160));
+    need(gtA.indexOf('1小组：立杆') > -1 && gtA.indexOf('2小组：放线') > -1, '槽位6 工作内容仍应按小组拼接');
     // 5) 改一处内容再生成 → 原地覆盖同一份，不新增勘察单
     needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
       token, body: Object.assign({}, svBody, { envDesc: '现场有跨越，邻近 10kV 线路（改）' })
