@@ -469,29 +469,18 @@ const PlansView = {
       if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     }
     // 计划/项目里已有的信息 → 勘察记录可自动带入的字段（能带的全带上，带入值用户可改）
-    // 4.3 环境描述只拼客观已知项（地点/设备/供电所/作业类型/风险因素）；
-    // 交叉、邻近（同杆塔、并行）电力线路、多电源、自发电、地下管网等仍需现场勘察后人工补充。
+    // 4.3 环境描述不属于可推导字段：模板要求写「工作环境：…」这类现场条件叙述（如车流量、人流量、
+    // 交叉/邻近线路、多电源自发电、地下管网等），必须现场勘察后人工填写，因此不做自动带入。
     function surveyAutoFill(plan) {
       const p = plan || {};
       const s = v => String(v == null ? '' : v).trim();
       const volt = s(p.voltage), st = s(p.station);
       // 双重名称：站/线路名已带电压等级时不重复拼
       const dev = st ? ((volt && st.indexOf(volt) !== 0) ? volt + st : st) : '';
-      const loc = [];
-      if (s(p.address)) loc.push('作业地点：' + s(p.address));
-      if (dev) loc.push('涉及设备：' + dev);
-      if (s(p.substation)) loc.push('属地供电所：' + s(p.substation));
-      const out = [];
-      if (loc.length) out.push(loc.join('；'));
-      const kind = [s(p.workType), s(p.specialty), s(p.dept)].filter(Boolean);
-      if (kind.length) out.push('作业类型：' + kind.join('、'));
-      const rf = (Array.isArray(p.riskFactors) ? p.riskFactors : []).map(s).filter(Boolean);
-      if (rf.length) out.push('现场风险因素：' + rf.join('、'));
       return {
         // 勘察单位：优先县级实施单位，其次市级实施单位、建管单位
         surveyUnit: s(p.execCounty) || s(p.execCity) || s(p.buildCounty) || s(p.buildCity),
         dualName: dev,
-        envDesc: out.join('\n'),
         // 计划「风险管控措施」= 班组应采取的安全措施
         teamMeasures: s(p.controlMeasures)
       };
@@ -637,8 +626,8 @@ const PlansView = {
       if (!plan || !plan.id) return;
       // 带入值（surveyAutoFill 补齐）：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、
       // 工作内容=plan.content、4.1=plan.outageRange、勘察日期=plan.startDate（取前 10 位，取不到回落今天）
-      // 勘察单位=县级/市级实施单位→建管单位、双重名称=电压+站线名、4.3 环境描述=地点/设备/供电所/作业类型/风险因素、
-      // 4.4 班组措施=计划「风险管控措施」
+      // 勘察单位=县级/市级实施单位→建管单位、双重名称=电压+站线名、4.4 班组措施=计划「风险管控措施」
+      // 4.3 环境描述不自动带入（属现场条件叙述，须人工填写）
       const planDay = String(plan.startDate || '').trim().slice(0, 10);
       const planDayOk = /^\d{4}-\d{2}-\d{2}$/.test(planDay) ? planDay : '';
       const auto = surveyAutoFill(plan);
@@ -647,7 +636,7 @@ const PlansView = {
         workLocation: plan.address || '', workTask: plan.content || '', outageScope: plan.outageRange || '',
         surveyDate: planDayOk,
         surveyUnit: auto.surveyUnit, dualName: auto.dualName,
-        envDesc: auto.envDesc, teamMeasures: auto.teamMeasures
+        teamMeasures: auto.teamMeasures
       };
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       // 模板槽位字段统一「已填保留、为空则回落规则带入值」——模板里有的都自动带入，带不出的才是待填入
@@ -1768,7 +1757,7 @@ const PlansView = {
               <template #label>
                 <span class="sv-lab">环境描述<span v-if="svBadges.envDesc" class="sv-chip" :class="'sv-' + svBadges.envDesc.cls">{{ svBadges.envDesc.text }}</span></span>
               </template>
-              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="请填写作业现场的条件、环境及其他危险点情况" />
+              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="例如：工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。" />
             </el-form-item>
 
             <div class="shp-sub">
