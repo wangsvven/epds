@@ -71,7 +71,7 @@ const PlansView = {
       project: '', subProject: '', workType: '配农网工程',
       startDate: '', endDate: '', specialty: '运检', dept: '设备部',
       voltage: '10kV', ticketType: '配电：配电第一种工作票',
-      address: '', station: '', machine: '是', riskLevel: '四级', controlMeasures: '', teamSafetyMeasures: '',
+      address: '', station: '', machine: '是', riskLevel: '四级', controlMeasures: '',
       gridRisk: '无', riskFactors: [], majorRisk: '无',
       buildCity: '', buildCounty: '', execCity: '', execCounty: '',
       team: '', subcontractors: [], supervisor: '', ccUnits: [],
@@ -190,6 +190,7 @@ const PlansView = {
       try {
         const body = JSON.parse(JSON.stringify(row));
         delete body.id; delete body.createdAt;
+        delete body.teamSafetyMeasures;   // 周计划无此字段（历史误加已撤），复制也不带
         body.name = (row.name || '') + '（副本）'; body.status = '未执行';
         // 编号按规则重新生成，不连号复制：年月取复制当天，工作票走被复制记录那条类型线
         const ym = PlanNo.ymOf(new Date());
@@ -481,11 +482,12 @@ const PlansView = {
     // 来源值（seed）= 徽标比对的基准；只有「首次创建」才把这组值真正填进表单。
     //   A 类·抄周计划字段：部门（班组）=plan.team｜编号=部门+plan.surveyNo（存完整编号）
     //                     ｜3.工作任务=plan.content｜4.1=plan.outageRange
-    //   B 类·固定文案/规则算出：4.3 环境描述=系统默认文案｜4.4 班组措施=计划填写值或默认文案
+    //   B 类·模板侧标准内容/规则算出：4.3 环境描述=模板标准文案｜4.4 班组措施=模板标准文案
     //                     ｜勘察日期=plan.startDate 前 10 位（取不到则不作为来源）
     //   C 类·不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位、4.4 运维措施、接地线
     const SV_ENV_DESC_DEFAULT = '工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。';
-    // 4.4 班组应采取的安全措施默认文案（整行一条；分组时默认归属「全组」）
+    // 4.4 班组应采取的安全措施：取自勘察单模板侧标准内容（整行一条；分组时默认归属「全组」）。
+    // 与周计划无关——周计划没有对应字段，不得从任何计划字段取值。
     const SV_TEAM_MEASURES_DEFAULT = '所有下户表计负荷侧空开出线，分别用绝缘胶布将线头包裹严实，并悬挂“禁止合闸，线路有人工作”标识牌一块。';
     function surveySeed(plan) {
       const p = plan || {};
@@ -502,10 +504,8 @@ const PlansView = {
         envDesc: SV_ENV_DESC_DEFAULT,
         workTask: s(p.content),
         outageScope: s(p.outageRange),
-        // 计划「班组应采取的安全措施」= 勘察记录 4.4 班组措施
-        // （不能用「风险管控措施」——那是按风险因素自动生成的逐条控制措施，对应 4.4「通用风险控制措施」）
-        // 计划没填时用默认文案兜底（仅首次创建；已保存的 survey 原样加载）
-        teamMeasures: s(p.teamSafetyMeasures) || SV_TEAM_MEASURES_DEFAULT,
+        // 4.4 班组措施：模板侧标准文案（周计划无此字段，不从计划取值）
+        teamMeasures: SV_TEAM_MEASURES_DEFAULT,
         surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
       };
     }
@@ -955,7 +955,7 @@ const PlansView = {
       if (!dlg.form.controlMeasures && (dlg.form.riskFactors || []).length) dlg.form.controlMeasures = genMeasures(dlg.form.riskFactors);
       // 字段规范化（老数据补齐）
       ['subcontractors', 'ccUnits', 'chargePersons'].forEach(k => { if (!Array.isArray(dlg.form[k])) dlg.form[k] = []; });
-      ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team', 'teamSafetyMeasures'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
+      ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
     }
     async function submit() {
       const f = dlg.form;
@@ -977,6 +977,9 @@ const PlansView = {
       }
       try {
         const body = { ...f, name: String(f.name).trim() };
+        // 周计划没有「班组应采取的安全措施」字段（历史误加，已撤）：保存体一律不带该键，
+        // 既不写入新值，也不回写旧值——存量数据留在库里不动（不删、不迁移）。
+        delete body.teamSafetyMeasures;
         // 作业班组 / 班组长同步到列表展示字段（列表、筛选、日历、导出均读 team / leader）
         if (f.team) body.team = f.team;
         if (f.teamLeader) body.leader = f.teamLeader;
@@ -1359,13 +1362,6 @@ const PlansView = {
             </el-form-item>
           </el-col>
         </el-row>
-        <el-row :gutter="20">
-          <el-col :xs="24" :sm="24">
-            <el-form-item label="班组应采取的安全措施">
-              <el-input v-model="dlg.form.teamSafetyMeasures" type="textarea" :autosize="{ minRows: 1, maxRows: 8 }" placeholder="填写本次作业班组采取的具体安全措施（现场勘察记录 4.4「班组应采取的安全措施」自动带入）" style="--el-input-height:32px" />
-            </el-form-item>
-          </el-col>
-        </el-row>
         </div>
 
         <div style="border:1px solid var(--line);border-radius:6px;padding:16px 20px 2px;margin:6px 0 14px;background:var(--surface)">
@@ -1679,7 +1675,7 @@ const PlansView = {
               <template #label>
                 <span class="sv-lab">勘察单位<span v-if="svBadges.surveyUnit" class="sv-chip" :class="'sv-' + svBadges.surveyUnit.cls">{{ svBadges.surveyUnit.text }}</span></span>
               </template>
-              <el-input v-model="surveyDlg.form.surveyUnit" placeholder="请选择勘察单位" />
+              <el-input v-model="surveyDlg.form.surveyUnit" placeholder="请输入勘察单位" />
             </el-form-item>
             <el-form-item>
               <template #label>
