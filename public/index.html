@@ -936,12 +936,58 @@
   .sv-gname { flex:0 0 auto; font-size:13.5px; font-weight:700; color:var(--text-1); }
   .sv-gpair { display:inline-flex; align-items:center; gap:6px; min-width:0; }
   .sv-gpair-lead { flex:0 0 auto; }
-  .sv-gpair-mem { flex:1 1 200px; min-width:0; }
+  .sv-gpair-mem { flex:0 1 auto; min-width:0; }
   .sv-glab { flex:0 0 auto; font-size:12.5px; color:var(--text-2); }
-  .sv-gsel { min-width:0; }
-  .sv-gsel-lead { flex:0 0 auto; width:150px; }
-  .sv-gsel-mem { flex:1 1 auto; width:100%; min-width:120px; }
   .sv-gtext { margin-top:8px; }
+  /* 小组人员选择触发器（取代原先挤在首行的两个下拉，点开走统一弹窗） */
+  .sv-pick { display:inline-flex; align-items:center; gap:4px; height:30px; padding:0 6px 0 10px; border:1px solid var(--line-strong); border-radius:7px; background:var(--surface); color:var(--text-1); font-family:inherit; font-size:13px; line-height:1; cursor:pointer; min-width:0; transition:border-color .15s, background .15s, color .15s; }
+  .sv-pick:hover { border-color:var(--brand); background:var(--hover); }
+  .sv-pick:hover .sv-pick-i { color:var(--brand); }
+  .sv-pick.is-empty .sv-pick-t { color:var(--text-3); }
+  .sv-pick-t { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; }
+  .sv-pick-i { flex:0 0 auto; width:13px; height:13px; color:var(--text-3); transition:color .15s; }
+  .sv-pick-lead { width:134px; }
+  .sv-pick-mem { flex:0 1 auto; width:auto; min-width:142px; }
+  /* 已选人员 chip 行：组长带「组长」小标、组员带可点 × */
+  .sv-gwho { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:7px 0 2px; }
+  .sv-mchip { display:inline-flex; align-items:center; gap:3px; height:24px; padding:0 4px 0 9px; border-radius:12px; border:1px solid var(--line); background:var(--surface-2); font-size:12.5px; color:var(--text-1); line-height:1; }
+  .sv-mchip-lead { padding-right:8px; border-color:var(--info-line); background:var(--brand-soft); color:var(--brand-text); font-weight:600; gap:5px; }
+  .sv-mchip-tag { font-style:normal; font-size:10.5px; font-weight:500; line-height:15px; padding:0 4px; border-radius:3px; background:var(--brand); color:#fff; }
+  .sv-mchip-x { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; font-style:normal; font-size:13px; color:var(--text-3); cursor:pointer; }
+  .sv-mchip-x:hover { background:var(--danger-bg); color:var(--danger-text); }
+  /* 人员选择弹窗 */
+  .svp-sub { font-size:12.5px; line-height:1.7; color:var(--text-3); margin:-6px 0 12px; }
+  .svp-tools { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); margin-bottom:12px; }
+  .svp-tools .el-checkbox { margin-right:0; height:24px; }
+  .svp-count { font-size:12.5px; color:var(--text-2); font-variant-numeric:tabular-nums; }
+  .svp-q { margin-bottom:12px; }
+  .svp-body { max-height:52vh; overflow:auto; padding-right:2px; }
+  .svp-sec + .svp-sec { margin-top:14px; }
+  .svp-sec-h { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  .svp-sec-t { font-size:13px; font-weight:600; color:var(--text-1); }
+  .svp-sec-n { font-size:11.5px; color:var(--text-3); font-variant-numeric:tabular-nums; }
+  .svp-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(128px, 1fr)); gap:8px; }
+  .svp-item { display:flex; align-items:center; gap:7px; min-width:0; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--text-1); font-family:inherit; font-size:13px; line-height:1.2; text-align:left; cursor:pointer; transition:border-color .15s, background .15s; }
+  .svp-item:hover:not(:disabled) { border-color:var(--brand); background:var(--brand-soft); }
+  .svp-item.on { border-color:var(--brand); background:var(--brand-soft); }
+  .svp-item.off { background:var(--surface-2); cursor:not-allowed; }
+  .svp-item.off .svp-name { color:var(--text-3); font-weight:400; }
+  .svp-item.off .svp-box { opacity:.55; }
+  .svp-item.off .svp-tag { color:var(--text-2); background:var(--surface-3); border-color:var(--line-strong); }
+  .svp-box { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border:1.5px solid var(--line-strong); border-radius:4px; background:var(--surface); color:#fff; }
+  .svp-item.radio .svp-box { border-radius:50%; }
+  .svp-item.on .svp-box { border-color:var(--brand); background:var(--brand); }
+  .svp-box svg { width:10px; height:10px; }
+  .svp-name { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .svp-item.on .svp-name { color:var(--brand-text); font-weight:600; }
+  .svp-tag { flex:0 0 auto; padding:0 5px; border-radius:4px; font-size:10.5px; line-height:15px; color:var(--text-3); background:var(--surface-3); border:1px solid var(--line); }
+  .svp-tag-lead { color:var(--brand-text); background:var(--brand-soft); border-color:transparent; }
+  .svp-team { flex:0 0 auto; font-size:11px; color:var(--text-3); }
+  .svp-empty { padding:18px 0; text-align:center; font-size:13px; color:var(--text-3); }
+  .svp-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .svp-foot-r { display:inline-flex; gap:10px; margin-left:auto; }
+  .svp-foot .el-button + .el-button { margin-left:0; }
+  .svp-clear { color:var(--text-3); }
   /* 4.3 区标题：标题与「应注明…」为同一段标题文字，同字号/同字重/同色，连续折行 */
   .shp-head { font-size:14px; font-weight:600; color:var(--text-1); line-height:1.7; margin:0 0 12px; }
   .shp-head + .el-form-item { margin-top:10px; }
@@ -999,7 +1045,13 @@
     .sv-row3 { grid-template-columns:1fr; gap:0; }
     .sv-gline { gap:6px 8px; }
     .sv-gpair-mem { flex:1 1 100%; }
-    .sv-gsel-lead { width:118px; }
+    .sv-pick-lead { width:118px; }
+    .sv-gpair-mem { flex:1 1 100%; }
+    .sv-pick-mem { flex:1 1 auto; width:100%; min-width:0; }
+    .sv-gwho { margin-top:6px; }
+    .svp-grid { grid-template-columns:repeat(auto-fill, minmax(116px, 1fr)); gap:7px; }
+    .svp-body { max-height:46vh; }
+    .svp-item { padding:8px 9px; font-size:12.5px; }
     .sv-group { padding:10px 12px 12px; }
     .survey-hp-bar { padding:8px 10px; }
     .shp-no { order:1; }

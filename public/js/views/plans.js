@@ -627,6 +627,116 @@ const PlansView = {
     }
     function onGroupingChange() { padGroups(svGroupCount.value); padScopes(); }
     function svMembersText(g) { return '已选 ' + ((g && Array.isArray(g.members)) ? g.members.length : 0) + ' 人'; }
+    // ---------- 小组人员选择器：小组长（技工单选）/ 本组人员（按身份分组多选）共用一套弹窗 ----------
+    // 取代原先挤在小组卡首行的两个下拉：小组长只列技工、本组人员按「技工 / 民工」分组勾选，
+    // 本组小组长固定勾选且不可取消，已被其它小组占用的人员置灰并标注归属组，避免重复选派。
+    const svPick = reactive({ visible: false, mode: 'members', gi: 0, draft: [], leader: '', q: '' });
+    // 身份归并：真实数据里身份是「技工（计入高处作业人员）」，界面只显示「技工」；未命中归到「其他」
+    function svIdentityGroup(w) {
+      const id = String((w && w.identity) || '').trim();
+      if (!id) return '其他';
+      if (id.indexOf('技工') > -1) return '技工';
+      if (id.indexOf('民工') > -1) return '民工';
+      return id;
+    }
+    // 人员清单：按姓名去重（groups.members 存的就是姓名），技工在前、民工在后，其余按原顺序排在最后
+    const svPeopleList = computed(() => {
+      const seen = {}; const out = [];
+      surveyPeople.value.forEach(w => {
+        const name = String(w.name || '').trim();
+        if (!name || seen[name]) return;
+        seen[name] = 1;
+        out.push({ name, group: svIdentityGroup(w), team: String(w.team || '').trim() });
+      });
+      const rank = g => (g === '技工' ? 0 : g === '民工' ? 1 : 2);
+      return out.map((p, i) => ({ p, i })).sort((a, b) => (rank(a.p.group) - rank(b.p.group)) || (a.i - b.i)).map(x => x.p);
+    });
+    // 名单里只有一个班组时，不必在每一格重复班组名
+    const svMultiTeam = computed(() => {
+      const set = {};
+      svPeopleList.value.forEach(p => { if (p.team) set[p.team] = 1; });
+      return Object.keys(set).length > 1;
+    });
+    const svPickTitle = computed(() => (svPick.gi + 1) + '小组 · ' + (svPick.mode === 'leader' ? '选择小组长' : '选择本组人员'));
+    // 占用表：除当前小组外，其他小组的组长/组员都不可再选，标注归属组
+    const svPickRows = computed(() => {
+      const f = surveyDlg.form;
+      if (!f || !Array.isArray(f.groups)) return [];
+      const gi = svPick.gi; const g = f.groups[gi] || {};
+      const taken = {};
+      f.groups.forEach((x, i) => {
+        if (i === gi || !x) return;
+        const lab = (i + 1) + '小组';
+        if (x.leader && !taken[x.leader]) taken[x.leader] = lab + '组长';
+        (Array.isArray(x.members) ? x.members : []).forEach(n => { if (n && !taken[n]) taken[n] = lab; });
+      });
+      const q = String(svPick.q || '').trim().toLowerCase();
+      const leader = String(g.leader || '');
+      const base = svPick.mode === 'leader' ? svPeopleList.value.filter(p => p.group === '技工') : svPeopleList.value;
+      return base
+        .filter(p => !q || p.name.toLowerCase().indexOf(q) > -1 || p.team.toLowerCase().indexOf(q) > -1)
+        .map(p => {
+          const isLeader = !!leader && p.name === leader;
+          const locked = isLeader && svPick.mode === 'members';   // 本组小组长：固定勾选、不可取消
+          const on = svPick.mode === 'leader' ? (p.name === svPick.leader) : (locked || svPick.draft.indexOf(p.name) > -1);
+          return { name: p.name, group: p.group, team: p.team, on, isLeader, takenBy: taken[p.name] || '', locked, disabled: locked || !!taken[p.name] };
+        });
+    });
+    const svPickGroups = computed(() => {
+      const map = {}; const order = [];
+      svPickRows.value.forEach(r => { if (!map[r.group]) { map[r.group] = []; order.push(r.group); } map[r.group].push(r); });
+      return order.map(name => ({ name, rows: map[name] }));
+    });
+    const svPickAvail = computed(() => svPickRows.value.filter(r => !r.disabled && !r.isLeader));
+    const svPickAllOn = computed(() => svPickAvail.value.length > 0 && svPickAvail.value.every(r => r.on));
+    const svPickSomeOn = computed(() => !svPickAllOn.value && svPickAvail.value.some(r => r.on));
+    function svOpenLeader(gi) {
+      const f = surveyDlg.form; if (!f) return;
+      const g = f.groups[gi] || {};
+      svPick.gi = gi; svPick.mode = 'leader'; svPick.q = '';
+      svPick.leader = g.leader || ''; svPick.draft = [];
+      svPick.visible = true;
+    }
+    function svOpenMembers(gi) {
+      const f = surveyDlg.form; if (!f) return;
+      const g = f.groups[gi] || {};
+      svPick.gi = gi; svPick.mode = 'members'; svPick.q = '';
+      svPick.leader = '';
+      // 旧记录里组长可能同时出现在 members 里：打开时先剔掉，避免同一人算两次
+      svPick.draft = (Array.isArray(g.members) ? g.members : []).filter(n => n && n !== g.leader);
+      svPick.visible = true;
+    }
+    function svToggleRow(r) {
+      if (r.disabled) return;
+      if (svPick.mode === 'leader') { svPick.leader = r.name; return; }
+      const i = svPick.draft.indexOf(r.name);
+      if (i > -1) svPick.draft.splice(i, 1); else svPick.draft.push(r.name);
+    }
+    function svToggleAll(v) {
+      const names = svPickAvail.value.map(r => r.name);
+      if (!v) { svPick.draft = svPick.draft.filter(n => names.indexOf(n) === -1); return; }
+      names.forEach(n => { if (svPick.draft.indexOf(n) === -1) svPick.draft.push(n); });
+    }
+    function svConfirmPick() {
+      const f = surveyDlg.form; if (!f) return;
+      if (!Array.isArray(f.groups)) f.groups = [];
+      const gi = svPick.gi;
+      if (!f.groups[gi]) f.groups[gi] = { leader: '', members: [], workLocation: '', workTask: '' };
+      const g = f.groups[gi];
+      if (svPick.mode === 'leader') {
+        g.leader = svPick.leader || '';
+        // 同一人只占一个位置：升为组长后从本组人员里移除
+        g.members = (Array.isArray(g.members) ? g.members : []).filter(n => n && n !== g.leader);
+      } else {
+        g.members = svPick.draft.filter(n => n && n !== g.leader);
+      }
+      svPick.visible = false;
+    }
+    function svRemoveMember(gi, name) {
+      const f = surveyDlg.form; const g = f && Array.isArray(f.groups) ? f.groups[gi] : null;
+      if (!g || !Array.isArray(g.members)) return;
+      g.members = g.members.filter(n => n !== name);
+    }
     // 徽标：只表达「该字段当前值的来源」，实时按「当前值 vs 来源值」比对计算，不落库。
     //   四种文案（仅这四种）：周计划自动带入 / 规则自动带入 / 人工填写 / 待填写
     //   判定：当前值非空且 === 来源值 → 该来源对应的自动带入（A 类→周计划自动带入，B 类→规则自动带入）
@@ -1095,7 +1205,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1739,21 +1849,28 @@ const PlansView = {
                 <el-input :model-value="surveyDlg.form.workTask" type="textarea" :rows="3" readonly class="sv-notice-text" />
               </div>
               <div v-for="i in svGroupCount" :key="i" class="sv-group">
-                <!-- 紧凑首行：{n}小组（加粗纯文本）+ 小组长 + 技工下拉 + 本组人员 + 多选下拉（含实时人数） -->
+                <!-- 紧凑首行：{n}小组（加粗纯文本）+ 小组长（技工选择弹窗）+ 本组人员（分组勾选弹窗，含实时人数） -->
                 <div class="sv-gline">
                   <span class="sv-gname">{{ i }}小组</span>
                   <span class="sv-gpair sv-gpair-lead">
                     <span class="sv-glab">小组长</span>
-                    <el-select v-model="surveyDlg.form.groups[i - 1].leader" filterable clearable placeholder="选择技工" class="sv-gsel sv-gsel-lead">
-                      <el-option v-for="w in surveyPeople" :key="w.id || w.name" :label="w.name + (w.team ? '（' + w.team + '）' : '')" :value="w.name" />
-                    </el-select>
+                    <button type="button" class="sv-pick sv-pick-lead" :class="{ 'is-empty': !surveyDlg.form.groups[i - 1].leader }" @click="svOpenLeader(i - 1)">
+                      <span class="sv-pick-t">{{ surveyDlg.form.groups[i - 1].leader || '选择技工' }}</span>
+                      <svg class="sv-pick-i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 9.5 12 15l5.5-5.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    </button>
                   </span>
                   <span class="sv-gpair sv-gpair-mem">
                     <span class="sv-glab">本组人员</span>
-                    <el-select v-model="surveyDlg.form.groups[i - 1].members" multiple collapse-tags collapse-tags-tooltip filterable class="sv-gsel sv-gsel-mem" :placeholder="'选择本组人员（' + svMembersText(surveyDlg.form.groups[i - 1]) + '）'">
-                      <el-option v-for="w in surveyPeople" :key="w.id || w.name" :label="w.name + (w.team ? '（' + w.team + '）' : '')" :value="w.name" />
-                    </el-select>
+                    <button type="button" class="sv-pick sv-pick-mem" :class="{ 'is-empty': !surveyDlg.form.groups[i - 1].members.length }" @click="svOpenMembers(i - 1)">
+                      <span class="sv-pick-t">{{ surveyDlg.form.groups[i - 1].members.length ? svMembersText(surveyDlg.form.groups[i - 1]) : '选择本组人员' }}</span>
+                      <svg class="sv-pick-i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 9.5 12 15l5.5-5.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    </button>
                   </span>
+                </div>
+                <!-- 已选人员：一人一枚可移除的 chip，避免「只看见人数、看不见是谁」 -->
+                <div v-if="surveyDlg.form.groups[i - 1].leader || surveyDlg.form.groups[i - 1].members.length" class="sv-gwho">
+                  <span v-if="surveyDlg.form.groups[i - 1].leader" class="sv-mchip sv-mchip-lead">{{ surveyDlg.form.groups[i - 1].leader }}<i class="sv-mchip-tag">组长</i></span>
+                  <span v-for="n in surveyDlg.form.groups[i - 1].members" :key="n" class="sv-mchip">{{ n }}<i class="sv-mchip-x" title="移出本组" @click.stop="svRemoveMember(i - 1, n)">×</i></span>
                 </div>
                 <el-input v-model="surveyDlg.form.groups[i - 1].workLocation" type="textarea" :rows="2" placeholder="工作地点" class="sv-gtext" />
                 <el-input v-model="surveyDlg.form.groups[i - 1].workTask" type="textarea" :rows="2" placeholder="工作内容" class="sv-gtext" />
@@ -1909,6 +2026,43 @@ const PlansView = {
           <el-button @click="refreshSurveyStatus">刷新生成状态</el-button>
           <el-button type="primary" :loading="surveyDlg.generating" :disabled="surveyDlg.saving" @click="saveAndGenerate">保存并生成 现场勘察记录</el-button>
           <el-button @click="openMaterialsFromEditor">打开作业资料</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- ===== 小组人员选择弹窗：小组长（技工单选）/ 本组人员（技工·民工分组多选，组长固定勾选） ===== -->
+    <el-dialog v-model="svPick.visible" :title="svPickTitle" width="min(560px, 94%)" top="7vh" append-to-body class="svp-dlg" :close-on-click-modal="false">
+      <div class="svp-sub">{{ svPick.mode === 'leader' ? '仅技工可担任小组长；已被其他小组选用的人员不可重复选择。' : '小组长固定选中；其他小组的人员不可重复选择。' }}</div>
+      <div v-if="svPick.mode === 'members'" class="svp-tools">
+        <el-checkbox :model-value="svPickAllOn" :indeterminate="svPickSomeOn" @change="svToggleAll">全选可用人员</el-checkbox>
+        <span class="svp-count">已选 {{ svPick.draft.length }} 人</span>
+      </div>
+      <el-input v-if="svPeopleList.length > 6" v-model="svPick.q" size="small" clearable placeholder="搜索姓名或班组" class="svp-q" />
+      <div class="svp-body">
+        <div v-for="sec in svPickGroups" :key="sec.name" class="svp-sec">
+          <div class="svp-sec-h">
+            <span class="svp-sec-t">{{ sec.name }}</span>
+            <span class="svp-sec-n">{{ svPick.mode === 'leader' ? '共 ' + sec.rows.length + ' 人' : sec.rows.filter(r => r.on).length + ' / ' + sec.rows.length }}</span>
+          </div>
+          <div class="svp-grid">
+            <button v-for="r in sec.rows" :key="r.name" type="button" class="svp-item" :class="{ on: r.on, off: r.disabled, radio: svPick.mode === 'leader' }" :disabled="r.disabled" @click="svToggleRow(r)">
+              <span class="svp-box"><svg v-if="r.on" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.4 6.3 4.9 8.8 9.6 3.6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" /></svg></span>
+              <span class="svp-name">{{ r.name }}</span>
+              <span v-if="r.isLeader" class="svp-tag svp-tag-lead">小组长</span>
+              <span v-else-if="r.takenBy" class="svp-tag">{{ r.takenBy }}</span>
+              <span v-else-if="r.team && svMultiTeam" class="svp-team">{{ r.team }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="!svPickGroups.length" class="svp-empty">{{ svPeopleList.length ? '没有匹配的人员' : '作业人员名单中暂无可用人员，请先在「用户管理 - 作业人员名单」维护' }}</div>
+      </div>
+      <template #footer>
+        <div class="svp-foot">
+          <el-button v-if="svPick.mode === 'leader' && svPick.leader" text class="svp-clear" @click="svPick.leader = ''">清空选择</el-button>
+          <span class="svp-foot-r">
+            <el-button @click="svPick.visible = false">取 消</el-button>
+            <el-button type="primary" @click="svConfirmPick">确 定</el-button>
+          </span>
         </div>
       </template>
     </el-dialog>
