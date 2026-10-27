@@ -437,6 +437,7 @@ const PlansView = {
     const surveyDlg = reactive({
       visible: false, form: null, seed: null,
       saving: false, generating: false, errId: '',
+      snapshot: '',                         // 打开（或保存成功）时的表单模型快照，用于判定「未保存」
       banner: { type: '', text: '' }        // 顶部横幅：ok=在线编辑内容已保存 / info=已加载已保存的在线勘察记录
     });
     const SV_BANNER_LOADED = '已加载已保存的在线勘察记录；危险点库更新不会自动覆盖已保存措施。';
@@ -840,7 +841,27 @@ const PlansView = {
       surveyDlg.generating = false;
       // 已保存过的才提示「已加载已保存的在线勘察记录」
       surveyDlg.banner = saved ? { type: 'info', text: SV_BANNER_LOADED } : { type: '', text: '' };
+      surveyDlg.snapshot = svFormJson();   // 打开即拍快照：带入的种子/已存原值都不算脏
       surveyDlg.visible = true;
+    }
+    // ---------- 未保存保护：打开/保存成功时对表单模型拍快照，当前模型与之不一致即为脏 ----------
+    // 比对的是整份表单（作业分组、单位/部门/编号/双重名称、工作任务与小组卡、4.1、4.2、
+    // 环境描述、危险点条目、4.4 两措施与逐行归属、两组接地线与逐行归属、勘察日期）
+    function svFormJson() { return surveyDlg.form ? JSON.stringify(surveyDlg.form) : ''; }
+    function svIsDirty() { return !!surveyDlg.form && svFormJson() !== surveyDlg.snapshot; }
+    // 关闭拦截：右上角 X / ESC / 点击遮罩三条路径统一走这里；干净直接关，脏才弹提醒
+    function onSurveyBeforeClose(done) {
+      if (!svIsDirty()) { done(); return; }
+      ElementPlus.ElMessageBox.confirm(
+        '关闭后，本次未保存的修改将丢失。是否仍要关闭？',
+        '尚有未保存的勘察内容',
+        {
+          confirmButtonText: '放弃修改并关闭',
+          cancelButtonText: '继续编辑',
+          type: 'warning',
+          confirmButtonClass: 'el-button--danger'
+        }
+      ).then(() => { done(); }).catch(() => { /* 继续编辑：什么都不做，内容原样保留 */ });
     }
     function addHazardFromLib() {
       const h = hazardLibrary.value.find(x => x.id === hazardPick.value) || null;
@@ -961,6 +982,7 @@ const PlansView = {
         const saved = await api.put('/api/workPlans/' + plan.id + '/survey', body);
         plan.survey = saved;              // 勘察区立即切到「已勘察」
         surveyDlg.banner = { type: 'ok', text: SV_BANNER_SAVED };
+        surveyDlg.snapshot = svFormJson();   // 保存成功 → 快照对齐当前值，脏清除
         return true;
       } catch (e) {
         ElementPlus.ElMessage.error(e.message || '保存失败');
@@ -1198,7 +1220,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1775,7 +1797,7 @@ const PlansView = {
     </el-dialog>
 
     <!-- 现场勘察记录编辑器（四期收官：字段与勘察单模板全槽位对齐 + 保存并生成 docx） -->
-    <el-dialog v-model="surveyDlg.visible" :title="surveyTitle" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
+    <el-dialog v-model="surveyDlg.visible" :title="surveyTitle" width="min(900px, 94%)" top="4vh" append-to-body :before-close="onSurveyBeforeClose">
       <div v-if="surveyDlg.banner.text" class="sv-banner" :class="'sv-banner-' + surveyDlg.banner.type">{{ surveyDlg.banner.text }}</div>
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
