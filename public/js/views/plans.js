@@ -468,6 +468,34 @@ const PlansView = {
       const el = document.getElementById('hp-' + id);
       if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     }
+    // 计划/项目里已有的信息 → 勘察记录可自动带入的字段（能带的全带上，带入值用户可改）
+    // 4.3 环境描述只拼客观已知项（地点/设备/供电所/作业类型/风险因素）；
+    // 交叉、邻近（同杆塔、并行）电力线路、多电源、自发电、地下管网等仍需现场勘察后人工补充。
+    function surveyAutoFill(plan) {
+      const p = plan || {};
+      const s = v => String(v == null ? '' : v).trim();
+      const volt = s(p.voltage), st = s(p.station);
+      // 双重名称：站/线路名已带电压等级时不重复拼
+      const dev = st ? ((volt && st.indexOf(volt) !== 0) ? volt + st : st) : '';
+      const loc = [];
+      if (s(p.address)) loc.push('作业地点：' + s(p.address));
+      if (dev) loc.push('涉及设备：' + dev);
+      if (s(p.substation)) loc.push('属地供电所：' + s(p.substation));
+      const out = [];
+      if (loc.length) out.push(loc.join('；'));
+      const kind = [s(p.workType), s(p.specialty), s(p.dept)].filter(Boolean);
+      if (kind.length) out.push('作业类型：' + kind.join('、'));
+      const rf = (Array.isArray(p.riskFactors) ? p.riskFactors : []).map(s).filter(Boolean);
+      if (rf.length) out.push('现场风险因素：' + rf.join('、'));
+      return {
+        // 勘察单位：优先县级实施单位，其次市级实施单位、建管单位
+        surveyUnit: s(p.execCounty) || s(p.execCity) || s(p.buildCounty) || s(p.buildCity),
+        dualName: dev,
+        envDesc: out.join('\n'),
+        // 计划「风险管控措施」= 班组应采取的安全措施
+        teamMeasures: s(p.controlMeasures)
+      };
+    }
     // 小组人员选项：作业人员名单（GET /api/workers，即「用户管理-作业人员名单」那套数据），排除状态「待定」
     const surveyPeople = computed(() => workersFull.value.filter(w => w.name && w.status !== '待定'));
     const svGroupCount = computed(() => {
@@ -573,47 +601,54 @@ const PlansView = {
     }
     function onGroupingChange() { padGroups(svGroupCount.value); padScopes(); }
     function svMembersText(g) { return '已选 ' + ((g && Array.isArray(g.members)) ? g.members.length : 0) + ' 人'; }
-    // 徽标：带入类字段（部门/编号/工作地点/工作内容/4.1）——当前值 === 打开时的带入值且带入值非空 → 周计划自动带入，否则人工填写
-    //      非带入类字段（勘察单位/双重名称/4.2）——为空显示「待填写」，有值不显示
+    // 徽标：计划/项目里能带到的字段（部门/编号/工作地点/工作内容/4.1/勘察日期/勘察单位/双重名称/环境描述/班组措施）
+    //      —— 当前值 === 打开时的带入值且带入值非空 → 「周计划自动带入」，否则「人工填写」
+    //      无带入来源的字段（4.2 保留带电部位 / 运维人员措施 / 接地线）—— 为空显示「待填写」，有值不显示
     //      全部实时计算，不落库存状态
     const svBadges = computed(() => {
       const f = surveyDlg.form; const seed = surveyDlg.seed || {};
       if (!f) return {};
       const str = v => (v == null ? '' : String(v)).trim();
+      const todoChip = k => (str(f[k]) ? null : { text: '待填写', cls: 'todo' });
       const seedChip = k => {
         const s = str(seed[k]);
-        return (s && str(f[k]) === s) ? { text: '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
+        if (!s) return todoChip(k);   // 无可带入来源时按手填字段处理
+        return str(f[k]) === s ? { text: '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
       };
-      const todoChip = k => (str(f[k]) ? null : { text: '待填写', cls: 'todo' });
       return {
         team: seedChip('team'), surveyNo: seedChip('surveyNo'),
         workLocation: seedChip('workLocation'), workTask: seedChip('workTask'), outageScope: seedChip('outageScope'),
         surveyDate: seedChip('surveyDate'),
-        surveyUnit: todoChip('surveyUnit'), dualName: todoChip('dualName'), retainedLive: todoChip('retainedLive'),
-        envDesc: todoChip('envDesc'),
-        opsMeasures: todoChip('opsMeasures'), teamMeasures: todoChip('teamMeasures'),
+        surveyUnit: seedChip('surveyUnit'), dualName: seedChip('dualName'), retainedLive: todoChip('retainedLive'),
+        envDesc: seedChip('envDesc'),
+        opsMeasures: todoChip('opsMeasures'), teamMeasures: seedChip('teamMeasures'),
         ground10: todoChip('ground10'), ground04: todoChip('ground04')
       };
     });
-    // 打开编辑器：已勘察一律加载已保存内容（不重新带入、不覆盖）；未勘察才从计划带入一次 + 预置标准危险点
+    // 打开编辑器：已保存内容原样加载（不覆盖已填项）；当时没填的字段（勘察单位/双重名称/环境描述/班组措施）补一次计划带入
     async function openSurveyEditor() {
       const plan = matDlg.plan;
       if (!plan || !plan.id) return;
-      // 带入值：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、工作内容=plan.content、4.1=plan.outageRange
-      // 勘察日期=plan.startDate（计划开始时间，取前 10 位日期部分），取不到回落今天
+      // 带入值（surveyAutoFill 补齐）：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、
+      // 工作内容=plan.content、4.1=plan.outageRange、勘察日期=plan.startDate（取前 10 位，取不到回落今天）
+      // 勘察单位=县级/市级实施单位→建管单位、双重名称=电压+站线名、4.3 环境描述=地点/设备/供电所/作业类型/风险因素、
+      // 4.4 班组措施=计划「风险管控措施」
       const planDay = String(plan.startDate || '').trim().slice(0, 10);
       const planDayOk = /^\d{4}-\d{2}-\d{2}$/.test(planDay) ? planDay : '';
+      const auto = surveyAutoFill(plan);
       surveyDlg.seed = {
         team: plan.team || '', surveyNo: plan.surveyNo || '',
         workLocation: plan.address || '', workTask: plan.content || '', outageScope: plan.outageRange || '',
-        surveyDate: planDayOk
+        surveyDate: planDayOk,
+        surveyUnit: auto.surveyUnit, dualName: auto.dualName,
+        envDesc: auto.envDesc, teamMeasures: auto.teamMeasures
       };
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       if (saved) {
         surveyDlg.form = {
           grouping: SURVEY_GROUPING_OPTS.indexOf(saved.grouping) > -1 ? saved.grouping : '不分小组',
-          surveyUnit: saved.surveyUnit || '', team: saved.team || '', surveyNo: saved.surveyNo || '',
-          dualName: saved.dualName || '',
+          surveyUnit: saved.surveyUnit || auto.surveyUnit, team: saved.team || '', surveyNo: saved.surveyNo || '',
+          dualName: saved.dualName || auto.dualName,
           workLocation: saved.workLocation || '', workTask: saved.workTask || '',
           outageScope: saved.outageScope || '', retainedLive: saved.retainedLive || '',
           groups: (Array.isArray(saved.groups) ? saved.groups : []).map(g => ({
@@ -621,8 +656,10 @@ const PlansView = {
             members: Array.isArray(g.members) ? g.members.slice() : [],
             workLocation: g.workLocation || '', workTask: g.workTask || ''
           })),
-          // 4.3 / 4.4：已保存内容原样加载，不重新带入、不覆盖
-          envDesc: saved.envDesc || '', opsMeasures: saved.opsMeasures || '', teamMeasures: saved.teamMeasures || '',
+          // 4.3 / 4.4：已保存内容原样加载；仅「当时没填」的字段补一次计划带入，不覆盖已有内容
+          envDesc: saved.envDesc || auto.envDesc,
+          opsMeasures: saved.opsMeasures || '',
+          teamMeasures: saved.teamMeasures || auto.teamMeasures,
           ground10: saved.ground10 || '', ground04: saved.ground04 || '',
           teamMeasureScopes: Array.isArray(saved.teamMeasureScopes) ? saved.teamMeasureScopes.slice() : [],
           ground10Scopes: Array.isArray(saved.ground10Scopes) ? saved.ground10Scopes.slice() : [],
@@ -641,10 +678,10 @@ const PlansView = {
         await ensureHazards();   // 预置标准危险点依赖危险点库，未加载先取一次
         surveyDlg.form = {
           grouping: '不分小组',
-          surveyUnit: '', team: plan.team || '', surveyNo: plan.surveyNo || '', dualName: '',
+          surveyUnit: auto.surveyUnit, team: plan.team || '', surveyNo: plan.surveyNo || '', dualName: auto.dualName,
           workLocation: plan.address || '', workTask: plan.content || '',
           outageScope: plan.outageRange || '', retainedLive: '', groups: [],
-          envDesc: '', opsMeasures: '', teamMeasures: '', ground10: '', ground04: '',
+          envDesc: auto.envDesc, opsMeasures: '', teamMeasures: auto.teamMeasures, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
           surveyDate: planDayOk || todayYmd(), hazardPoints: seedHazardPoints()
         };
