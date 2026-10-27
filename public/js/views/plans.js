@@ -437,7 +437,6 @@ const PlansView = {
     const surveyDlg = reactive({
       visible: false, form: null, seed: null,
       saving: false, generating: false, errId: '',
-      genErr: '',                           // 本次生成失败原因（页脚结果条用；换计划/重开编辑器时清空）
       banner: { type: '', text: '' }        // 顶部横幅：ok=在线编辑内容已保存 / info=已加载已保存的在线勘察记录
     });
     const SV_BANNER_LOADED = '已加载已保存的在线勘察记录；危险点库更新不会自动覆盖已保存措施。';
@@ -781,7 +780,6 @@ const PlansView = {
       const str = v => (v == null ? '' : String(v)).trim();
       const seed = surveySeed(plan);
       surveyDlg.seed = seed;
-      surveyDlg.genErr = '';
       // 旧数据兼容：4a 阶段 survey 里 workLocation（工作地点）与 workTask（工作内容）是两个分开的框，
       // 本批起合并为一个「3.工作任务」框 —— 打开时按「工作地点 + 换行 + 工作内容」拼接显示，
       // 保存时只落 workTask、并把 workLocation 置空（一次性并入，重开不再重复拼接）。
@@ -973,23 +971,6 @@ const PlansView = {
     async function saveSurvey() {
       await putSurvey();          // 成功后由顶部绿色横幅提示，不额外弹 toast
     }
-    // 生成结果条（页脚就近反馈）：以服务端 generatedFiles 为准，重开编辑器也能看到「已生成 + 何时 + 下载」；
-    // 失败时给红条，成功后绿条——避免用户点了页脚按钮却看不见任何结果（顶部横幅在滚动到页脚时不可见）
-    const svGenFile = computed(() => {
-      const arr = (matGenFiles.value || []).filter(f => f && (/现场勘察记录/.test(String(f.name || '')) || String(f.category || '') === '现场勘察记录'));
-      return arr.length ? arr[arr.length - 1] : null;
-    });
-    const svGenBar = computed(() => {
-      if (surveyDlg.genErr) return { cls: 'err', text: '生成失败：' + surveyDlg.genErr };
-      const f = svGenFile.value;
-      if (!f) return null;
-      const size = f.size ? ' · ' + (f.size >= 1048576 ? (f.size / 1048576).toFixed(1) + ' MB' : Math.round(f.size / 1024) + ' KB') : '';
-      return { cls: 'ok', text: '现场勘察记录.docx 已生成 · ' + matFmtTime(f.uploadedAt) + size };
-    });
-    function svDownloadGen() {
-      const f = svGenFile.value;
-      if (f) matDownloadGen(f);
-    }
     // 保存并生成 现场勘察记录：先走同一套校验与 PUT，成功后调生成接口
     // 生成成功不关闭编辑器——可能还有地方要改；改完再点即覆盖更新同一份，不新增勘察单
     async function saveAndGenerate() {
@@ -1000,22 +981,13 @@ const PlansView = {
       try {
         const r = await api.post('/api/workPlans/' + plan.id + '/survey/generate');
         const updated = !!(r && r.updated);
-        surveyDlg.genErr = '';
         ElementPlus.ElMessage.success(updated ? '已更新「现场勘察记录.docx」' : '已生成「现场勘察记录.docx」');
         surveyDlg.banner = { type: 'ok', text: updated ? SV_BANNER_UPDATED : SV_BANNER_GENERATED };
         await reloadMatPlan();            // 施工资料弹窗的生成资料区随之刷新（编辑器保持打开）
       } catch (e) {
-        // 失败：编辑器保持打开，已保存的内容不丢；页脚红条常驻直到重试成功
-        surveyDlg.genErr = e.message || '生成失败';
+        // 失败：编辑器保持打开，已保存的内容不丢
         ElementPlus.ElMessage.error(e.message || '生成失败');
       } finally { surveyDlg.generating = false; }
-    }
-    // 刷新生成状态：只重读服务端数据（本系统生成是同步的，不触发任何生成）
-    async function refreshSurveyStatus() {
-      const fresh = await reloadMatPlan();
-      if (!fresh) { ElementPlus.ElMessage.error('刷新失败，请稍后重试'); return; }
-      surveyDlg.banner = fresh.survey ? { type: 'info', text: SV_BANNER_LOADED } : { type: '', text: '' };
-      ElementPlus.ElMessage.success('生成状态已刷新');
     }
     // 打开作业资料：在编辑器之上叠开施工资料弹窗，编辑器不关闭
     async function openMaterialsFromEditor() {
@@ -1226,7 +1198,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, svGenBar, svGenFile, svDownloadGen, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -2042,20 +2014,10 @@ const PlansView = {
         </el-form>
       </div>
       <template #footer>
-        <div class="sv-foot-wrap">
-          <!-- 生成结果条：就贴在按钮上方，滚到页脚也能立刻看到「生成没生成、什么时候、能不能下载」 -->
-          <div v-if="svGenBar" class="sv-gen" :class="'sv-gen-' + svGenBar.cls">
-            <svg v-if="svGenBar.cls === 'ok'" class="sv-gen-i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" stroke-width="1.7" /><path d="M7.9 12.2l2.9 2.9 5.4-5.9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            <svg v-else class="sv-gen-i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" stroke-width="1.7" /><path d="M12 7.4v5.9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" /><circle cx="12" cy="16.9" r="1.15" fill="currentColor" /></svg>
-            <span class="sv-gen-t">{{ svGenBar.text }}</span>
-            <el-button v-if="svGenBar.cls === 'ok'" link type="primary" size="small" class="sv-gen-dl" @click="svDownloadGen">下载</el-button>
-          </div>
-          <div class="sv-foot">
-            <el-button :loading="surveyDlg.saving" @click="saveSurvey">保存在线编辑内容</el-button>
-            <el-button @click="refreshSurveyStatus">刷新生成状态</el-button>
-            <el-button type="primary" :loading="surveyDlg.generating" :disabled="surveyDlg.saving" @click="saveAndGenerate">{{ surveyDlg.generating ? '生成中…' : '保存并生成 现场勘察记录' }}</el-button>
-            <el-button @click="openMaterialsFromEditor">打开作业资料</el-button>
-          </div>
+        <div class="sv-foot">
+          <el-button :loading="surveyDlg.saving" @click="saveSurvey">保存在线编辑内容</el-button>
+          <el-button type="primary" :loading="surveyDlg.generating" :disabled="surveyDlg.saving" @click="saveAndGenerate">{{ surveyDlg.generating ? '生成中…' : '保存并生成 现场勘察记录' }}</el-button>
+          <el-button @click="openMaterialsFromEditor">打开作业资料</el-button>
         </div>
       </template>
     </el-dialog>
