@@ -478,11 +478,12 @@ const PlansView = {
       const el = document.getElementById('hp-' + id);
       if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     }
-    // 首次带入值 = 计划字段「原样搬运」，不做任何推导/拼装/兜底：
-    //   部门（班组）=plan.team｜编号=部门+plan.surveyNo｜3.工作任务=plan.content
-    //   4.1=plan.outageRange｜勘察日期=plan.startDate 前 10 位｜4.4 班组措施=plan.teamSafetyMeasures
-    //   4.3 环境描述=系统默认文案（仅首次创建带入，改/清空即转人工填写）
-    // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位。
+    // 来源值（seed）= 徽标比对的基准；只有「首次创建」才把这组值真正填进表单。
+    //   A 类·抄周计划字段：部门（班组）=plan.team｜编号=部门+plan.surveyNo（存完整编号）
+    //                     ｜3.工作任务=plan.content｜4.1=plan.outageRange
+    //   B 类·固定文案/规则算出：4.3 环境描述=系统默认文案｜4.4 班组措施=计划填写值或默认文案
+    //                     ｜勘察日期=plan.startDate 前 10 位（取不到则不作为来源）
+    //   C 类·不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位、4.4 运维措施、接地线
     const SV_ENV_DESC_DEFAULT = '工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。';
     // 4.4 班组应采取的安全措施默认文案（整行一条；分组时默认归属「全组」）
     const SV_TEAM_MEASURES_DEFAULT = '所有下户表计负荷侧空开出线，分别用绝缘胶布将线头包裹严实，并悬挂“禁止合闸，线路有人工作”标识牌一块。';
@@ -613,52 +614,49 @@ const PlansView = {
     }
     function onGroupingChange() { padGroups(svGroupCount.value); padScopes(); }
     function svMembersText(g) { return '已选 ' + ((g && Array.isArray(g.members)) ? g.members.length : 0) + ' 人'; }
-    // 徽标：只表达「这个值是怎么来的」，实时计算、不落库
-    //   带入字段：当前值 === 带入值 → 「自动带入」徽标；被改动或清空 → 「人工填写」
-    //     徽标文案按来源分两类：直接抄周计划字段的 →「周计划自动带入」；
-    //     系统规则/默认文案生成的（4.3 环境描述、勘察日期、4.4 默认班组措施）→「规则自动带入」
-    //     计划本身没给带入值 → 空则「待填写」，填了算「人工填写」
-    //   非带入字段（勘察单位/双重名称/4.2/运维措施/接地线）：为空 → 「待填写」；有值不挂徽标
-    //   作业分组是模板外的纯控制项，不挂任何徽标
+    // 徽标：只表达「该字段当前值的来源」，实时按「当前值 vs 来源值」比对计算，不落库。
+    //   四种文案（仅这四种）：周计划自动带入 / 规则自动带入 / 人工填写 / 待填写
+    //   判定：当前值非空且 === 来源值 → 该来源对应的自动带入（A 类→周计划自动带入，B 类→规则自动带入）
+    //         当前值非空但 ≠ 来源值（含本无来源）→ 人工填写
+    //         当前值为空 → 来源有值（被人工清掉）= 人工填写；来源也为空 = 待填写
+    //   来源值（seed）在打开时按计划/规则算一次，保存动作不改它 → 保存前后、重开前后徽标一致
+    //   作业分组是模板外的纯控制项，不挂任何徽标；小组卡内字段同样不挂
     const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures', 'envDesc'];
+    // B 类（固定文案 / 规则算出）→「规则自动带入」；其余带入字段是 A 类（抄周计划字段）→「周计划自动带入」
+    const SV_RULE_FIELDS = ['envDesc', 'surveyDate', 'teamMeasures'];
     const SV_BADGE_FIELDS = [
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
     ];
     const svBadges = computed(() => {
-      const f = surveyDlg.form; const seed = surveyDlg.seed || {}; const rule = surveyDlg.seedRule || {};
+      const f = surveyDlg.form; const seed = surveyDlg.seed || {};
       if (!f) return {};
       const str = v => (v == null ? '' : String(v)).trim();
       const out = {};
       SV_BADGE_FIELDS.forEach(k => {
         const cur = str(f[k]);
-        const seeded = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
-        if (seeded) out[k] = (cur === seeded) ? { text: rule[k] ? '规则自动带入' : '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
-        else if (cur) out[k] = null;
-        else out[k] = { text: '待填写', cls: 'todo' };
+        const src = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
+        if (cur && src && cur === src) {
+          out[k] = { text: SV_RULE_FIELDS.indexOf(k) > -1 ? '规则自动带入' : '周计划自动带入', cls: 'auto' };
+        } else if (cur || src) {
+          out[k] = { text: '人工填写', cls: 'manual' };
+        } else {
+          out[k] = { text: '待填写', cls: 'todo' };
+        }
       });
       return out;
     });
-    // 打开编辑器：首次打开按 surveySeed 带入（部门/完整编号/3.工作任务/4.1/勘察日期/4.4班组措施）；
-    // 已保存的 survey 原样加载（不覆盖已填内容），旧数据 workLocation 一次性并入 workTask。
+    // 打开编辑器：带入只发生在「首次创建」；已保存的 survey 一律原样加载（不重新带入、不补默认、不覆盖）。
+    // 来源值 seed 始终按计划/规则算一次，只用于徽标比对，不因「已保存」而清零。
     async function openSurveyEditor() {
       const plan = matDlg.plan;
       if (!plan || !plan.id) return;
-      // 首次带入值 = 计划字段原样搬运（部门/完整编号/3.工作任务/4.1/勘察日期/4.4班组措施）；
-      // 勘察单位、双重名称、4.2 一律不带入，首次打开为空，等现场勘察时填。
+      // 来源值 = 计划字段原样搬运（部门/完整编号/3.工作任务/4.1/勘察日期）+ 规则默认文案（4.3/4.4）
+      // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位。
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       const str = v => (v == null ? '' : String(v)).trim();
       const seed = surveySeed(plan);
-      // 4.3 环境描述默认文案只给「首次创建」：已保存的 survey 原样加载，不补默认，
-      // 也不把它算作带入值（否则用户清空后重开会误显示「人工填写」）。
-      if (saved) seed.envDesc = '';
       surveyDlg.seed = seed;
-      // 徽标来源：默认文案/规则生成的字段挂「规则自动带入」，直接抄周计划字段的挂「周计划自动带入」
-      surveyDlg.seedRule = {
-        envDesc: !saved,                                        // 4.3 环境描述默认文案
-        surveyDate: true,                                       // 勘察日期取计划开始日期的日期部分
-        teamMeasures: !String(plan.teamSafetyMeasures || '').trim()   // 计划没填 → 用默认文案
-      };
       // 旧数据兼容：4a 阶段 survey 里 workLocation（工作地点）与 workTask（工作内容）是两个分开的框，
       // 本批起合并为一个「3.工作任务」框 —— 打开时按「工作地点 + 换行 + 工作内容」拼接显示，
       // 保存时只落 workTask、并把 workLocation 置空（一次性并入，重开不再重复拼接）。
@@ -666,19 +664,15 @@ const PlansView = {
       const savedTask = saved ? str(saved.workTask) : '';
       const mergedTask = savedLoc
         ? (savedTask ? savedLoc + '\n' + savedTask : savedLoc)
-        : (savedTask || seed.workTask);
-      // 4.4 班组措施：已保存的一律原样加载（含旧版本自动带入的「风险管控措施」历史内容，用户可自行清理），
-      // 不覆盖、不补默认；默认文案只在「首次创建」时带入（seed），并在已保存时退出徽标比对。
-      if (saved) seed.teamMeasures = '';
-      const teamMeasuresVal = saved ? str(saved.teamMeasures) : seed.teamMeasures;
+        : savedTask;   // 已保存原样，不回落计划内容（带入只发生在首次创建）
       if (saved) {
         surveyDlg.form = {
           grouping: SURVEY_GROUPING_OPTS.indexOf(saved.grouping) > -1 ? saved.grouping : '不分小组',
-          // 勘察单位 / 双重名称 / 4.2 不带入：已保存原样加载，没有就是空
-          surveyUnit: str(saved.surveyUnit), team: str(saved.team) || seed.team, surveyNo: str(saved.surveyNo) || seed.surveyNo,
+          // 已保存一律原样：勘察单位 / 部门 / 编号 / 双重名称，没有就是空，不回落计划值
+          surveyUnit: str(saved.surveyUnit), team: str(saved.team), surveyNo: str(saved.surveyNo),
           dualName: str(saved.dualName),
           workLocation: '', workTask: mergedTask,
-          outageScope: str(saved.outageScope) || seed.outageScope, retainedLive: str(saved.retainedLive),
+          outageScope: str(saved.outageScope), retainedLive: str(saved.retainedLive),
           groups: (Array.isArray(saved.groups) ? saved.groups : []).map(g => ({
             leader: g.leader || '',
             members: Array.isArray(g.members) ? g.members.slice() : [],
@@ -687,12 +681,13 @@ const PlansView = {
           // 4.3 / 4.4：已保存内容一律原样加载，不补默认、不覆盖
           envDesc: str(saved.envDesc),
           opsMeasures: str(saved.opsMeasures),
-          teamMeasures: teamMeasuresVal,
+          teamMeasures: str(saved.teamMeasures),
           ground10: str(saved.ground10), ground04: str(saved.ground04),
           teamMeasureScopes: Array.isArray(saved.teamMeasureScopes) ? saved.teamMeasureScopes.slice() : [],
           ground10Scopes: Array.isArray(saved.ground10Scopes) ? saved.ground10Scopes.slice() : [],
           ground04Scopes: Array.isArray(saved.ground04Scopes) ? saved.ground04Scopes.slice() : [],
-          surveyDate: str(saved.surveyDate) || todayYmd(),
+          // 勘察日期：已保存原样（空就是空，不回落今天——「今天」只用于首次创建）
+          surveyDate: str(saved.surveyDate),
           hazardPoints: (Array.isArray(saved.hazardPoints) ? saved.hazardPoints : []).map(h => ({
             id: h.id || newHpId(),
             hazardId: h.hazardId || '',
@@ -709,7 +704,7 @@ const PlansView = {
           surveyUnit: '', team: seed.team, surveyNo: seed.surveyNo, dualName: '',
           workLocation: '', workTask: seed.workTask,
           outageScope: seed.outageScope, retainedLive: '', groups: [],
-          envDesc: seed.envDesc, opsMeasures: '', teamMeasures: teamMeasuresVal, ground10: '', ground04: '',
+          envDesc: seed.envDesc, opsMeasures: '', teamMeasures: seed.teamMeasures, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
           surveyDate: seed.surveyDate || todayYmd(), hazardPoints: seedHazardPoints()
         };

@@ -630,6 +630,12 @@ async function listOk(p, token) {
     const d1 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after survey');
     need(d1.survey && JSON.stringify(d1.survey.groups) === JSON.stringify(s1.groups), '重读计划时 groups 不一致');
     need(d1.survey.surveyNo === '202610900' && d1.survey.workLocation === '冒烟工作地点', '重读计划时字段丢失');
+    // 本批口径：编辑器存的编号是「部门+编号」的完整编号，PUT 原样往返（服务端不重复拼前缀）；
+    // 3.工作任务合并成一个框后，workLocation 一律提交空串 → 落库为空（旧值一次性并入 workTask）
+    const fullNo = '施工一队202610900';
+    const sFull = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body1, surveyNo: fullNo, workLocation: '' } }), '完整编号往返');
+    need(sFull.surveyNo === fullNo, '完整编号应原样往返，实际 ' + JSON.stringify(sFull.surveyNo));
+    need(sFull.workLocation === '', 'workLocation 传空串应落库为空，实际 ' + JSON.stringify(sFull.workLocation));
     // 二次 PUT：改分组数与内容，createdAt 不变
     const G3 = { leader: '小赵', members: [], workLocation: '3 号杆', workTask: '紧线' };
     const body2 = { ...body1, grouping: '分3个小组', surveyUnit: '改后单位', groups: [G1, G2, G3] };
