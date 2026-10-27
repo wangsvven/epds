@@ -175,18 +175,40 @@ function expandParagraph(xml, at, ls) {
   }
   return { from: r.pStart, to: r.pEnd, text };
 }
+// 删掉 XXXX 所在段落前面紧邻的那个空段落（模板在 4.3 标题后、4.3 槽位前多留了一个空段；
+// 参考文档此处没有空行）。只吃纯空段：含图片/对象的段落不动。
+function dropBlankParaBefore(xml, at) {
+  const r = paraRangeAt(xml, at);
+  if (!r || r.pStart < 6) return null;
+  if (xml.slice(r.pStart - 6, r.pStart) !== '</w:p>') return null;
+  const prevStart = Math.max(xml.lastIndexOf('<w:p ', r.pStart - 6), xml.lastIndexOf('<w:p>', r.pStart - 6));
+  if (prevStart < 0) return null;
+  const prev = xml.slice(prevStart, r.pStart);
+  if (/<w:drawing|<w:pict|<w:object|<mc:AlternateContent/.test(prev)) return null;
+  const txt = [...prev.matchAll(/<w:t(?: [^>]*)?>([\s\S]*?)<\/w:t>/g)].map(m => m[1]).join('');
+  if (txt.trim()) return null;
+  return xml.slice(0, prevStart) + xml.slice(r.pStart);
+}
 // 逐个按序替换 XXXX（只替换到 17 处，替换进来的文本不会被再次扫描）
 //   空值：保留模板 XXXX（打印后手填）；只有槽位 10「运维人员措施」空值才替换为空字符串
 //   多行：逐行成段（见 expandParagraph）
 //   整段不输出：槽位 5「工作地点」——参考文档第 3 项没有这一行，模板里的「工作地点：」标签一并去掉
+//   前置空段：槽位 9「4.3」前模板多一个空段，参考文档没有 → 去掉
+//   日期留白：槽位 15-17 年月日，去掉模板 XXXX 后面用来对齐的空格（2026  年 → 2026年）
 const EMPTY_KEEPS_XXXX_EXCEPT = 10;
 const DROP_SLOT_PARAS = [5];
+const DROP_BLANK_BEFORE_SLOTS = [9];
+const TRIM_AFTER_SLOTS = [15, 16, 17];
 function fillTemplate(xml, slots) {
   let out = xml;
   let from = 0;
   for (let i = 0; i < SLOT_COUNT; i++) {
-    const at = out.indexOf('XXXX', from);
+    let at = out.indexOf('XXXX', from);
     if (at < 0) break;
+    if (DROP_BLANK_BEFORE_SLOTS.indexOf(i + 1) > -1) {
+      const nx = dropBlankParaBefore(out, at);
+      if (nx) { out = nx; at = out.indexOf('XXXX', from); if (at < 0) break; }
+    }
     if (DROP_SLOT_PARAS.indexOf(i + 1) > -1) {      // 整段删掉（含段落里的固定标签）
       const r = paraRangeAt(out, at);
       if (r) { out = out.slice(0, r.pStart) + out.slice(r.pEnd); from = r.pStart; continue; }
@@ -196,7 +218,11 @@ function fillTemplate(xml, slots) {
     const ls = raw.replace(/\r\n?/g, '\n').split('\n');
     if (ls.length <= 1) {
       const t = xmlEscape(ls[0]);
-      out = out.slice(0, at) + t + out.slice(at + 4);
+      let end = at + 4;
+      if (TRIM_AFTER_SLOTS.indexOf(i + 1) > -1) {   // 顺手吃掉 XXXX 后面用于对齐的空格/制表符
+        while (end < out.length && (out[end] === ' ' || out[end] === '\t')) end++;
+      }
+      out = out.slice(0, at) + t + out.slice(end);
       from = at + t.length;
       continue;
     }

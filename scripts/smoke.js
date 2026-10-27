@@ -771,7 +771,7 @@ async function listOk(p, token) {
     const me = needOk(await api('GET', '/api/me', { token }), 'me');
     const recName = me.user.name;
     const p = needOk(await api('POST', '/api/workPlans', {
-      token, body: { name: '冒烟生成计划', planType: '周计划', team: '施工一队', surveyNo: '202610001' }
+      token, body: { name: '冒烟生成计划', planType: '周计划', team: '施工一队', surveyNo: '202610001', teamLeader: '冒烟班组长' }
     }), 'plan POST');
     // 1) 未勘察 → 400
     const r0 = await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token });
@@ -855,7 +855,8 @@ async function listOk(p, token) {
     need(gt.indexOf('（1）高空坠落风险的安全措施：正确使用安全带') > -1, '槽位12 通用措施未组装');
     // 4g) 日期与记录人
     need(gt.indexOf('|2026|10|19') > -1, '槽位15-17 勘察日期应为 2026/10/19 三个数字槽：' + gt.slice(-60));
-    need(gt.indexOf('|' + recName) > -1, '槽位14 记录人应为当前登录用户（' + recName + '）');
+    need(gt.indexOf('|冒烟班组长') > -1, '槽位14 记录人应默认取计划班组长（冒烟班组长），实际 ' + gt.slice(-40));
+    need(gt.indexOf('|' + recName) < 0, '槽位14 不应再用当前登录用户（' + recName + '）');
     // 4b) 槽位5「工作地点」整段不输出：改计划地址后产物里也不应出现该行；槽位6 仍按小组拼工作内容
     needOk(await api('PUT', '/api/workPlans/' + p.id, { token, body: { address: '冒烟作业地址' } }), 'plan address PUT');
     needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate after address');

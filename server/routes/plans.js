@@ -401,7 +401,9 @@ app.post('/api/workPlans/:id/survey/generate', (req, res) => {
   }
   let buf;
   try {
-    const recorder = req.user.name || req.user.username || '';
+    // 记录人默认取计划里的班组长（表单字段 teamLeader，列表展示字段 leader 同源）；没填班组长才回落当前登录用户
+    const recorder = String(p.teamLeader || '').trim() || String(p.leader || '').trim()
+      || req.user.name || req.user.username || '';
     buf = buildSurveyDocx(fs.readFileSync(abs), p, survey, recorder).buffer;
   } catch (e) {
     if (e && e.code === 'TPL_SLOTS') {
