@@ -797,11 +797,20 @@ async function listOk(p, token) {
     need(gt.indexOf('（1）高空坠落风险的安全措施：正确使用安全带') > -1, '槽位12 通用措施未组装');
     need(gt.indexOf('|2026|10|19') > -1, '槽位15-17 勘察日期应为 2026/10/19 三个数字槽：' + gt.slice(-60));
     need(gt.indexOf('|' + recName) > -1, '槽位14 记录人应为当前登录用户（' + recName + '）');
-    // 5) 再生成一次 → 2 条，不覆盖旧的
+    // 5) 改一处内容再生成 → 原地覆盖同一份，不新增勘察单
+    needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
+      token, body: Object.assign({}, svBody, { envDesc: '现场有跨越，邻近 10kV 线路（改）' })
+    }), 'survey PUT 2');
     const gf2 = needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate 2');
+    need(gf2.id === gf1.id, '再次生成应复用同一条记录，实际 ' + brief(gf1.id) + ' → ' + brief(gf2.id));
+    need(gf2.updated === true, '再次生成应回 updated=true，实际 ' + brief(gf2.updated));
     const d = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after generate');
-    need(Array.isArray(d.generatedFiles) && d.generatedFiles.length === 2, 'generatedFiles 应为 2 条，实际 ' + brief(d.generatedFiles && d.generatedFiles.length));
-    need(d.generatedFiles[0].id === gf1.id && d.generatedFiles[1].id === gf2.id, '两条记录应按追加顺序保存');
+    need(Array.isArray(d.generatedFiles) && d.generatedFiles.length === 1,
+      '再次生成后应仍只有 1 条（覆盖不新增），实际 ' + brief(d.generatedFiles && d.generatedFiles.length));
+    need(d.generatedFiles[0].path === gf1.path, '覆盖生成不应更换磁盘路径：' + brief(d.generatedFiles[0].path));
+    const gxml2 = unzipEntry(fs.readFileSync(absG), 'word/document.xml').toString('utf8');
+    need(gxml2.indexOf('现场有跨越，邻近 10kV 线路（改）') > -1, '覆盖生成后产物未反映最新内容');
+    need(gxml2.indexOf('现场有跨越，邻近 10kV 线路') === gxml2.indexOf('现场有跨越，邻近 10kV 线路（改）'), '旧内容应被覆盖而非追加');
     // 6) 下载拿到 docx（PK 头）
     const dl = await fetch(base + '/api/workPlans/' + p.id + '/generated/' + gf1.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
     need(dl.status === 200, '下载期望 200，实际 ' + dl.status);
@@ -811,10 +820,10 @@ async function listOk(p, token) {
     needOk(await api('DELETE', '/api/workPlans/' + p.id + '/generated/' + gf1.id, { token }), 'generated DELETE');
     need(!fs.existsSync(absG), '删除后磁盘文件应同时删除');
     const d2 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after delete');
-    need(d2.generatedFiles.length === 1 && d2.generatedFiles[0].id === gf2.id, '删除后应只剩第 2 条：' + brief(d2.generatedFiles.map(x => x.id)));
+    need(d2.generatedFiles.length === 0, '删除后应没有生成记录：' + brief(d2.generatedFiles.map(x => x.id)));
     const dl2 = await fetch(base + '/api/workPlans/' + p.id + '/generated/' + gf1.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
     need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
-    return '17 槽位全替换（无 XXXX）/ 编号拼法 / 小组拼接 / 接地线归属 / 通用措施 / 日期 2026-10-19 / 记录人 ' + recName + ' / 生成 2 条→删 1 留 1';
+    return '17 槽位全替换（无 XXXX）/ 编号拼法 / 小组拼接 / 接地线归属 / 通用措施 / 日期 2026-10-19 / 记录人 ' + recName + ' / 重复生成原地覆盖（1 条）/ 删除后清空';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

@@ -440,6 +440,8 @@ const PlansView = {
     });
     const SV_BANNER_LOADED = '已加载已保存的在线勘察记录；危险点库更新不会自动覆盖已保存措施。';
     const SV_BANNER_SAVED = '在线编辑内容已保存';
+    const SV_BANNER_GENERATED = '已生成「现场勘察记录.docx」；继续修改后再次点「保存并生成」会覆盖更新同一份，不会新增勘察单。';
+    const SV_BANNER_UPDATED = '已更新「现场勘察记录.docx」（覆盖同一份，未新增勘察单）。';
     const hazardPick = ref('');
     const hpOpen = reactive({});           // 危险点卡展开状态（key = 条目 id；默认全部折叠，不落库）
     function toggleHp(hp) { if (hp) hpOpen[hp.id] = !hpOpen[hp.id]; }
@@ -823,18 +825,18 @@ const PlansView = {
       await putSurvey();          // 成功后由顶部绿色横幅提示，不额外弹 toast
     }
     // 保存并生成 现场勘察记录：先走同一套校验与 PUT，成功后调生成接口
+    // 生成成功不关闭编辑器——可能还有地方要改；改完再点即覆盖更新同一份，不新增勘察单
     async function saveAndGenerate() {
       const plan = matDlg.plan;
       if (!plan || !plan.id || surveyDlg.saving || surveyDlg.generating) return;
       if (!(await putSurvey())) return;
       surveyDlg.generating = true;
       try {
-        await api.post('/api/workPlans/' + plan.id + '/survey/generate');
-        ElementPlus.ElMessage.success('已生成「现场勘察记录.docx」');
-        surveyDlg.visible = false;
-        await reloadMatPlan();            // 施工资料弹窗的生成资料区随之刷新
-        // 编辑器里关掉过作业资料弹窗时，生成完把它带出来，保证能看到新增行
-        if (!matDlg.visible) { matDlg.zIndex = undefined; matDlg.visible = true; }
+        const r = await api.post('/api/workPlans/' + plan.id + '/survey/generate');
+        const updated = !!(r && r.updated);
+        ElementPlus.ElMessage.success(updated ? '已更新「现场勘察记录.docx」' : '已生成「现场勘察记录.docx」');
+        surveyDlg.banner = { type: 'ok', text: updated ? SV_BANNER_UPDATED : SV_BANNER_GENERATED };
+        await reloadMatPlan();            // 施工资料弹窗的生成资料区随之刷新（编辑器保持打开）
       } catch (e) {
         // 失败：编辑器保持打开，已保存的内容不丢
         ElementPlus.ElMessage.error(e.message || '生成失败');

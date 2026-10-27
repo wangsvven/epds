@@ -387,7 +387,7 @@ function planGenerated(p) {
   if (!Array.isArray(p.generatedFiles)) p.generatedFiles = [];
   return p.generatedFiles;
 }
-// 生成：无请求体，记录人取当前登录会话；每次生成新增一条，不覆盖旧的
+// 生成：无请求体，记录人取当前登录会话；已有同类别生成记录时原地覆盖（同一 id、同一路径），不再新增条目
 app.post('/api/workPlans/:id/survey/generate', (req, res) => {
   const p = findPlan(req.params.id);
   if (!p) return res.status(404).json({ error: '未找到计划' });
@@ -409,33 +409,55 @@ app.post('/api/workPlans/:id/survey/generate', (req, res) => {
     }
     return res.status(400).json({ error: '生成失败：' + e.message });
   }
-  const dir = path.join(ROOT, 'data', 'uploads', 'plans', p.id);
-  const diskName = Date.now() + '_' + planFileSafeName(GEN_FILE_NAME);
-  const abs2 = path.join(dir, diskName);
+  const list = planGenerated(p);
+  // 已有「现场勘察记录」生成文件 → 原地覆盖（改过内容再点生成，只更新这一份，不产生新单据）
+  const prev = list.find(x => x && x.category === GEN_CATEGORY && typeof x.path === 'string' && x.path.startsWith('uploads/plans/'));
+  const rel = prev ? prev.path : ('uploads/plans/' + p.id + '/' + Date.now() + '_' + planFileSafeName(GEN_FILE_NAME));
+  const abs2 = path.join(ROOT, 'data', rel);
+  let backup = null;                       // 覆盖前的旧内容，写库失败时回滚
   try {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(path.dirname(abs2), { recursive: true });
+    if (prev && fs.existsSync(abs2)) backup = fs.readFileSync(abs2);
     fs.writeFileSync(abs2, buf);
   } catch (e) {
     return res.status(500).json({ error: '保存生成文件失败：' + e.message });
   }
-  const item = {
-    id: genId('gf'),
-    category: GEN_CATEGORY,
-    name: GEN_FILE_NAME,
-    size: buf.length,
-    path: 'uploads/plans/' + p.id + '/' + diskName,
-    uploadedAt: nowISO()
-  };
-  planGenerated(p).push(item);
+  let item;
+  const prevSnapshot = prev ? { name: prev.name, size: prev.size, uploadedAt: prev.uploadedAt } : null;
+  if (prev) {
+    item = prev;
+    item.name = GEN_FILE_NAME;
+    item.size = buf.length;
+    item.uploadedAt = nowISO();
+  } else {
+    item = {
+      id: genId('gf'),
+      category: GEN_CATEGORY,
+      name: GEN_FILE_NAME,
+      size: buf.length,
+      path: rel,
+      uploadedAt: nowISO()
+    };
+    list.push(item);
+  }
   try {
     saveDB();
   } catch (e) {
-    const i = p.generatedFiles.indexOf(item);
-    if (i > -1) p.generatedFiles.splice(i, 1);
-    try { fs.unlinkSync(abs2); } catch (e2) {}
+    if (prev && prevSnapshot) {
+      prev.name = prevSnapshot.name;
+      prev.size = prevSnapshot.size;
+      prev.uploadedAt = prevSnapshot.uploadedAt;
+      if (backup) { try { fs.writeFileSync(abs2, backup); } catch (e3) {} }
+    } else {
+      if (!prev) {
+        const i = list.indexOf(item);
+        if (i > -1) list.splice(i, 1);
+      }
+      try { fs.unlinkSync(abs2); } catch (e2) {}
+    }
     return res.status(500).json({ error: '保存生成记录失败：' + e.message });
   }
-  res.json(item);
+  res.json(Object.assign({}, item, { updated: !!prev }));
 });
 // 下载：与图纸下载同一套（uploads 不做静态托管，只能走接口）
 app.get('/api/workPlans/:id/generated/:fileId/download', (req, res) => {
