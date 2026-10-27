@@ -916,7 +916,6 @@
   .survey-grid.sg-tail { margin-top:12px; }
   /* 勘察编辑器：一行三列 / 两列 / 字段徽标 / 橙色提示 / 小组卡 */
   .sv-row3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:0 16px; }
-  .sv-row2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0 16px; }
   .sv-lab { display:inline-flex; align-items:center; flex-wrap:wrap; gap:6px; }
   .sv-chip { display:inline-block; padding:0 6px; border-radius:4px; font-size:11px; line-height:17px; font-weight:500; white-space:nowrap; }
   .sv-auto { color:var(--brand-text); background:var(--brand-soft); }
@@ -925,22 +924,33 @@
   .sv-split { color:var(--info-text); background:var(--info-bg); border:1px solid var(--info-line); }
   .sv-sec { border-top:1px dashed var(--line); margin:2px 0 16px; padding-top:12px; }
   .sv-sec-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
-  .sv-sec-title { font-size:14px; font-weight:600; color:var(--text-1); }
+  .sv-sec-title { font-size:14px; font-weight:600; color:var(--text-1); line-height:1.7; }
   .sv-sec-sub { font-size:12.5px; color:var(--text-3); }
   .sv-notice { border:1px solid var(--warn-line); background:var(--warn-bg); border-radius:8px; padding:10px 12px; margin-bottom:14px; }
-  .sv-notice-t { font-size:13px; line-height:1.7; color:var(--warn-text); margin-bottom:8px; }
+  .sv-notice-t { display:flex; align-items:flex-start; gap:7px; font-size:13px; line-height:1.7; color:var(--warn-text); margin-bottom:8px; }
+  .sv-notice-i { flex:0 0 auto; width:16px; height:16px; margin-top:3px; color:var(--warn-text); }
   .sv-notice-text .el-textarea__inner { background:var(--surface); color:var(--text-2); }
-  .sv-group { border:1px solid var(--line); border-radius:8px; padding:12px 14px 2px; margin-bottom:12px; background:var(--surface); }
-  .sv-group-head { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
-  .sv-group-no { width:20px; height:20px; border-radius:50%; background:var(--brand-soft); color:var(--brand-text); font-size:12px; display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
-  .sv-group-title { font-size:13.5px; font-weight:600; color:var(--text-1); }
-  .sv-members { display:flex; align-items:center; gap:10px; width:100%; }
-  .sv-picked { flex:0 0 auto; font-size:12px; color:var(--text-3); white-space:nowrap; }
+  /* 小组卡：紧凑首行（组名 + 小组长 + 技工下拉 + 本组人员 + 多选下拉）+ 无标签的地点/内容两框 */
+  .sv-group { border:1px solid var(--line); border-radius:8px; padding:10px 14px 12px; margin-bottom:12px; background:var(--surface); }
+  .sv-gline { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:2px; }
+  .sv-gname { flex:0 0 auto; font-size:13.5px; font-weight:700; color:var(--text-1); }
+  .sv-gpair { display:inline-flex; align-items:center; gap:6px; min-width:0; }
+  .sv-gpair-lead { flex:0 0 auto; }
+  .sv-gpair-mem { flex:1 1 200px; min-width:0; }
+  .sv-glab { flex:0 0 auto; font-size:12.5px; color:var(--text-2); }
+  .sv-gsel { min-width:0; }
+  .sv-gsel-lead { flex:0 0 auto; width:150px; }
+  .sv-gsel-mem { flex:1 1 auto; width:100%; min-width:120px; }
+  .sv-gtext { margin-top:8px; }
   /* 4.3 区标题：标题与「应注明…」为同一段标题文字，同字号/同字重/同色，连续折行 */
   .shp-head { font-size:14px; font-weight:600; color:var(--text-1); line-height:1.7; margin:0 0 12px; }
   .shp-head + .el-form-item { margin-top:10px; }
+  /* 4.3 危险点分隔小标题：不分组保持原左对齐；分组态居中 + 两侧横线 */
   .shp-sub { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin:14px 0 10px; }
   .shp-sub-t { font-size:13.5px; font-weight:600; color:var(--text-1); }
+  .shp-sub-c { align-items:center; gap:10px; margin:16px 0 10px; flex-wrap:nowrap; }
+  .shp-sub-c::before, .shp-sub-c::after { content:''; flex:1 1 0; min-width:12px; height:1px; background:var(--line); }
+  .shp-sub-c .shp-sub-t { flex:0 0 auto; font-size:13px; color:var(--text-2); }
   .survey-hp-empty { border:1px dashed var(--line-strong); border-radius:8px; padding:18px; text-align:center; color:var(--text-3); font-size:13px; background:var(--surface-2); }
   /* 危险点条目卡：默认折叠只显示卡头；点卡头或「展开详情」展开 */
   .survey-hp { border:1px solid var(--line); border-radius:8px; margin-bottom:10px; background:var(--surface); overflow:hidden; }
@@ -949,10 +959,13 @@
   .survey-hp-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px; cursor:pointer; user-select:none; }
   .survey-hp.hp-open .survey-hp-bar { border-bottom:1px dashed var(--line); }
   .shp-no { font-size:13px; font-weight:500; color:var(--text-1); flex:0 0 auto; font-variant-numeric:tabular-nums; }
-  .survey-hp-title { font-size:13.5px; font-weight:500; color:var(--text-1); min-width:0; flex:1 1 140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .survey-hp-title { font-size:13.5px; font-weight:500; color:var(--text-1); min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .shp-title-edit { cursor:pointer; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
   .shp-title-edit:hover { color:var(--brand-text); }
   .shp-scope { width:104px; flex:0 0 auto; }
+  /* 危险点归属修改入口（展开体内）：卡头只显示归属 chip，改这里 */
+  .shp-scope-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .shp-scope-lab { flex:0 0 auto; font-size:12.5px; color:var(--text-2); }
   .survey-hp-acts { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
   .survey-hp-acts .el-button { margin-left:0; font-size:12.5px; height:26px; padding:0 10px; }
   .shp-body { padding:12px 12px 0; }
@@ -983,14 +996,16 @@
   @media (max-width:768px) {
     .survey-grid { grid-template-columns:1fr; }
     .survey-meta { gap:10px 18px; padding:9px 12px; }
-    .sv-row3, .sv-row2 { grid-template-columns:1fr; gap:0; }
-    .sv-members { flex-wrap:wrap; }
-    .sv-members .el-select { flex:1 1 100%; }
-    .sv-group { padding:10px 12px 2px; }
+    .sv-row3 { grid-template-columns:1fr; gap:0; }
+    .sv-gline { gap:6px 8px; }
+    .sv-gpair-mem { flex:1 1 100%; }
+    .sv-gsel-lead { width:118px; }
+    .sv-group { padding:10px 12px 12px; }
     .survey-hp-bar { padding:8px 10px; }
-    .survey-hp-title { flex:1 1 100%; order:2; white-space:normal; }
-    .survey-hp-acts { margin-left:0; order:3; width:100%; justify-content:flex-end; }
-    .shp-scope { order:1; margin-left:auto; }
+    .shp-no { order:1; }
+    .sv-scope-chip { order:2; margin-left:auto; }
+    .survey-hp-title { flex:1 1 100%; order:3; white-space:normal; }
+    .survey-hp-acts { margin-left:0; order:4; width:100%; justify-content:flex-end; }
     .shp-body { padding:10px 10px 0; }
     .survey-add .shp-pick { width:100%; }
     .survey-add .el-button { width:100%; }

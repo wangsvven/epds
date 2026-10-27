@@ -511,6 +511,19 @@ const PlansView = {
     }
     // 小组人员选项：作业人员名单（GET /api/workers，即「用户管理-作业人员名单」那套数据），排除状态「待定」
     const surveyPeople = computed(() => workersFull.value.filter(w => w.name && w.status !== '待定'));
+    // 勘察单位下拉选项：汇总系统内已出现的单位值 —— 周计划「作业建管单位（市/县）」
+    // 「作业实施单位（市/县）」+ 已保存 survey 的 surveyUnit，去重排序；支持自定义输入，
+    // 存量值即使不在选项里也能正常回显（当前值一并并入选项）。
+    const svUnitOpts = computed(() => {
+      const set = new Set();
+      const push = v => { const s = String(v == null ? '' : v).trim(); if (s) set.add(s); };
+      (list.value || []).forEach(p => {
+        push(p.buildCity); push(p.buildCounty); push(p.execCity); push(p.execCounty);
+        if (p.survey && typeof p.survey === 'object') push(p.survey.surveyUnit);
+      });
+      if (surveyDlg.form) push(surveyDlg.form.surveyUnit);
+      return [...set].sort((a, b) => a.localeCompare(b, 'zh'));
+    });
     const svGroupCount = computed(() => {
       const g = surveyDlg.form && surveyDlg.form.grouping;
       return g === '分2个小组' ? 2 : g === '分3个小组' ? 3 : 0;
@@ -1082,7 +1095,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1675,7 +1688,9 @@ const PlansView = {
               <template #label>
                 <span class="sv-lab">勘察单位<span v-if="svBadges.surveyUnit" class="sv-chip" :class="'sv-' + svBadges.surveyUnit.cls">{{ svBadges.surveyUnit.text }}</span></span>
               </template>
-              <el-input v-model="surveyDlg.form.surveyUnit" placeholder="请输入勘察单位" />
+              <el-select v-model="surveyDlg.form.surveyUnit" filterable allow-create default-first-option clearable placeholder="请选择勘察单位" style="width:100%">
+                <el-option v-for="u in svUnitOpts" :key="u" :label="u" :value="u" />
+              </el-select>
             </el-form-item>
             <el-form-item>
               <template #label>
@@ -1709,43 +1724,39 @@ const PlansView = {
           </template>
 
           <div v-else class="sv-sec">
+            <!-- 标题 + [工作地点…] 是同一段标题文字（同字号/同字重/同色），后接蓝色「按小组拆分」chip -->
             <div class="sv-sec-head">
-              <span class="sv-sec-title">3.工作任务</span>
-              <span class="sv-sec-sub">[工作地点（地段）以及工作内容]</span>
+              <span class="sv-sec-title">3.工作任务[工作地点（地段）以及工作内容]：</span>
               <span class="sv-chip sv-split">按小组拆分</span>
             </div>
 
             <template v-if="svGrouped">
               <div v-if="String(surveyDlg.form.workTask || '').trim()" class="sv-notice">
-                <div class="sv-notice-t">原作业内容无法按当前小组数自动拆分，请手动分配到各组；原文已保留。</div>
+                <div class="sv-notice-t">
+                  <svg class="sv-notice-i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" stroke-width="1.7" /><path d="M12 7.4v5.9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" /><circle cx="12" cy="16.9" r="1.15" fill="currentColor" /></svg>
+                  <span>原作业内容无法按当前小组数自动拆分，请手动分配到各组；原文已保留。</span>
+                </div>
                 <el-input :model-value="surveyDlg.form.workTask" type="textarea" :rows="3" readonly class="sv-notice-text" />
               </div>
               <div v-for="i in svGroupCount" :key="i" class="sv-group">
-                <div class="sv-group-head">
-                  <span class="sv-group-no">{{ i }}</span>
-                  <span class="sv-group-title">{{ i }}小组</span>
-                </div>
-                <div class="sv-row2">
-                  <el-form-item label="小组长">
-                    <el-select v-model="surveyDlg.form.groups[i - 1].leader" filterable clearable placeholder="选择小组长" style="width:100%">
+                <!-- 紧凑首行：{n}小组（加粗纯文本）+ 小组长 + 技工下拉 + 本组人员 + 多选下拉（含实时人数） -->
+                <div class="sv-gline">
+                  <span class="sv-gname">{{ i }}小组</span>
+                  <span class="sv-gpair sv-gpair-lead">
+                    <span class="sv-glab">小组长</span>
+                    <el-select v-model="surveyDlg.form.groups[i - 1].leader" filterable clearable placeholder="选择技工" class="sv-gsel sv-gsel-lead">
                       <el-option v-for="w in surveyPeople" :key="w.id || w.name" :label="w.name + (w.team ? '（' + w.team + '）' : '')" :value="w.name" />
                     </el-select>
-                  </el-form-item>
-                  <el-form-item label="本组人员">
-                    <div class="sv-members">
-                      <el-select v-model="surveyDlg.form.groups[i - 1].members" multiple collapse-tags collapse-tags-tooltip filterable placeholder="选择本组人员" style="flex:1 1 auto;min-width:0">
-                        <el-option v-for="w in surveyPeople" :key="w.id || w.name" :label="w.name + (w.team ? '（' + w.team + '）' : '')" :value="w.name" />
-                      </el-select>
-                      <span class="sv-picked">{{ svMembersText(surveyDlg.form.groups[i - 1]) }}</span>
-                    </div>
-                  </el-form-item>
+                  </span>
+                  <span class="sv-gpair sv-gpair-mem">
+                    <span class="sv-glab">本组人员</span>
+                    <el-select v-model="surveyDlg.form.groups[i - 1].members" multiple collapse-tags collapse-tags-tooltip filterable class="sv-gsel sv-gsel-mem" :placeholder="'选择本组人员（' + svMembersText(surveyDlg.form.groups[i - 1]) + '）'">
+                      <el-option v-for="w in surveyPeople" :key="w.id || w.name" :label="w.name + (w.team ? '（' + w.team + '）' : '')" :value="w.name" />
+                    </el-select>
+                  </span>
                 </div>
-                <el-form-item label="工作地点（地段）">
-                  <el-input v-model="surveyDlg.form.groups[i - 1].workLocation" type="textarea" :rows="2" placeholder="请填写本组工作地点（地段）" />
-                </el-form-item>
-                <el-form-item label="工作内容">
-                  <el-input v-model="surveyDlg.form.groups[i - 1].workTask" type="textarea" :rows="2" placeholder="请填写本组工作内容" />
-                </el-form-item>
+                <el-input v-model="surveyDlg.form.groups[i - 1].workLocation" type="textarea" :rows="2" placeholder="工作地点" class="sv-gtext" />
+                <el-input v-model="surveyDlg.form.groups[i - 1].workTask" type="textarea" :rows="2" placeholder="工作内容" class="sv-gtext" />
               </div>
             </template>
           </div>
@@ -1776,7 +1787,7 @@ const PlansView = {
               <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="请输入环境描述" />
             </el-form-item>
 
-            <div class="shp-sub">
+            <div class="shp-sub" :class="{ 'shp-sub-c': svGrouped }">
               <span class="shp-sub-t">4.3 危险点及对应安全措施</span>
             </div>
 
@@ -1785,9 +1796,7 @@ const PlansView = {
               <div class="survey-hp-bar" @click="toggleHp(hp)">
                 <span class="shp-no">（{{ i + 1 }}）</span>
                 <span class="survey-hp-title" :class="{ 'shp-title-edit': !hp.hazardId }" :title="hp.hazardId ? hp.title : '点击修改标题'" @click="onTitleClick(hp, $event)">{{ hp.title || '（未命名危险点）' }}</span>
-                <el-select v-if="svGrouped" v-model="hp.scope" size="small" class="shp-scope" @click.stop>
-                  <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
-                </el-select>
+                <span v-if="svGrouped" class="sv-chip sv-split sv-scope-chip">{{ hpScopeOf(hp.scope) }}</span>
                 <div class="survey-hp-acts">
                   <el-button size="small">{{ hpOpen[hp.id] ? '收起详情' : '展开详情' }}</el-button>
                   <el-button size="small" :disabled="i === 0" @click.stop="moveHazard(hp, -1)">上移</el-button>
@@ -1796,6 +1805,12 @@ const PlansView = {
                 </div>
               </div>
               <div v-show="hpOpen[hp.id]" class="shp-body">
+                <div v-if="svGrouped" class="shp-scope-row">
+                  <span class="shp-scope-lab">所属小组</span>
+                  <el-select v-model="hp.scope" size="small" class="shp-scope">
+                    <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
+                  </el-select>
+                </div>
                 <el-input v-model="hp.situation" type="textarea" :rows="2" placeholder="4.3中的现场具体情况（可选）" />
                 <el-input v-model="hp.measure" type="textarea" :rows="3" placeholder="对应安全措施（必填）" />
                 <div class="shp-foot">
@@ -1825,7 +1840,7 @@ const PlansView = {
 
           <el-form-item>
             <template #label>
-              <span class="sv-lab">4.4 班组应采取的安全措施<span v-if="svBadges.teamMeasures" class="sv-chip" :class="'sv-' + svBadges.teamMeasures.cls">{{ svBadges.teamMeasures.text }}</span></span>
+              <span class="sv-lab">4.4 班组应采取的安全措施<span v-if="svGrouped" class="sv-chip sv-split">每条选择一个小组</span><span v-else-if="svBadges.teamMeasures" class="sv-chip" :class="'sv-' + svBadges.teamMeasures.cls">{{ svBadges.teamMeasures.text }}</span></span>
             </template>
             <div class="sx-block">
               <el-input v-model="surveyDlg.form.teamMeasures" type="textarea" :rows="4" placeholder="每行一条措施；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('teamMeasures', 'teamMeasureScopes', v)" />
@@ -1844,7 +1859,7 @@ const PlansView = {
 
           <el-form-item>
             <template #label>
-              <span class="sv-lab">10kV 接地线位置（每行一个）<span v-if="svBadges.ground10" class="sv-chip" :class="'sv-' + svBadges.ground10.cls">{{ svBadges.ground10.text }}</span></span>
+              <span class="sv-lab">10kV 接地线位置（每行一个）<span v-if="svGrouped" class="sv-chip sv-split">每条选择一个小组</span><span v-else-if="svBadges.ground10" class="sv-chip" :class="'sv-' + svBadges.ground10.cls">{{ svBadges.ground10.text }}</span></span>
             </template>
             <div class="sx-block">
               <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="请输入10kV接地线位置，每行一个" @input="v => onScopeTextInput('ground10', 'ground10Scopes', v)" />
@@ -1863,7 +1878,7 @@ const PlansView = {
 
           <el-form-item>
             <template #label>
-              <span class="sv-lab">0.4kV 接地线位置（每行一个）<span v-if="svBadges.ground04" class="sv-chip" :class="'sv-' + svBadges.ground04.cls">{{ svBadges.ground04.text }}</span></span>
+              <span class="sv-lab">0.4kV 接地线位置（每行一个）<span v-if="svGrouped" class="sv-chip sv-split">每条选择一个小组</span><span v-else-if="svBadges.ground04" class="sv-chip" :class="'sv-' + svBadges.ground04.cls">{{ svBadges.ground04.text }}</span></span>
             </template>
             <div class="sx-block">
               <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="请输入0.4kV接地线位置，每行一个" @input="v => onScopeTextInput('ground04', 'ground04Scopes', v)" />

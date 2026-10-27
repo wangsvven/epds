@@ -636,6 +636,11 @@ async function listOk(p, token) {
     const sFull = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body1, surveyNo: fullNo, workLocation: '' } }), '完整编号往返');
     need(sFull.surveyNo === fullNo, '完整编号应原样往返，实际 ' + JSON.stringify(sFull.surveyNo));
     need(sFull.workLocation === '', 'workLocation 传空串应落库为空，实际 ' + JSON.stringify(sFull.workLocation));
+    // 勘察单位改为可筛选 + 自定义输入的下拉：选项清单外的自定义值必须原样往返、不被清洗
+    const customUnit = '自定义勘察单位（选项里没有）/ 二分队';
+    const sUnit = needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: { ...body1, surveyUnit: customUnit } }), '自定义勘察单位往返');
+    need(sUnit.surveyUnit === customUnit, '自定义勘察单位应原样保存，实际 ' + JSON.stringify(sUnit.surveyUnit));
+    needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: body1 }), '勘察单位回填');
     // 二次 PUT：改分组数与内容，createdAt 不变
     const G3 = { leader: '小赵', members: [], workLocation: '3 号杆', workTask: '紧线' };
     const body2 = { ...body1, grouping: '分3个小组', surveyUnit: '改后单位', groups: [G1, G2, G3] };
