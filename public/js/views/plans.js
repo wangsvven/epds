@@ -71,7 +71,7 @@ const PlansView = {
       project: '', subProject: '', workType: '配农网工程',
       startDate: '', endDate: '', specialty: '运检', dept: '设备部',
       voltage: '10kV', ticketType: '配电：配电第一种工作票',
-      address: '', station: '', machine: '是', riskLevel: '四级', controlMeasures: '',
+      address: '', station: '', machine: '是', riskLevel: '四级', controlMeasures: '', teamSafetyMeasures: '',
       gridRisk: '无', riskFactors: [], majorRisk: '无',
       buildCity: '', buildCounty: '', execCity: '', execCounty: '',
       team: '', subcontractors: [], supervisor: '', ccUnits: [],
@@ -483,8 +483,9 @@ const PlansView = {
         // 勘察单位：优先县级实施单位，其次市级实施单位、建管单位
         surveyUnit: s(p.execCounty) || s(p.execCity) || s(p.buildCounty) || s(p.buildCity),
         dualName: dev,
-        // 计划「风险管控措施」= 班组应采取的安全措施
-        teamMeasures: s(p.controlMeasures)
+        // 计划「班组应采取的安全措施」= 勘察记录 4.4 班组措施
+        // （不能用「风险管控措施」——那是按风险因素自动生成的逐条控制措施，对应 4.4「通用风险控制措施」）
+        teamMeasures: s(p.teamSafetyMeasures)
       };
     }
     // 小组人员选项：作业人员名单（GET /api/workers，即「用户管理-作业人员名单」那套数据），排除状态「待定」
@@ -628,7 +629,7 @@ const PlansView = {
       if (!plan || !plan.id) return;
       // 带入值（surveyAutoFill 补齐）：部门=plan.team、编号=plan.surveyNo、工作地点=plan.address（作业地址）、
       // 工作内容=plan.content、4.1=plan.outageRange、勘察日期=plan.startDate（取前 10 位，取不到回落今天）
-      // 勘察单位=县级/市级实施单位→建管单位、双重名称=电压+站线名、4.4 班组措施=计划「风险管控措施」
+      // 勘察单位=县级/市级实施单位→建管单位、双重名称=电压+站线名、4.4 班组措施=计划「班组应采取的安全措施」
       // 4.3 环境描述不自动带入（属现场条件叙述，须人工填写）
       const planDay = String(plan.startDate || '').trim().slice(0, 10);
       const planDayOk = /^\d{4}-\d{2}-\d{2}$/.test(planDay) ? planDay : '';
@@ -644,6 +645,12 @@ const PlansView = {
       // 模板槽位字段统一「已填保留、为空则回落规则带入值」——模板里有的都自动带入，带不出的才是待填入
       const seed = surveyDlg.seed || {};   // 必须取自 surveyDlg.seed，不能裸用 seed（上方 svBadges 里的 seed 是另一个作用域）
       const fld = k => (saved && saved[k]) || seed[k] || '';
+      // 4.4 班组措施：旧版本自动带入的是计划「风险管控措施」，与「通用风险控制措施」逐条重复。
+      // 现值仍等于那个旧带入值时说明没人改过 → 改用新来源（计划「班组应采取的安全措施」）重新带入；
+      // 被人工改过的内容一律保留。
+      const oldTeamAuto = String(plan.controlMeasures || '').trim();
+      const savedTeam = saved ? String(saved.teamMeasures || '').trim() : '';
+      const teamMeasuresVal = (savedTeam && savedTeam !== oldTeamAuto) ? savedTeam : (seed.teamMeasures || '');
       if (saved) {
         surveyDlg.form = {
           grouping: SURVEY_GROUPING_OPTS.indexOf(saved.grouping) > -1 ? saved.grouping : '不分小组',
@@ -659,7 +666,7 @@ const PlansView = {
           // 4.3 / 4.4：已保存内容原样加载；仅「当时没填」的字段补一次计划带入，不覆盖已有内容
           envDesc: fld('envDesc'),
           opsMeasures: saved.opsMeasures || '',
-          teamMeasures: fld('teamMeasures'),
+          teamMeasures: teamMeasuresVal,
           ground10: saved.ground10 || '', ground04: saved.ground04 || '',
           teamMeasureScopes: Array.isArray(saved.teamMeasureScopes) ? saved.teamMeasureScopes.slice() : [],
           ground10Scopes: Array.isArray(saved.ground10Scopes) ? saved.ground10Scopes.slice() : [],
@@ -681,7 +688,7 @@ const PlansView = {
           surveyUnit: fld('surveyUnit'), team: fld('team'), surveyNo: fld('surveyNo'), dualName: fld('dualName'),
           workLocation: fld('workLocation'), workTask: fld('workTask'),
           outageScope: fld('outageScope'), retainedLive: '', groups: [],
-          envDesc: fld('envDesc'), opsMeasures: '', teamMeasures: fld('teamMeasures'), ground10: '', ground04: '',
+          envDesc: fld('envDesc'), opsMeasures: '', teamMeasures: teamMeasuresVal, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
           surveyDate: fld('surveyDate') || todayYmd(), hazardPoints: seedHazardPoints()
         };
@@ -931,7 +938,7 @@ const PlansView = {
       if (!dlg.form.controlMeasures && (dlg.form.riskFactors || []).length) dlg.form.controlMeasures = genMeasures(dlg.form.riskFactors);
       // 字段规范化（老数据补齐）
       ['subcontractors', 'ccUnits', 'chargePersons'].forEach(k => { if (!Array.isArray(dlg.form[k])) dlg.form[k] = []; });
-      ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
+      ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team', 'teamSafetyMeasures'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
     }
     async function submit() {
       const f = dlg.form;
@@ -1332,6 +1339,13 @@ const PlansView = {
           <el-col :xs="24" :sm="12">
             <el-form-item label="风险管控措施">
               <el-input v-model="dlg.form.controlMeasures" type="textarea" :autosize="{ minRows: 1, maxRows: 24 }" placeholder="选择风险因素后自动带出对应措施，可手工修改" style="--el-input-height:32px" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="20">
+          <el-col :xs="24" :sm="24">
+            <el-form-item label="班组应采取的安全措施">
+              <el-input v-model="dlg.form.teamSafetyMeasures" type="textarea" :autosize="{ minRows: 1, maxRows: 8 }" placeholder="填写本次作业班组采取的具体安全措施（现场勘察记录 4.4「班组应采取的安全措施」自动带入）" style="--el-input-height:32px" />
             </el-form-item>
           </el-col>
         </el-row>
