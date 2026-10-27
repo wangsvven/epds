@@ -651,6 +651,7 @@ const PlansView = {
       };
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       // 模板槽位字段统一「已填保留、为空则回落规则带入值」——模板里有的都自动带入，带不出的才是待填入
+      const seed = surveyDlg.seed || {};   // 必须取自 surveyDlg.seed，不能裸用 seed（上方 svBadges 里的 seed 是另一个作用域）
       const fld = k => (saved && saved[k]) || seed[k] || '';
       if (saved) {
         surveyDlg.form = {
