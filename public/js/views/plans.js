@@ -481,8 +481,9 @@ const PlansView = {
     // 首次带入值 = 计划字段「原样搬运」，不做任何推导/拼装/兜底：
     //   部门（班组）=plan.team｜编号=部门+plan.surveyNo｜3.工作任务=plan.content
     //   4.1=plan.outageRange｜勘察日期=plan.startDate 前 10 位｜4.4 班组措施=plan.teamSafetyMeasures
-    // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位；
-    // 4.3 环境描述属现场条件叙述（车流量/人流量/交叉邻近线路/多电源自发电/地下管网等），同样手填。
+    //   4.3 环境描述=系统默认文案（仅首次创建带入，改/清空即转人工填写）
+    // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位。
+    const SV_ENV_DESC_DEFAULT = '工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。';
     function surveySeed(plan) {
       const p = plan || {};
       const s = v => String(v == null ? '' : v).trim();
@@ -494,6 +495,8 @@ const PlansView = {
       return {
         team: team,
         surveyNo: no,
+        // 4.3 环境描述：首个默认文案只在「首次创建」时带入（见 openSurveyEditor），可改可清空
+        envDesc: SV_ENV_DESC_DEFAULT,
         workTask: s(p.content),
         outageScope: s(p.outageRange),
         // 计划「班组应采取的安全措施」= 勘察记录 4.4 班组措施
@@ -611,9 +614,11 @@ const PlansView = {
     //   带入字段（部门/编号/3.工作任务/4.1/勘察日期/4.4班组措施）：
     //     计划给了带入值 且 当前值 === 带入值 → 「周计划自动带入」；被改动或清空 → 「人工填写」
     //     计划本身没给带入值 → 空则「待填写」，填了算「人工填写」
-    //   非带入字段（勘察单位/双重名称/4.2/环境描述/运维措施/接地线）：为空 → 「待填写」；有值不挂徽标
+    //   非带入字段（勘察单位/双重名称/4.2/运维措施/接地线）：为空 → 「待填写」；有值不挂徽标
     //   作业分组是模板外的纯控制项，不挂任何徽标
-    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures'];
+    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures', 'envDesc'];
+    // 4.3 环境描述的默认值来自系统规则（非周计划字段），徽标用「规则自动带入」表述
+    const SV_BADGE_AUTO_TEXT = { envDesc: '规则自动带入' };
     const SV_BADGE_FIELDS = [
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
@@ -626,7 +631,7 @@ const PlansView = {
       SV_BADGE_FIELDS.forEach(k => {
         const cur = str(f[k]);
         const seeded = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
-        if (seeded) out[k] = (cur === seeded) ? { text: '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
+        if (seeded) out[k] = (cur === seeded) ? { text: SV_BADGE_AUTO_TEXT[k] || '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
         else if (cur) out[k] = null;
         else out[k] = { text: '待填写', cls: 'todo' };
       });
@@ -639,10 +644,13 @@ const PlansView = {
       if (!plan || !plan.id) return;
       // 首次带入值 = 计划字段原样搬运（部门/完整编号/3.工作任务/4.1/勘察日期/4.4班组措施）；
       // 勘察单位、双重名称、4.2 一律不带入，首次打开为空，等现场勘察时填。
-      const seed = surveySeed(plan);
-      surveyDlg.seed = seed;
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       const str = v => (v == null ? '' : String(v)).trim();
+      const seed = surveySeed(plan);
+      // 4.3 环境描述默认文案只给「首次创建」：已保存的 survey 原样加载，不补默认，
+      // 也不把它算作带入值（否则用户清空后重开会误显示「人工填写」）。
+      if (saved) seed.envDesc = '';
+      surveyDlg.seed = seed;
       // 旧数据兼容：4a 阶段 survey 里 workLocation（工作地点）与 workTask（工作内容）是两个分开的框，
       // 本批起合并为一个「3.工作任务」框 —— 打开时按「工作地点 + 换行 + 工作内容」拼接显示，
       // 保存时只落 workTask、并把 workLocation 置空（一次性并入，重开不再重复拼接）。
@@ -695,7 +703,7 @@ const PlansView = {
           surveyUnit: '', team: seed.team, surveyNo: seed.surveyNo, dualName: '',
           workLocation: '', workTask: seed.workTask,
           outageScope: seed.outageScope, retainedLive: '', groups: [],
-          envDesc: '', opsMeasures: '', teamMeasures: teamMeasuresVal, ground10: '', ground04: '',
+          envDesc: seed.envDesc, opsMeasures: '', teamMeasures: teamMeasuresVal, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
           surveyDate: seed.surveyDate || todayYmd(), hazardPoints: seedHazardPoints()
         };
@@ -1761,16 +1769,14 @@ const PlansView = {
 
           <!-- ===== 4.3 作业现场的条件、环境及其他危险点（四期第二步：环境描述 + 危险点条目组） ===== -->
           <div class="sv-sec">
-            <div class="sv-sec-head shp-head">
-              <span class="sv-sec-title">4.3作业现场的条件、环境及其他危险点</span>
-              <span class="sv-sec-sub">（应注明：交叉、邻近（同杆塔、并行）电力线路；多电源、自发电情况，有可能反送电的设备和分支线；地下管网沟道及其他影响施工作业的设施情况）</span>
-            </div>
+            <!-- 标题与「应注明…」是同一段标题文字：同字号同字重同色，连续折行，不做副标题 -->
+            <div class="shp-head">4.3作业现场的条件、环境及其他危险点（应注明：交叉、邻近（同杆塔、并行）电力线路；多电源、自发电情况，有可能反送电的设备和分支线；地下管网沟道及其他影响施工作业的设施情况）</div>
 
             <el-form-item>
               <template #label>
                 <span class="sv-lab">环境描述<span v-if="svBadges.envDesc" class="sv-chip" :class="'sv-' + svBadges.envDesc.cls">{{ svBadges.envDesc.text }}</span></span>
               </template>
-              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="例如：工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。" />
+              <el-input v-model="surveyDlg.form.envDesc" type="textarea" :rows="3" placeholder="请输入环境描述" />
             </el-form-item>
 
             <div class="shp-sub">
