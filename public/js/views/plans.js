@@ -484,6 +484,8 @@ const PlansView = {
     //   4.3 环境描述=系统默认文案（仅首次创建带入，改/清空即转人工填写）
     // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位。
     const SV_ENV_DESC_DEFAULT = '工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。';
+    // 4.4 班组应采取的安全措施默认文案（整行一条；分组时默认归属「全组」）
+    const SV_TEAM_MEASURES_DEFAULT = '所有下户表计负荷侧空开出线，分别用绝缘胶布将线头包裹严实，并悬挂“禁止合闸，线路有人工作”标识牌一块。';
     function surveySeed(plan) {
       const p = plan || {};
       const s = v => String(v == null ? '' : v).trim();
@@ -501,7 +503,8 @@ const PlansView = {
         outageScope: s(p.outageRange),
         // 计划「班组应采取的安全措施」= 勘察记录 4.4 班组措施
         // （不能用「风险管控措施」——那是按风险因素自动生成的逐条控制措施，对应 4.4「通用风险控制措施」）
-        teamMeasures: s(p.teamSafetyMeasures),
+        // 计划没填时用默认文案兜底（仅首次创建；已保存的 survey 原样加载）
+        teamMeasures: s(p.teamSafetyMeasures) || SV_TEAM_MEASURES_DEFAULT,
         surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
       };
     }
@@ -611,27 +614,26 @@ const PlansView = {
     function onGroupingChange() { padGroups(svGroupCount.value); padScopes(); }
     function svMembersText(g) { return '已选 ' + ((g && Array.isArray(g.members)) ? g.members.length : 0) + ' 人'; }
     // 徽标：只表达「这个值是怎么来的」，实时计算、不落库
-    //   带入字段（部门/编号/3.工作任务/4.1/勘察日期/4.4班组措施）：
-    //     计划给了带入值 且 当前值 === 带入值 → 「周计划自动带入」；被改动或清空 → 「人工填写」
+    //   带入字段：当前值 === 带入值 → 「自动带入」徽标；被改动或清空 → 「人工填写」
+    //     徽标文案按来源分两类：直接抄周计划字段的 →「周计划自动带入」；
+    //     系统规则/默认文案生成的（4.3 环境描述、勘察日期、4.4 默认班组措施）→「规则自动带入」
     //     计划本身没给带入值 → 空则「待填写」，填了算「人工填写」
     //   非带入字段（勘察单位/双重名称/4.2/运维措施/接地线）：为空 → 「待填写」；有值不挂徽标
     //   作业分组是模板外的纯控制项，不挂任何徽标
     const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures', 'envDesc'];
-    // 4.3 环境描述的默认值来自系统规则（非周计划字段），徽标用「规则自动带入」表述
-    const SV_BADGE_AUTO_TEXT = { envDesc: '规则自动带入' };
     const SV_BADGE_FIELDS = [
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
     ];
     const svBadges = computed(() => {
-      const f = surveyDlg.form; const seed = surveyDlg.seed || {};
+      const f = surveyDlg.form; const seed = surveyDlg.seed || {}; const rule = surveyDlg.seedRule || {};
       if (!f) return {};
       const str = v => (v == null ? '' : String(v)).trim();
       const out = {};
       SV_BADGE_FIELDS.forEach(k => {
         const cur = str(f[k]);
         const seeded = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
-        if (seeded) out[k] = (cur === seeded) ? { text: SV_BADGE_AUTO_TEXT[k] || '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
+        if (seeded) out[k] = (cur === seeded) ? { text: rule[k] ? '规则自动带入' : '周计划自动带入', cls: 'auto' } : { text: '人工填写', cls: 'manual' };
         else if (cur) out[k] = null;
         else out[k] = { text: '待填写', cls: 'todo' };
       });
@@ -651,6 +653,12 @@ const PlansView = {
       // 也不把它算作带入值（否则用户清空后重开会误显示「人工填写」）。
       if (saved) seed.envDesc = '';
       surveyDlg.seed = seed;
+      // 徽标来源：默认文案/规则生成的字段挂「规则自动带入」，直接抄周计划字段的挂「周计划自动带入」
+      surveyDlg.seedRule = {
+        envDesc: !saved,                                        // 4.3 环境描述默认文案
+        surveyDate: true,                                       // 勘察日期取计划开始日期的日期部分
+        teamMeasures: !String(plan.teamSafetyMeasures || '').trim()   // 计划没填 → 用默认文案
+      };
       // 旧数据兼容：4a 阶段 survey 里 workLocation（工作地点）与 workTask（工作内容）是两个分开的框，
       // 本批起合并为一个「3.工作任务」框 —— 打开时按「工作地点 + 换行 + 工作内容」拼接显示，
       // 保存时只落 workTask、并把 workLocation 置空（一次性并入，重开不再重复拼接）。
@@ -659,12 +667,10 @@ const PlansView = {
       const mergedTask = savedLoc
         ? (savedTask ? savedLoc + '\n' + savedTask : savedLoc)
         : (savedTask || seed.workTask);
-      // 4.4 班组措施：旧版本自动带入的是计划「风险管控措施」，与「通用风险控制措施」逐条重复。
-      // 现值仍等于那个旧带入值时说明没人改过 → 改用新来源（计划「班组应采取的安全措施」）重新带入；
-      // 被人工改过的内容一律保留。
-      const oldTeamAuto = String(plan.controlMeasures || '').trim();
-      const savedTeam = saved ? str(saved.teamMeasures) : '';
-      const teamMeasuresVal = (savedTeam && savedTeam !== oldTeamAuto) ? savedTeam : seed.teamMeasures;
+      // 4.4 班组措施：已保存的一律原样加载（含旧版本自动带入的「风险管控措施」历史内容，用户可自行清理），
+      // 不覆盖、不补默认；默认文案只在「首次创建」时带入（seed），并在已保存时退出徽标比对。
+      if (saved) seed.teamMeasures = '';
+      const teamMeasuresVal = saved ? str(saved.teamMeasures) : seed.teamMeasures;
       if (saved) {
         surveyDlg.form = {
           grouping: SURVEY_GROUPING_OPTS.indexOf(saved.grouping) > -1 ? saved.grouping : '不分小组',
@@ -678,7 +684,7 @@ const PlansView = {
             members: Array.isArray(g.members) ? g.members.slice() : [],
             workLocation: g.workLocation || '', workTask: g.workTask || ''
           })),
-          // 4.3 / 4.4：已保存内容原样加载；仅「当时没填」的班组措施补一次计划带入，不覆盖已有内容
+          // 4.3 / 4.4：已保存内容一律原样加载，不补默认、不覆盖
           envDesc: str(saved.envDesc),
           opsMeasures: str(saved.opsMeasures),
           teamMeasures: teamMeasuresVal,
@@ -1850,7 +1856,7 @@ const PlansView = {
               <span class="sv-lab">10kV 接地线位置（每行一个）<span v-if="svBadges.ground10" class="sv-chip" :class="'sv-' + svBadges.ground10.cls">{{ svBadges.ground10.text }}</span></span>
             </template>
             <div class="sx-block">
-              <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="每行一个位置；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('ground10', 'ground10Scopes', v)" />
+              <el-input v-model="surveyDlg.form.ground10" type="textarea" :rows="3" placeholder="请输入10kV接地线位置，每行一个" @input="v => onScopeTextInput('ground10', 'ground10Scopes', v)" />
               <div v-if="svGrouped && sxLines(surveyDlg.form.ground10).length" class="sx-lines">
                 <div class="sx-lines-head">逐行设置所属小组（共 {{ sxLines(surveyDlg.form.ground10).length }} 处）</div>
                 <div v-for="(ln, i) in sxLines(surveyDlg.form.ground10)" :key="'g10-' + i" class="sx-line">
@@ -1869,7 +1875,7 @@ const PlansView = {
               <span class="sv-lab">0.4kV 接地线位置（每行一个）<span v-if="svBadges.ground04" class="sv-chip" :class="'sv-' + svBadges.ground04.cls">{{ svBadges.ground04.text }}</span></span>
             </template>
             <div class="sx-block">
-              <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="每行一个位置；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('ground04', 'ground04Scopes', v)" />
+              <el-input v-model="surveyDlg.form.ground04" type="textarea" :rows="3" placeholder="请输入0.4kV接地线位置，每行一个" @input="v => onScopeTextInput('ground04', 'ground04Scopes', v)" />
               <div v-if="svGrouped && sxLines(surveyDlg.form.ground04).length" class="sx-lines">
                 <div class="sx-lines-head">逐行设置所属小组（共 {{ sxLines(surveyDlg.form.ground04).length }} 处）</div>
                 <div v-for="(ln, i) in sxLines(surveyDlg.form.ground04)" :key="'g04-' + i" class="sx-line">
@@ -1887,7 +1893,7 @@ const PlansView = {
             <template #label>
               <span class="sv-lab">勘察日期<span v-if="svBadges.surveyDate" class="sv-chip" :class="'sv-' + svBadges.surveyDate.cls">{{ svBadges.surveyDate.text }}</span></span>
             </template>
-            <el-date-picker v-model="surveyDlg.form.surveyDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择勘察日期" class="sx-date" />
+            <el-date-picker v-model="surveyDlg.form.surveyDate" type="date" value-format="YYYY-MM-DD" format="YYYY年M月D日" placeholder="请选择勘察日期" class="sx-date" />
           </el-form-item>
         </el-form>
       </div>
