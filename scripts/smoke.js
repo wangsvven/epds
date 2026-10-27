@@ -767,7 +767,7 @@ async function listOk(p, token) {
     need(pFake.teamSafetyMeasures === '假值：不应带入', '存量历史值应留在库里不动（不删不迁移）');
     return '表单无该字段、保存体剔除该键、落库无该键、带入固定标准文案、存量值保留不迁移';
   });
-  await step('plans', '生成资料：无 survey → 400 → 生成勘察记录 docx（17 槽位全替换/无 XXXX）→ 再生成 +1 → 下载 PK → 删除后文件同消/404', async () => {
+  await step('plans', '生成资料：无 survey → 400 → 生成勘察记录 docx（空槽保留 XXXX / 接地线并入通用风险 / 多行逐段）→ 再生成 +1 → 下载 PK → 删除后文件同消/404', async () => {
     const me = needOk(await api('GET', '/api/me', { token }), 'me');
     const recName = me.user.name;
     const p = needOk(await api('POST', '/api/workPlans', {
@@ -817,20 +817,42 @@ async function listOk(p, token) {
     need(gf1.size > 0 && !!gf1.uploadedAt, 'size/uploadedAt 不符：' + brief(gf1));
     const absG = path.join(TMP, 'data', gf1.path);
     need(fs.existsSync(absG), '生成文件应落盘：' + gf1.path);
-    // 4) 产物内容：17 槽位全替换、无 XXXX、关键口径就位
+    // 4) 产物内容：空槽保留 XXXX、接地线进通用风险槽、多行逐段
     const gxml = unzipEntry(fs.readFileSync(absG), 'word/document.xml').toString('utf8');
-    need(gxml.indexOf('XXXX') < 0, '产物中仍有 XXXX 残留');
-    const gt = [...gxml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map(m => m[1]).join('|');
+    // 段落级文本（逐段 <w:p> 内的 w:t 拼接）——逐行成段靠它断言
+    const paras = [...gxml.matchAll(/<w:p(?: [^>]*)?>[\s\S]*?<\/w:p>/g)]
+      .map(m => [...m[0].matchAll(/<w:t(?: [^>]*)?>([\s\S]*?)<\/w:t>/g)].map(x => x[1]).join(''));
+    const gt = paras.join('|');
+    // 4a) 空槽保留模板 XXXX：本 fixture 只有槽位 13（4.5 附图与说明）为空 → 恰好 1 处
+    need((gxml.match(/XXXX/g) || []).length === 1,
+      '空槽应保留 XXXX（本 fixture 只 4.5 附图与说明为空，应恰 1 处），实际 ' + (gxml.match(/XXXX/g) || []).length);
+    const p45 = paras.findIndex(t => t === 'XXXX');
+    need(p45 > -1, '槽位13 应保留 XXXX 而非被替换为空');
+    // 4b) 填了的槽位正常落值
     need(gt.indexOf('冒烟供电所') > -1, '槽位1 勘察单位缺失');
     need(gt.indexOf('佛荫供电所202610001') > -1, '槽位3 编号应为「部门+编号」拼法：' + gt.slice(0, 160));
     need(gt.indexOf('1小组：1 号杆') > -1 && gt.indexOf('2小组：2 号杆') > -1, '槽位5 工作地点未按小组拼接');
     need(gt.indexOf('1小组：立杆') > -1 && gt.indexOf('2小组：放线') > -1, '槽位6 工作内容未按小组拼接');
-    need(gt.indexOf('现场有跨越，邻近 10kV 线路') > -1, '槽位9 环境描述缺失');
-    need(gt.indexOf('（1）高空坠落风险：杆上作业') > -1, '槽位9 危险点标题/情况拼接不符');
-    need(gt.indexOf('（2）物体打击风险') > -1, '槽位9 第 2 条危险点缺失');
-    need(gt.indexOf('10kV接地线：12 号杆（2小组）') > -1, '槽位11 接地线行/归属不符');
-    need(gt.indexOf('0.4kV接地线：配变低压侧') > -1, '槽位11 0.4kV 接地线缺失');
+    // 4c) 多行逐段：4.3 环境描述与两条危险点各自独立成段
+    const pe = paras.indexOf('现场有跨越，邻近 10kV 线路');
+    need(pe > -1, '槽位9 环境描述缺失');
+    need(paras[pe + 1] === '（1）高空坠落风险：杆上作业' && paras[pe + 2] === '（2）物体打击风险',
+      '槽位9 应逐行独立成段，实际 ' + brief(paras.slice(pe, pe + 3)));
+    // 4d) 班组措施槽只有措施本身（2 行逐段），不再混入接地线
+    const pt = paras.indexOf('班组措施1');
+    need(pt > -1 && paras[pt + 1] === '班组措施2', '槽位11 班组措施应逐行成段：' + brief(paras.slice(pt, pt + 2)));
+    need(gt.indexOf('10kV接地线：') < 0 && gt.indexOf('接地线：') < 0, '槽位11 不应再出现「xx接地线：」行');
+    // 4e) 通用风险槽：危险点（1）（2）+ 末条（3）装设接地线的安全措施，10kV/0.4kV 各一段「分别在…验明…」
+    const pg = paras.indexOf('（3）装设接地线的安全措施');
+    need(pg > -1, '槽位12 接地线条目缺失（2 条危险点时应为（3））：' + brief(paras.filter(t => t.indexOf('装设接地线') > -1)));
+    need(paras[pg + 1] === '分别在' && paras[pg + 2] === '12 号杆（2小组）'
+      && paras[pg + 3] === '验明确无电压后装设10kV接地线各一组。',
+      '接地线 10kV 段结构不符：' + brief(paras.slice(pg, pg + 4)));
+    need(paras[pg + 4] === '分别在' && paras[pg + 5] === '配变低压侧'
+      && paras[pg + 6] === '验明确无电压后装设0.4kV接地线各一组。',
+      '接地线 0.4kV 段结构不符：' + brief(paras.slice(pg + 4, pg + 7)));
     need(gt.indexOf('（1）高空坠落风险的安全措施：正确使用安全带') > -1, '槽位12 通用措施未组装');
+    // 4g) 日期与记录人
     need(gt.indexOf('|2026|10|19') > -1, '槽位15-17 勘察日期应为 2026/10/19 三个数字槽：' + gt.slice(-60));
     need(gt.indexOf('|' + recName) > -1, '槽位14 记录人应为当前登录用户（' + recName + '）');
     // 4b) 槽位5 改取计划作业地址原值（不再用 survey.workLocation / 分组拼接）；槽位6 仍按小组拼工作内容
@@ -842,7 +864,7 @@ async function listOk(p, token) {
     need(gtA.indexOf('1小组：立杆') > -1 && gtA.indexOf('2小组：放线') > -1, '槽位6 工作内容仍应按小组拼接');
     // 5) 改一处内容再生成 → 原地覆盖同一份，不新增勘察单
     needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', {
-      token, body: Object.assign({}, svBody, { envDesc: '现场有跨越，邻近 10kV 线路（改）' })
+      token, body: Object.assign({}, svBody, { envDesc: '现场有跨越，邻近 10kV 线路（改）', opsMeasures: '' })
     }), 'survey PUT 2');
     const gf2 = needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate 2');
     need(gf2.id === gf1.id, '再次生成应复用同一条记录，实际 ' + brief(gf1.id) + ' → ' + brief(gf2.id));
@@ -852,6 +874,10 @@ async function listOk(p, token) {
       '再次生成后应仍只有 1 条（覆盖不新增），实际 ' + brief(d.generatedFiles && d.generatedFiles.length));
     need(d.generatedFiles[0].path === gf1.path, '覆盖生成不应更换磁盘路径：' + brief(d.generatedFiles[0].path));
     const gxml2 = unzipEntry(fs.readFileSync(absG), 'word/document.xml').toString('utf8');
+    // 槽位10 运维措施清空后：替换为空白而不是保留 XXXX（全长仍只 4.5 那 1 处 XXXX）
+    need((gxml2.match(/XXXX/g) || []).length === 1,
+      '槽位10 空值应替换为空白（XXXX 总数仍应为 1），实际 ' + (gxml2.match(/XXXX/g) || []).length);
+    need(gxml2.indexOf('运维措施') < 0, '槽位10 清空后不应残留旧值');
     need(gxml2.indexOf('现场有跨越，邻近 10kV 线路（改）') > -1, '覆盖生成后产物未反映最新内容');
     need(gxml2.indexOf('现场有跨越，邻近 10kV 线路') === gxml2.indexOf('现场有跨越，邻近 10kV 线路（改）'), '旧内容应被覆盖而非追加');
     // 6) 下载拿到 docx（PK 头）
@@ -866,7 +892,7 @@ async function listOk(p, token) {
     need(d2.generatedFiles.length === 0, '删除后应没有生成记录：' + brief(d2.generatedFiles.map(x => x.id)));
     const dl2 = await fetch(base + '/api/workPlans/' + p.id + '/generated/' + gf1.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
     need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
-    return '17 槽位全替换（无 XXXX）/ 编号拼法 / 小组拼接 / 接地线归属 / 通用措施 / 日期 2026-10-19 / 记录人 ' + recName + ' / 重复生成原地覆盖（1 条）/ 删除后清空';
+    return '空槽保留 XXXX（仅 4.5 1 处）/ 运维空值置空 / 编号拼法 / 小组拼接 / 4.3 与通用风险逐行成段 / 接地线并入通用风险（N+1 编号 + 分别在/逐行/验明…）/ 日期 2026-10-19 / 记录人 ' + recName + ' / 重复生成原地覆盖（1 条）/ 删除后清空';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

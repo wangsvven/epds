@@ -17,7 +17,7 @@ function xmlEscape(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
-// 槽位值 → run 内的 XML：多行在 run 内用 <w:br/> 断开
+// 兜底：段落结构异常时，多行值退回「段内 <w:br/> 断开」的老做法
 function slotXml(v) {
   return String(v == null ? '' : v).replace(/\r\n?/g, '\n').split('\n')
     .map(xmlEscape).join('</w:t><w:br/><w:t xml:space="preserve">');
@@ -65,32 +65,44 @@ function hazardText43(sv) {
   });
   return out.join('\n');
 }
-// 4.4 班组措施：班组措施原文 + 10kV/0.4kV 接地线行（分组且归属非「全组」时行尾加（N小组））
+// 4.4 班组措施槽（槽位 11）：只放班组措施本身；接地线已并入通用风险槽（见 groundMeasuresLines）
 function teamMeasuresText(sv) {
-  const out = lines(sv && sv.teamMeasures);
+  return lines(sv && sv.teamMeasures).join('\n');
+}
+// 接地线条目正文（不含标题行）：两块电压等级各自「分别在 / 逐行 / 验明确无电压后装设…各一组。」
+//   分组且该行归属非「全组」时行尾加「（N小组）」；两个电压等级都没填 → 返回空数组（整条不输出）
+function groundMeasuresLines(sv) {
   const grouped = groupCount(sv) > 0;
-  const append = (raw, scopes, label) => {
+  const out = [];
+  const block = (raw, scopes, kv) => {
     const arr = lines(raw);
+    if (!arr.length) return;
     const sc = Array.isArray(scopes) ? scopes : [];
+    out.push('分别在');
     arr.forEach((ln, i) => {
       const s = str(sc[i]);
-      const suffix = (grouped && s && s !== SCOPE_ALL) ? '（' + s + '）' : '';
-      out.push(label + '：' + ln + suffix);
+      out.push(ln + ((grouped && s && s !== SCOPE_ALL) ? '（' + s + '）' : ''));
     });
+    out.push('验明确无电压后装设' + kv + '接地线各一组。');
   };
-  append(sv && sv.ground10, sv && sv.ground10Scopes, '10kV接地线');
-  append(sv && sv.ground04, sv && sv.ground04Scopes, '0.4kV接地线');
-  return out.join('\n');
+  block(sv && sv.ground10, sv && sv.ground10Scopes, '10kV');
+  block(sv && sv.ground04, sv && sv.ground04Scopes, '0.4kV');
+  return out;
 }
-// 4.4 通用风险控制措施：由危险点措施组装（不落库，生成时现算）
+// 4.4 通用风险控制措施槽（槽位 12）：危险点措施（1..N）+ 末尾「（N+1）装设接地线的安全措施」及正文
 function commonMeasuresText(sv) {
   const out = [];
   const hs = (sv && Array.isArray(sv.hazardPoints)) ? sv.hazardPoints : [];
-  hs.forEach((h, i) => {
+  hs.forEach(h => {
     const t = str(h && h.title);
     if (!t) return;
-    out.push('（' + (i + 1) + '）' + t + '的安全措施：' + str(h && h.measure));
+    out.push('（' + (out.length + 1) + '）' + t + '的安全措施：' + str(h && h.measure));
   });
+  const g = groundMeasuresLines(sv);
+  if (g.length) {
+    out.push('（' + (out.length + 1) + '）装设接地线的安全措施');
+    g.forEach(x => out.push(x));
+  }
   return out.join('\n');
 }
 // 勘察日期 → [年, 月, 日]（数字不补零）；空/非法回落当天
@@ -120,24 +132,77 @@ function surveySlots(plan, survey, recorder) {
     str(sv.retainedLive),                            // 8 4.2 保留带电部位
     hazardText43(sv),                                // 9 4.3
     str(sv.opsMeasures),                             // 10 4.4 运维措施
-    teamMeasuresText(sv),                            // 11 4.4 班组措施 + 接地线
-    commonMeasuresText(sv),                          // 12 4.4 通用风险控制措施
+    teamMeasuresText(sv),                            // 11 4.4 班组措施（只放措施本身）
+    commonMeasuresText(sv),                          // 12 4.4 通用风险控制措施（危险点 + 接地线条目）
     '',                                              // 13 4.5 附图与说明
     str(recorder),                                   // 14 记录人
     y, m, d                                          // 15-17 勘察日期
   ];
 }
 
+// XXXX 所在段落的边界（段落内不会嵌套 <w:p>）
+function paraRangeAt(xml, at) {
+  const pStart = Math.max(xml.lastIndexOf('<w:p ', at), xml.lastIndexOf('<w:p>', at));
+  if (pStart < 0) return null;
+  const pEnd = xml.indexOf('</w:p>', at);
+  if (pEnd < 0) return null;
+  return { pStart, pEnd: pEnd + '</w:p>'.length };
+}
+// 多行值 → 把 XXXX 所在段落按行展开成 N 段：每段沿用原段落 pPr、XXXX 所在 run 的 rPr，
+// 以及 run 里的固定前缀文字（如「工作内容：」），只把 XXXX 换成该行；第 2..N 段去掉重复的 w14:paraId。
+function expandParagraph(xml, at, ls) {
+  const r = paraRangeAt(xml, at);
+  if (!r) return null;
+  const openEnd = xml.indexOf('>', r.pStart);
+  if (openEnd < 0 || openEnd > at) return null;
+  const pOpen = xml.slice(r.pStart, openEnd + 1);
+  let pPr = '';
+  if (xml.startsWith('<w:pPr>', openEnd + 1)) {
+    const e = xml.indexOf('</w:pPr>', openEnd + 1);
+    if (e < 0 || e > at) return null;
+    pPr = xml.slice(openEnd + 1, e + '</w:pPr>'.length);
+  }
+  const runStart = Math.max(xml.lastIndexOf('<w:r>', at), xml.lastIndexOf('<w:r ', at));
+  const runEnd = xml.indexOf('</w:r>', at + 4);
+  if (runStart < 0 || runStart < r.pStart || runEnd < 0) return null;
+  const runOpen = xml.slice(runStart, at);              // <w:r><w:rPr>…</w:rPr><w:t …>
+  const runClose = xml.slice(at + 4, runEnd + '</w:r>'.length);   // </w:t></w:r>
+  const paraXml = xml.slice(r.pStart, r.pEnd);
+  const pOpenNoId = pOpen.replace(/\s+w14:paraId="[^"]*"/g, '').replace(/\s+w14:textId="[^"]*"/g, '');
+  let text = paraXml.slice(0, at - r.pStart) + xmlEscape(ls[0]) + paraXml.slice(at - r.pStart + 4);
+  for (let i = 1; i < ls.length; i++) {
+    text += pOpenNoId + pPr + runOpen + xmlEscape(ls[i]) + runClose + '</w:p>';
+  }
+  return { from: r.pStart, to: r.pEnd, text };
+}
 // 逐个按序替换 XXXX（只替换到 17 处，替换进来的文本不会被再次扫描）
+//   空值：保留模板 XXXX（打印后手填）；只有槽位 10「运维人员措施」空值才替换为空字符串
+//   多行：逐行成段（见 expandParagraph）
+const EMPTY_KEEPS_XXXX_EXCEPT = 10;
 function fillTemplate(xml, slots) {
   let out = xml;
   let from = 0;
   for (let i = 0; i < SLOT_COUNT; i++) {
     const at = out.indexOf('XXXX', from);
     if (at < 0) break;
-    const v = slotXml(slots[i]);
-    out = out.slice(0, at) + v + out.slice(at + 4);
-    from = at + v.length;
+    const raw = String(slots[i] == null ? '' : slots[i]);
+    if (!raw && (i + 1) !== EMPTY_KEEPS_XXXX_EXCEPT) { from = at + 4; continue; }
+    const ls = raw.replace(/\r\n?/g, '\n').split('\n');
+    if (ls.length <= 1) {
+      const t = xmlEscape(ls[0]);
+      out = out.slice(0, at) + t + out.slice(at + 4);
+      from = at + t.length;
+      continue;
+    }
+    const exp = expandParagraph(out, at, ls);
+    if (!exp) {                       // 兜底：段落结构异常时退回段内换行
+      const t = slotXml(raw);
+      out = out.slice(0, at) + t + out.slice(at + 4);
+      from = at + t.length;
+      continue;
+    }
+    out = out.slice(0, exp.from) + exp.text + out.slice(exp.to);
+    from = exp.from + exp.text.length;
   }
   return out;
 }
