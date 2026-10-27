@@ -14,7 +14,7 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
-const { buildStoreZip } = require('../server/core/util');   // 造最小 docx 用（跟服务端同一套 zip 实现）
+const { buildStoreZip, unzipEntry } = require('../server/core/util');   // 造最小 docx／读产物用（跟服务端同一套 zip 实现）
 
 const ROOT = path.resolve(__dirname, '..');
 const KEEP = process.argv.includes('--keep');
@@ -730,6 +730,91 @@ async function listOk(p, token) {
     const r404 = await api('PUT', '/api/workPlans/nope_not_exist/survey', { token, body: body1 });
     need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
     return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+危险点往返、4.4 两组措施+接地线+勘察日期往返、scopes 清洗/截断、非法日期 400、必填 400、超 50 条截断';
+  });
+  await step('plans', '生成资料：无 survey → 400 → 生成勘察记录 docx（17 槽位全替换/无 XXXX）→ 再生成 +1 → 下载 PK → 删除后文件同消/404', async () => {
+    const me = needOk(await api('GET', '/api/me', { token }), 'me');
+    const recName = me.user.name;
+    const p = needOk(await api('POST', '/api/workPlans', {
+      token, body: { name: '冒烟生成计划', planType: '周计划', team: '施工一队', surveyNo: '202610001' }
+    }), 'plan POST');
+    // 1) 未勘察 → 400
+    const r0 = await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token });
+    need(r0.status === 400, '无 survey 应 400，实际 ' + r0.status + ' ' + brief(r0.data));
+    need(String((r0.data && r0.data.error) || '').indexOf('请先完成现场勘察记录') > -1, '400 文案不符：' + brief(r0.data));
+    // 2) 上传勘察记录模板（17 处 XXXX 的最小 docx）→ 自动关联 surveyTemplate
+    const tplXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+      + Array.from({ length: 17 }, () => '<w:p><w:r><w:t xml:space="preserve">XXXX</w:t></w:r></w:p>').join('')
+      + '</w:body></w:document>';
+    const tpl = buildStoreZip([
+      { name: '[Content_Types].xml', data: Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>') },
+      { name: 'word/document.xml', data: Buffer.from(tplXml) }
+    ]);
+    const fdT = new FormData();
+    fdT.append('file', new Blob([tpl], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }), '冒烟现场勘察记录模板.docx');
+    const upT = await fetch(base + '/api/documents/template/replace', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fdT, signal: AbortSignal.timeout(10000)
+    });
+    need(upT.status === 200, '模板上传失败：' + upT.status + ' ' + brief(await upT.text().catch(() => '')));
+    // 3) 填勘察 → 生成
+    const svBody = {
+      grouping: '分2个小组', surveyUnit: '冒烟供电所', team: '佛荫供电所', surveyNo: '202610001',
+      dualName: '10kV 冒烟线 12 号杆', workLocation: '总地点', workTask: '总内容',
+      outageScope: '停电范围', retainedLive: '带电部位',
+      groups: [{ workLocation: '1 号杆', workTask: '立杆' }, { workLocation: '2 号杆', workTask: '放线' }],
+      envDesc: '现场有跨越，邻近 10kV 线路',
+      hazardPoints: [
+        { title: '高空坠落风险', situation: '杆上作业', measure: '正确使用安全带' },
+        { title: '物体打击风险', situation: '', measure: '戴安全帽' }
+      ],
+      opsMeasures: '运维措施', teamMeasures: '班组措施1\n班组措施2',
+      ground10: '12 号杆', ground04: '配变低压侧',
+      teamMeasureScopes: ['1小组', '全组'], ground10Scopes: ['2小组'], ground04Scopes: ['全组'],
+      surveyDate: '2026-10-19'
+    };
+    needOk(await api('PUT', '/api/workPlans/' + p.id + '/survey', { token, body: svBody }), 'survey PUT');
+    const gf1 = needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate');
+    need(/^gf/.test(String(gf1.id)), 'id 前缀应为 gf，实际 ' + brief(gf1.id));
+    need(gf1.category === '现场勘察记录' && gf1.name === '现场勘察记录.docx', '类别/文件名不符：' + brief(gf1));
+    need(String(gf1.path).startsWith('uploads/plans/' + p.id + '/'), 'path 不符：' + brief(gf1.path));
+    need(/现场勘察记录\.docx$/.test(String(gf1.path)), '磁盘名应保留原文件名：' + gf1.path);
+    need(gf1.size > 0 && !!gf1.uploadedAt, 'size/uploadedAt 不符：' + brief(gf1));
+    const absG = path.join(TMP, 'data', gf1.path);
+    need(fs.existsSync(absG), '生成文件应落盘：' + gf1.path);
+    // 4) 产物内容：17 槽位全替换、无 XXXX、关键口径就位
+    const gxml = unzipEntry(fs.readFileSync(absG), 'word/document.xml').toString('utf8');
+    need(gxml.indexOf('XXXX') < 0, '产物中仍有 XXXX 残留');
+    const gt = [...gxml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map(m => m[1]).join('|');
+    need(gt.indexOf('冒烟供电所') > -1, '槽位1 勘察单位缺失');
+    need(gt.indexOf('佛荫供电所202610001') > -1, '槽位3 编号应为「部门+编号」拼法：' + gt.slice(0, 160));
+    need(gt.indexOf('1小组：1 号杆') > -1 && gt.indexOf('2小组：2 号杆') > -1, '槽位5 工作地点未按小组拼接');
+    need(gt.indexOf('1小组：立杆') > -1 && gt.indexOf('2小组：放线') > -1, '槽位6 工作内容未按小组拼接');
+    need(gt.indexOf('现场有跨越，邻近 10kV 线路') > -1, '槽位9 环境描述缺失');
+    need(gt.indexOf('（1）高空坠落风险：杆上作业') > -1, '槽位9 危险点标题/情况拼接不符');
+    need(gt.indexOf('（2）物体打击风险') > -1, '槽位9 第 2 条危险点缺失');
+    need(gt.indexOf('10kV接地线：12 号杆（2小组）') > -1, '槽位11 接地线行/归属不符');
+    need(gt.indexOf('0.4kV接地线：配变低压侧') > -1, '槽位11 0.4kV 接地线缺失');
+    need(gt.indexOf('（1）高空坠落风险的安全措施：正确使用安全带') > -1, '槽位12 通用措施未组装');
+    need(gt.indexOf('|2026|10|19') > -1, '槽位15-17 勘察日期应为 2026/10/19 三个数字槽：' + gt.slice(-60));
+    need(gt.indexOf('|' + recName) > -1, '槽位14 记录人应为当前登录用户（' + recName + '）');
+    // 5) 再生成一次 → 2 条，不覆盖旧的
+    const gf2 = needOk(await api('POST', '/api/workPlans/' + p.id + '/survey/generate', { token }), 'generate 2');
+    const d = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after generate');
+    need(Array.isArray(d.generatedFiles) && d.generatedFiles.length === 2, 'generatedFiles 应为 2 条，实际 ' + brief(d.generatedFiles && d.generatedFiles.length));
+    need(d.generatedFiles[0].id === gf1.id && d.generatedFiles[1].id === gf2.id, '两条记录应按追加顺序保存');
+    // 6) 下载拿到 docx（PK 头）
+    const dl = await fetch(base + '/api/workPlans/' + p.id + '/generated/' + gf1.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(dl.status === 200, '下载期望 200，实际 ' + dl.status);
+    const buf = Buffer.from(await dl.arrayBuffer());
+    need(buf[0] === 0x50 && buf[1] === 0x4b, '下载内容不是 docx（缺 PK 头）');
+    // 7) 删除：记录与文件同消，再下载 404
+    needOk(await api('DELETE', '/api/workPlans/' + p.id + '/generated/' + gf1.id, { token }), 'generated DELETE');
+    need(!fs.existsSync(absG), '删除后磁盘文件应同时删除');
+    const d2 = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'detail after delete');
+    need(d2.generatedFiles.length === 1 && d2.generatedFiles[0].id === gf2.id, '删除后应只剩第 2 条：' + brief(d2.generatedFiles.map(x => x.id)));
+    const dl2 = await fetch(base + '/api/workPlans/' + p.id + '/generated/' + gf1.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
+    return '17 槽位全替换（无 XXXX）/ 编号拼法 / 小组拼接 / 接地线归属 / 通用措施 / 日期 2026-10-19 / 记录人 ' + recName + ' / 生成 2 条→删 1 留 1';
   });
   await step('plans', '借工 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {

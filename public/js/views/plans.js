@@ -229,33 +229,54 @@ const PlansView = {
         ElementPlus.ElMessage.success('备注已保存'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
-    // ---------- 施工资料弹窗（勘察记录、图纸、压缩包已接真实接口；生成资料仍为后续分项） ----------
+    // ---------- 施工资料弹窗（勘察记录 / 生成资料 / 图纸 / 压缩包均接真实接口） ----------
     const matDlg = reactive({
       visible: false,
       plan: null,
-      genFiles: []        // 生成资料（工作票资料）：后续分项填真实数据
+      zIndex: undefined          // 每次打开压到当前最上层弹窗之上（勘察编辑器叠开作业资料时也成立）
     });
     const matDrawingInput = ref(null);                                  // 图纸上传的隐藏 file 控件
     const matPackInput = ref(null);                                     // 压缩包上传的隐藏 file 控件
     // 图纸表直接绑当前计划的 drawings（老记录没有该字段按空数组）
     const matDrawings = computed(() => (matDlg.plan && Array.isArray(matDlg.plan.drawings)) ? matDlg.plan.drawings : []);
+    // 生成资料表：现场勘察记录等（老记录没有 generatedFiles 按空数组）
+    const matGenFiles = computed(() => (matDlg.plan && Array.isArray(matDlg.plan.generatedFiles)) ? matDlg.plan.generatedFiles : []);
     // 压缩包表：每个计划最多一条（老记录没有 materialPackage 字段按 null → 空态）
     const matPackage = computed(() => {
       const pk = matDlg.plan && matDlg.plan.materialPackage;
       return (pk && typeof pk === 'object' && !Array.isArray(pk)) ? [pk] : [];
     });
-    // 打开弹窗时以服务端最新数据为准，保证刚上传完关掉重开能看到
-    async function openPlanMaterials(row) {
-      matDlg.plan = row || null;
-      matDlg.visible = true;
-      if (!row || !row.id) return;
+    // 重新拉取当前计划最新数据（survey + generatedFiles + drawings），弹窗与编辑器共用
+    async function reloadMatPlan() {
+      const id = matDlg.plan && matDlg.plan.id;
+      if (!id) return null;
       try {
-        const fresh = await api.get('/api/workPlans/' + row.id);
-        if (fresh && matDlg.plan && matDlg.plan.id === row.id) {
+        const fresh = await api.get('/api/workPlans/' + id);
+        if (fresh && matDlg.plan && matDlg.plan.id === id) {
           if (!Array.isArray(fresh.drawings)) fresh.drawings = [];
+          if (!Array.isArray(fresh.generatedFiles)) fresh.generatedFiles = [];
           matDlg.plan = fresh;
         }
-      } catch (e) { /* 取最新失败就沿用列表里的数据，不打断弹窗 */ }
+        return fresh;
+      } catch (e) { return null; }
+    }
+    // 当前可见弹窗里最大的 z-index（EP 弹窗复用旧 z-index，叠开时须自己抬一层）
+    function topOverlayZ() {
+      let z = 2000;
+      document.querySelectorAll('.el-overlay').forEach(el => {
+        const v = parseInt(getComputedStyle(el).zIndex, 10);
+        if (!Number.isNaN(v)) z = Math.max(z, v);
+      });
+      return z;
+    }
+    // 打开弹窗时以服务端最新数据为准，保证刚上传/刚生成完关掉重开能看到
+    // raise=true 用于从勘察编辑器里叠开：把 z-index 抬到当前最上层弹窗之上（EP 会复用旧 z-index）
+    async function openPlanMaterials(row, raise) {
+      matDlg.plan = row || null;
+      matDlg.zIndex = raise ? (topOverlayZ() + 2) : undefined;
+      matDlg.visible = true;
+      if (!row || !row.id) return;
+      await reloadMatPlan();
     }
     // 占位：生成资料本期仍未接后端，统一走这里，不假装执行真实动作
     function matTodo() { ElementPlus.ElMessage.info('施工资料功能分项开发中'); }
@@ -374,6 +395,34 @@ const PlansView = {
         ElementPlus.ElMessage.success('已删除');
       } catch (e) { ElementPlus.ElMessage.error(e.message || '删除失败'); }
     }
+    // ---- 生成资料：下载 / 删除（现场勘察记录 docx；每次生成新增一条，不覆盖旧的） ----
+    async function matDownloadGen(f) {
+      try {
+        const r = await fetch('/api/workPlans/' + matDlg.plan.id + '/generated/' + f.id + '/download', {
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '下载失败'); }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = f.name || '生成资料';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      } catch (e) { ElementPlus.ElMessage.error(e.message || '下载失败'); }
+    }
+    async function matDeleteGen(f) {
+      try {
+        await ElementPlus.ElMessageBox.confirm('确认删除生成资料「' + f.name + '」？删除后文件不可恢复。', '删除生成资料', { type: 'warning' });
+      } catch (e) { return; }
+      try {
+        await api.del('/api/workPlans/' + matDlg.plan.id + '/generated/' + f.id);
+        if (Array.isArray(matDlg.plan.generatedFiles)) {
+          matDlg.plan.generatedFiles = matDlg.plan.generatedFiles.filter(x => x.id !== f.id);
+        }
+        ElementPlus.ElMessage.success('已删除');
+      } catch (e) { ElementPlus.ElMessage.error(e.message || '删除失败'); }
+    }
     // ---- 现场勘察记录：四期第一步（作业分组 + 勘察单位/部门/编号/双重名称 + 3.工作任务 + 4.1 + 4.2） ----
     // ---- 四期第二步：4.3 环境描述 + 危险点条目组（envDesc / hazardPoints） ----
     // ---- 四期第三步：4.4 两组措施 + 10kV/0.4kV 接地线 + 勘察日期（含逐行归属） ----
@@ -384,12 +433,22 @@ const PlansView = {
       '工器具是否合格风险', '触电伤害风险', '施工区域外来人员进入风险'
     ];
     const SURVEY_HP_SCOPE_ALL = '全组';
-    const surveyDlg = reactive({ visible: false, form: null, seed: null, saving: false, errId: '' });
+    const surveyDlg = reactive({
+      visible: false, form: null, seed: null,
+      saving: false, generating: false, errId: '',
+      banner: { type: '', text: '' }        // 顶部横幅：ok=在线编辑内容已保存 / info=已加载已保存的在线勘察记录
+    });
+    const SV_BANNER_LOADED = '已加载已保存的在线勘察记录；危险点库更新不会自动覆盖已保存措施。';
+    const SV_BANNER_SAVED = '在线编辑内容已保存';
     const hazardPick = ref('');
     const hpOpen = reactive({});           // 危险点卡展开状态（key = 条目 id；默认全部折叠，不落库）
     function toggleHp(hp) { if (hp) hpOpen[hp.id] = !hpOpen[hp.id]; }
     function openHp(hp) { if (hp) hpOpen[hp.id] = true; }
     const matSurveyed = computed(() => !!(matDlg.plan && matDlg.plan.survey && typeof matDlg.plan.survey === 'object' && !Array.isArray(matDlg.plan.survey)));
+    // 生成资料空态：未勘察 / 已勘察未生成 两种文案
+    const matGenEmpty = computed(() => matSurveyed.value
+      ? '暂无生成资料，在勘察记录中点「保存并生成」即可生成'
+      : '完成现场勘察后，可生成工作票资料');
     // 危险点库按分类分组（下拉用；库本体来自 /api/documents，与文档中心同一数据通道）
     const hazardGroups = computed(() => {
       const map = new Map();
@@ -595,6 +654,9 @@ const PlansView = {
       padScopes();
       surveyDlg.errId = '';
       hazardPick.value = '';
+      surveyDlg.generating = false;
+      // 已保存过的才提示「已加载已保存的在线勘察记录」
+      surveyDlg.banner = saved ? { type: 'info', text: SV_BANNER_LOADED } : { type: '', text: '' };
       surveyDlg.visible = true;
     }
     function addHazardFromLib() {
@@ -665,9 +727,10 @@ const PlansView = {
       const i = arr.indexOf(hp);
       if (i > -1) arr.splice(i, 1);
     }
-    async function saveSurvey() {
+    // 校验 + PUT（「保存在线编辑内容」与「保存并生成」共用；成功返回 true 并给绿色横幅）
+    async function putSurvey() {
       const plan = matDlg.plan; const f = surveyDlg.form;
-      if (!plan || !plan.id || !f || surveyDlg.saving) return;
+      if (!plan || !plan.id || !f || surveyDlg.saving) return false;
       // 4.3 危险点校验：标题与措施必填；拦下后展开并定位到第一条有问题的卡片
       const hpArr = f.hazardPoints || [];
       for (let i = 0; i < hpArr.length; i++) {
@@ -678,7 +741,7 @@ const PlansView = {
           openHp(hpArr[i]);
           Vue.nextTick(() => scrollHp(hpArr[i].id));
           ElementPlus.ElMessage.error('第 ' + (i + 1) + ' 条危险点' + (!t ? '缺少标题' : '「' + t + '」缺少对应安全措施'));
-          return;
+          return false;
         }
       }
       surveyDlg.errId = '';
@@ -713,11 +776,46 @@ const PlansView = {
       try {
         const saved = await api.put('/api/workPlans/' + plan.id + '/survey', body);
         plan.survey = saved;              // 勘察区立即切到「已勘察」
-        surveyDlg.visible = false;
-        ElementPlus.ElMessage.success('勘察记录已保存');
+        surveyDlg.banner = { type: 'ok', text: SV_BANNER_SAVED };
+        return true;
       } catch (e) {
         ElementPlus.ElMessage.error(e.message || '保存失败');
+        return false;
       } finally { surveyDlg.saving = false; }
+    }
+    // 保存在线编辑内容：保存成功不关编辑器（右上角 X 关闭），顶部只给绿色横幅
+    async function saveSurvey() {
+      await putSurvey();          // 成功后由顶部绿色横幅提示，不额外弹 toast
+    }
+    // 保存并生成 现场勘察记录：先走同一套校验与 PUT，成功后调生成接口
+    async function saveAndGenerate() {
+      const plan = matDlg.plan;
+      if (!plan || !plan.id || surveyDlg.saving || surveyDlg.generating) return;
+      if (!(await putSurvey())) return;
+      surveyDlg.generating = true;
+      try {
+        await api.post('/api/workPlans/' + plan.id + '/survey/generate');
+        ElementPlus.ElMessage.success('已生成「现场勘察记录.docx」');
+        surveyDlg.visible = false;
+        await reloadMatPlan();            // 施工资料弹窗的生成资料区随之刷新
+        // 编辑器里关掉过作业资料弹窗时，生成完把它带出来，保证能看到新增行
+        if (!matDlg.visible) { matDlg.zIndex = undefined; matDlg.visible = true; }
+      } catch (e) {
+        // 失败：编辑器保持打开，已保存的内容不丢
+        ElementPlus.ElMessage.error(e.message || '生成失败');
+      } finally { surveyDlg.generating = false; }
+    }
+    // 刷新生成状态：只重读服务端数据（本系统生成是同步的，不触发任何生成）
+    async function refreshSurveyStatus() {
+      const fresh = await reloadMatPlan();
+      if (!fresh) { ElementPlus.ElMessage.error('刷新失败，请稍后重试'); return; }
+      surveyDlg.banner = fresh.survey ? { type: 'info', text: SV_BANNER_LOADED } : { type: '', text: '' };
+      ElementPlus.ElMessage.success('生成状态已刷新');
+    }
+    // 打开作业资料：在编辑器之上叠开施工资料弹窗，编辑器不关闭
+    async function openMaterialsFromEditor() {
+      if (!matDlg.plan || !matDlg.plan.id) return;
+      await openPlanMaterials(matDlg.plan, true);
     }
     // ---------- 人员安排：从作业人员名单勾选（按班组/身份分组，全选支持） ----------
     const workersFull = ref([]);
@@ -920,7 +1018,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, SURVEY_GROUPING_OPTS, surveyPeople, svGroupCount, svGrouped, onGroupingChange, svMembersText, svBadges, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, refreshSurveyStatus, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1407,7 +1505,7 @@ const PlansView = {
     </el-dialog>
 
     <!-- 施工资料：勘察记录（编辑保存）、图纸、资料压缩包已接真实接口（生成资料仍为后续分项） -->
-    <el-dialog v-model="matDlg.visible" :title="'施工资料 - ' + ((matDlg.plan && (matDlg.plan.project || matDlg.plan.name)) || '')" width="min(1120px, 94%)" top="5vh">
+    <el-dialog v-model="matDlg.visible" :z-index="matDlg.zIndex" :title="'施工资料 - ' + ((matDlg.plan && (matDlg.plan.project || matDlg.plan.name)) || '')" width="min(1120px, 94%)" top="5vh">
       <div style="max-height:70vh;overflow:auto;padding-right:4px">
         <!-- 现场勘察记录（未勘察 / 已勘察 + 结构化编辑器；生成 docx 属后续分项） -->
         <div style="border:1px solid var(--line);border-radius:8px;padding:14px 18px;margin-bottom:18px;background:var(--surface-2)">
@@ -1431,11 +1529,18 @@ const PlansView = {
               <el-button type="primary" size="small" @click="matTodo">一键生成作业资料</el-button>
             </div>
           </div>
-          <el-table :data="matDlg.genFiles" class="mat-file-table" size="small" border empty-text="完成现场勘察后，可生成工作票资料" style="width:100%">
+          <el-table :data="matGenFiles" class="mat-file-table" size="small" border :empty-text="matGenEmpty" style="width:100%">
             <el-table-column prop="category" label="资料类别" width="180" />
             <el-table-column prop="name" label="文件名称" min-width="260" show-overflow-tooltip />
-            <el-table-column prop="createdAt" label="创建时间" width="180" />
-            <el-table-column label="操作" width="140" />
+            <el-table-column label="创建时间" width="180">
+              <template #default="{ row }"><span style="color:var(--text-2)">{{ matFmtTime(row.uploadedAt) }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="140">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" @click="matDownloadGen(row)">下载</el-button>
+                <el-button link type="danger" size="small" @click="matDeleteGen(row)">删除</el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </div>
 
@@ -1489,9 +1594,9 @@ const PlansView = {
       </template>
     </el-dialog>
 
-    <!-- 现场勘察记录编辑器（四期第三步：字段到 4.4 两组措施 + 10kV/0.4kV 接地线 + 勘察日期，与勘察单模板槽位对齐） -->
-    <!-- 生成按钮属 4b，本批未加 -->
+    <!-- 现场勘察记录编辑器（四期收官：字段与勘察单模板全槽位对齐 + 保存并生成 docx） -->
     <el-dialog v-model="surveyDlg.visible" title="现场勘察记录" width="min(900px, 94%)" top="4vh" append-to-body :close-on-click-modal="false">
+      <div v-if="surveyDlg.banner.text" class="sv-banner" :class="'sv-banner-' + surveyDlg.banner.type">{{ surveyDlg.banner.text }}</div>
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
           <el-form-item label="作业分组">
@@ -1730,8 +1835,12 @@ const PlansView = {
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="surveyDlg.visible=false">取 消</el-button>
-        <el-button type="primary" :loading="surveyDlg.saving" @click="saveSurvey">保 存</el-button>
+        <div class="sv-foot">
+          <el-button :loading="surveyDlg.saving" @click="saveSurvey">保存在线编辑内容</el-button>
+          <el-button @click="refreshSurveyStatus">刷新生成状态</el-button>
+          <el-button type="primary" :loading="surveyDlg.generating" :disabled="surveyDlg.saving" @click="saveAndGenerate">保存并生成 现场勘察记录</el-button>
+          <el-button @click="openMaterialsFromEditor">打开作业资料</el-button>
+        </div>
       </template>
     </el-dialog>
   </div>`

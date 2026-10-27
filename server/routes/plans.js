@@ -11,6 +11,8 @@ const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO } = require('../core/util');
+const { resolveDocPath, resolveSurveyTemplate } = require('../core/doc-templates');
+const { buildSurveyDocx } = require('../core/survey-doc');
 
 const PLAN_QTY_FIELDS = ['wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04'];
 
@@ -376,6 +378,89 @@ app.put('/api/workPlans/:id/survey', (req, res) => {
   p.survey = survey;
   saveDB();
   res.json(p.survey);
+});
+
+// ---------- 施工资料 · 生成资料（现场勘察记录 docx；老记录无 generatedFiles 按空数组） ----------
+const GEN_CATEGORY = '现场勘察记录';
+const GEN_FILE_NAME = '现场勘察记录.docx';
+function planGenerated(p) {
+  if (!Array.isArray(p.generatedFiles)) p.generatedFiles = [];
+  return p.generatedFiles;
+}
+// 生成：无请求体，记录人取当前登录会话；每次生成新增一条，不覆盖旧的
+app.post('/api/workPlans/:id/survey/generate', (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  const survey = planSurvey(p);
+  if (!survey) return res.status(400).json({ error: '请先完成现场勘察记录并保存' });
+  // 模板定位：documents.surveyTemplate（未关联时按文档中心已上传文件自动识别），解析基准同 resolveDocPath
+  const tpl = resolveSurveyTemplate();
+  const abs = tpl && resolveDocPath(tpl.path);
+  if (!tpl || !abs || !fs.existsSync(abs)) {
+    return res.status(400).json({ error: '未关联现场勘察记录模板，请先在文档中心上传' });
+  }
+  let buf;
+  try {
+    const recorder = req.user.name || req.user.username || '';
+    buf = buildSurveyDocx(fs.readFileSync(abs), p, survey, recorder).buffer;
+  } catch (e) {
+    if (e && e.code === 'TPL_SLOTS') {
+      return res.status(400).json({ error: e.message + '，请在文档中心上传含 ' + 17 + ' 处 XXXX 的空白现场勘察记录模板' });
+    }
+    return res.status(400).json({ error: '生成失败：' + e.message });
+  }
+  const dir = path.join(ROOT, 'data', 'uploads', 'plans', p.id);
+  const diskName = Date.now() + '_' + planFileSafeName(GEN_FILE_NAME);
+  const abs2 = path.join(dir, diskName);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(abs2, buf);
+  } catch (e) {
+    return res.status(500).json({ error: '保存生成文件失败：' + e.message });
+  }
+  const item = {
+    id: genId('gf'),
+    category: GEN_CATEGORY,
+    name: GEN_FILE_NAME,
+    size: buf.length,
+    path: 'uploads/plans/' + p.id + '/' + diskName,
+    uploadedAt: nowISO()
+  };
+  planGenerated(p).push(item);
+  try {
+    saveDB();
+  } catch (e) {
+    const i = p.generatedFiles.indexOf(item);
+    if (i > -1) p.generatedFiles.splice(i, 1);
+    try { fs.unlinkSync(abs2); } catch (e2) {}
+    return res.status(500).json({ error: '保存生成记录失败：' + e.message });
+  }
+  res.json(item);
+});
+// 下载：与图纸下载同一套（uploads 不做静态托管，只能走接口）
+app.get('/api/workPlans/:id/generated/:fileId/download', (req, res) => {
+  const p = findPlan(req.params.id);
+  // 只读接口：不初始化 generatedFiles（避免 GET 顺手改记录）
+  const f = p && (Array.isArray(p.generatedFiles) ? p.generatedFiles : []).find(x => x.id === req.params.fileId);
+  const fp = f && path.join(ROOT, 'data', f.path);
+  if (!f || !fs.existsSync(fp)) return res.status(404).json({ error: '文件不存在' });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(f.name) + '"');
+  fs.createReadStream(fp).pipe(res);
+});
+app.delete('/api/workPlans/:id/generated/:fileId', (req, res) => {
+  const p = findPlan(req.params.id);
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  const list = planGenerated(p);
+  const idx = list.findIndex(x => x.id === req.params.fileId);
+  if (idx < 0) return res.status(404).json({ error: '未找到生成资料' });
+  const [f] = list.splice(idx, 1);
+  // 只删本模块目录下的文件；unlink 失败静默（记录已移除，不留脏数据）
+  if (f && typeof f.path === 'string' && f.path.startsWith('uploads/plans/')) {
+    try { fs.unlinkSync(path.join(ROOT, 'data', f.path)); } catch (e) {}
+  }
+  saveDB();
+  res.json({ ok: true });
 });
 
 // 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings /:id/package /:id/survey 注册）

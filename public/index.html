@@ -975,6 +975,12 @@
   .sx-line-txt { flex:1 1 auto; min-width:0; font-size:13px; color:var(--text-1); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .sx-line-scope { flex:0 0 auto; width:104px; }
   .el-date-editor.sx-date { width:200px; }
+  /* 勘察编辑器顶部横幅（绿=已保存在线内容 / 蓝=已加载已保存记录）与页脚四按钮 */
+  .sv-banner { border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:13px; line-height:1.6; margin:0 0 12px; }
+  .sv-banner-ok { background:var(--ok-bg); border-color:var(--ok-line); color:var(--ok-text); }
+  .sv-banner-info { background:var(--info-bg); border-color:var(--info-line); color:var(--info-text); }
+  .sv-foot { display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+  .sv-foot .el-button { margin-left:0; }
   @media (max-width:768px) {
     .survey-grid { grid-template-columns:1fr; }
     .survey-meta { gap:10px 18px; padding:9px 12px; }
@@ -995,6 +1001,8 @@
     .sx-line-txt { order:2; flex:1 1 0; white-space:normal; overflow:visible; text-overflow:clip; word-break:break-word; }
     .sx-line-scope { order:3; width:calc(100% - 19px); margin-left:19px; }
     .el-date-editor.sx-date { width:100%; }
+    .sv-foot { justify-content:stretch; }
+    .sv-foot .el-button { flex:1 1 calc(50% - 5px); width:auto; }
   }
   /* 项目详情 · 周计划表格：7 列紧凑排布，时间/编号单行不换行，数字等宽 */
   .proj-plan-table { border-radius:8px; overflow:hidden; }

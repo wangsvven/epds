@@ -71,30 +71,46 @@ function parseCSVBuffer(buf) {
 function decodeXmlEntities(s) {
   return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
-function unzipEntry(buf, entryName) {
+// 中央目录条目表：[{ name, localOffset }]
+function zipCentralEntries(buf) {
   const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-  if (eocd < 0) return null;
+  if (eocd < 0) return [];
+  const out = [];
   let p = buf.readUInt32LE(eocd + 16); // 中央目录偏移
   while (p + 46 <= buf.length && buf.readUInt32LE(p) === 0x02014b50) {
     const nameLen = buf.readUInt16LE(p + 28);
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
-    const localOffset = buf.readUInt32LE(p + 42);
-    const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
-    if (name === entryName) {
-      const lNameLen = buf.readUInt16LE(localOffset + 26);
-      const lExtraLen = buf.readUInt16LE(localOffset + 28);
-      const compSize = buf.readUInt32LE(localOffset + 18);
-      const method = buf.readUInt16LE(localOffset + 8);
-      const dataStart = localOffset + 30 + lNameLen + lExtraLen;
-      const raw = buf.slice(dataStart, dataStart + compSize);
-      if (method === 0) return raw;
-      if (method === 8) return zlib.inflateRawSync(raw);
-      return null;
-    }
+    out.push({
+      name: buf.toString('utf8', p + 46, p + 46 + nameLen),
+      localOffset: buf.readUInt32LE(p + 42)
+    });
     p += 46 + nameLen + extraLen + commentLen;
   }
+  return out;
+}
+// 按本地文件头解出一条条目的原始数据（method 0 直接返回，8 走 inflateRaw）
+function unzipEntryAt(buf, localOffset) {
+  if (localOffset + 30 > buf.length || buf.readUInt32LE(localOffset) !== 0x04034b50) return null;
+  const lNameLen = buf.readUInt16LE(localOffset + 26);
+  const lExtraLen = buf.readUInt16LE(localOffset + 28);
+  const compSize = buf.readUInt32LE(localOffset + 18);
+  const method = buf.readUInt16LE(localOffset + 8);
+  const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+  const raw = buf.slice(dataStart, dataStart + compSize);
+  if (method === 0) return raw;
+  if (method === 8) return zlib.inflateRawSync(raw);
   return null;
+}
+function unzipEntry(buf, entryName) {
+  const e = zipCentralEntries(buf).find(x => x.name === entryName);
+  return e ? unzipEntryAt(buf, e.localOffset) : null;
+}
+// 全量解包（docx 重打包用）：保持中央目录顺序，原样带出每个条目
+function listZipEntries(buf) {
+  return zipCentralEntries(buf)
+    .map(e => { const data = unzipEntryAt(buf, e.localOffset); return data ? { name: e.name, data } : null; })
+    .filter(Boolean);
 }
 function extractDocxText(buf) {
   const xml = unzipEntry(buf, 'word/document.xml');
@@ -146,6 +162,6 @@ function buildStoreZip(entries) {
 
 module.exports = {
   aliveFilter, repairUploadName, genId, nowISO, fmtNow, fmtStamp,
-  parseCNDate, parseCSVBuffer, decodeXmlEntities, unzipEntry, extractDocxText,
+  parseCNDate, parseCSVBuffer, decodeXmlEntities, unzipEntry, listZipEntries, extractDocxText,
   crc32, buildStoreZip
 };
