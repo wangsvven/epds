@@ -61,6 +61,17 @@ const App = {
     const LOGIN_TIMEOUT = 15000; // 登录请求超时（毫秒），超时按网络异常处理
     // 输入时清掉上一次的错误提示（避免红字滞留）；watch 已在 api.js 全局解构，可直接用
     watch(() => [loginForm.username, loginForm.password], () => { loginError.value = ''; });
+    const pwdRef = ref(null); // 密码框实例引用：账号框回车后把焦点移过去
+    /* 账号框回车 → 焦点跳到密码框，不提交。同样在 keydown 阶段 preventDefault，
+     * 掐掉「回车隐式提交表单」导致的刷新；输入法组词中的回车不跳转。 */
+    function focusPassword(e) {
+      if (e && (e.isComposing || e.keyCode === 229)) return;
+      if (e) e.preventDefault();
+      const p = pwdRef.value;
+      if (p && typeof p.focus === 'function') { p.focus(); return; }
+      const el = document.querySelector('.login-card input[type="password"], .login-card input[autocomplete="current-password"]');
+      if (el) el.focus();
+    }
     /* Enter 触发登录：在 keydown 阶段处理——浏览器「回车隐式提交表单」的默认动作
      * 发生在 keydown，keyup 才处理拦不住刷新；此处 preventDefault 从源头掐掉，
      * 再显式调用 login()。输入法组词中的回车（isComposing / keyCode 229）不触发。 */
@@ -211,7 +222,7 @@ const App = {
     // 网站设置保存后实时刷新顶部标题/企业名称
     window.addEventListener('brand-changed', fetchMe);
 
-    return { token, me, tenant, siteVersion, initialized, initMode, collapsed, route, loginForm, loginLoading, loginError, onLoginEnter, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
+    return { token, me, tenant, siteVersion, initialized, initMode, collapsed, route, loginForm, loginLoading, loginError, pwdRef, focusPassword, onLoginEnter, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
   },
   template: `
   <div v-if="!token">
@@ -231,8 +242,8 @@ const App = {
             <div class="sub">本地自托管版 · 请登录</div>
           </div>
           <el-form @submit.prevent="login">
-            <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" autocomplete="username" :disabled="loginLoading" @keydown.enter="onLoginEnter" /></el-form-item>
-            <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password autocomplete="current-password" :disabled="loginLoading" @keydown.enter="onLoginEnter" /></el-form-item>
+            <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" autocomplete="username" :disabled="loginLoading" @keydown.enter="focusPassword" /></el-form-item>
+            <el-form-item><el-input ref="pwdRef" v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password autocomplete="current-password" :disabled="loginLoading" @keydown.enter="onLoginEnter" /></el-form-item>
             <div v-if="loginError" class="login-error">{{ loginError }}</div>
             <el-button type="primary" native-type="button" size="large" class="login-btn" :loading="loginLoading" :disabled="loginLoading" @click="login">登录</el-button>
           </el-form>
