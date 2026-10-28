@@ -2093,7 +2093,14 @@ const PlanDateTime = {
   setup(props, { emit }) {
     const { ref, reactive, computed, nextTick, onBeforeUnmount } = Vue;
     const pad = n => String(n).padStart(2, '0');
-    const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
+    // 星期表头按全局「星期开始于」(getDay 口径 0=周日..6=周六) 旋转；默认值 1 时与旧版一致
+    const WEEK = computed(() => {
+      const ws = (window.normWeekStart ? window.normWeekStart(window.WeekStart && window.WeekStart.value) : 1);
+      const order = ['日', '一', '二', '三', '四', '五', '六']; // order[getDay()] = 星期标签
+      const out = [];
+      for (let i = 0; i < 7; i++) out.push(order[(ws + i) % 7]);
+      return out;
+    });
     const HOURS = Array.from({ length: 24 }, (_, i) => pad(i));
     const MINUTES = Array.from({ length: 60 }, (_, i) => pad(i));
     const SECONDS = Array.from({ length: 60 }, (_, i) => pad(i));
@@ -2127,8 +2134,9 @@ const PlanDateTime = {
       return p ? p.y + '-' + pad(p.m) + '-' + pad(p.d) + ' ' + pad(p.h) + ':' + pad(p.mi) + ':' + pad(p.s) : '';
     });
     const cells = computed(() => {
-      // 以周一为首日：把 getDay()(周日=0) 折算成 0..6
-      const lead = (new Date(view.y, view.m - 1, 1).getDay() + 6) % 7;
+      // 月首偏移按全局「星期开始于」旋转：lead = (当月1号周几 - weekStart + 7) % 7
+      const ws = (window.normWeekStart ? window.normWeekStart(window.WeekStart && window.WeekStart.value) : 1);
+      const lead = ((new Date(view.y, view.m - 1, 1).getDay()) - ws + 7) % 7;
       const list = [];
       for (let i = 0; i < 42; i++) {
         const d = new Date(view.y, view.m - 1, 1 - lead + i);

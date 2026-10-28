@@ -18,6 +18,28 @@ const MENU_ICONS = {
   init: _ico('<path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7z"/><path d="M18.3 15.6l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/>')
 };
 
+/* ========== 全局「星期开始于」共享状态 ==========
+ * settings.weekStart：0-6（JS getDay 口径，0=星期日、1=星期一、…、6=星期六）。
+ * 未设置/非法 → 视为 1（星期一）。全应用的日历（自研 PlanDateTime + Element Plus 日期选择器）都跟随它。
+ * Element Plus 日期选择器以 dayjs 的 locale.weekStart 决定周首（1=周一 … 7=周日），
+ * 故改 weekStart 时同步写入 ElementPlus.dayjs.Ls 的 weekStart；已挂载的选择框在下次打开时按新值重排。 */
+const WeekStart = Vue.ref(1);
+window.WeekStart = WeekStart;
+function normWeekStart(v) {
+  const n = Number(v);
+  return (Number.isInteger(n) && n >= 0 && n <= 6) ? n : 1;
+}
+window.normWeekStart = normWeekStart;
+function epWeekStartOf(v) { const w = normWeekStart(v); return w === 0 ? 7 : w; } // 0=周日 → dayjs 7=周日
+function applyWeekStartToDayjs(v) {
+  const dj = (typeof ElementPlus !== 'undefined' && ElementPlus.dayjs) ? ElementPlus.dayjs : null;
+  if (!dj || !dj.Ls) return;
+  const ws = epWeekStartOf(v);
+  // 改所有已注册 locale 的 weekStart：Element Plus 内部 dayjs 实例可能落在不同 locale（en / zh-cn）
+  Object.keys(dj.Ls || {}).forEach(n => { if (dj.Ls[n]) dj.Ls[n].weekStart = ws; });
+}
+window.applyWeekStart = applyWeekStartToDayjs;
+
 const App = {
   setup() {
     const { onUnmounted } = Vue;
@@ -83,6 +105,8 @@ const App = {
         tenant.value = (r.settings && r.settings.companyName) || '';
         // 首次使用初始化向导：未完成时进入「初始化设置」首屏
         initialized.value = !!(r.settings && r.settings.initialized);
+        // 星期开始于：服务端读回，全局共享状态（PlanDateTime 与 Element Plus 日期选择器跟随）
+        WeekStart.value = normWeekStart(r.settings && r.settings.weekStart);
         // 首次初始化未完成：若当前停留在非允许页面（含首页），强制转跳回初始化向导
         if (!initialized.value && !INIT_ALLOWED.includes(route.value)) route.value = 'init';
       } catch (e) {}
@@ -112,11 +136,15 @@ const App = {
 
     // 安全网：任何非经 go() 直接修改 route 的路径，未初始化时若落在受限页面，强制转跳
     watch(route, (v) => { if (initMode.value && !INIT_ALLOWED.includes(v)) route.value = 'init'; });
+    // 星期开始于：设置变更时同步到 Element Plus 日期选择器（dayjs locale weekStart），下次打开即生效
+    watch(() => WeekStart.value, (v) => applyWeekStartToDayjs(v));
     // 初始化完成：放行业务页面并进入用户中心（不依赖 fetchMe 异步时序）
     function onInitDone() { initialized.value = true; route.value = 'home'; }
 
     onMounted(() => {
       if (token.value) fetchMe();
+      // 首屏即按当前 weekStart 同步 dayjs（登录前默认星期一，登录后 fetchMe 会再覆盖一次）
+      applyWeekStartToDayjs(WeekStart.value);
       // 登录页公开配置（无需登录）：背景图 + 系统名 / 企业名
       api.get('/api/public-config').then(c => {
         const bg = c.loginBg || '/login-bg/valley.jpg';

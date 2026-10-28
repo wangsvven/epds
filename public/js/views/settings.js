@@ -3,7 +3,7 @@
 const SettingsView = {
   setup() {
     const active = ref('annualPlans');
-    const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', loginBgMode: 'cover', loginBgRotate: 0, welcome: { greeting: '', logoUrl: '' } });
+    const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', loginBgMode: 'cover', loginBgRotate: 0, weekStart: 1, welcome: { greeting: '', logoUrl: '' } });
     const savedName = ref('');
     async function loadSite() {
       try {
@@ -13,6 +13,9 @@ const SettingsView = {
         if (!site.loginBgMode) site.loginBgMode = 'cover';
         if (![0, 90, 180, 270].includes(Number(site.loginBgRotate))) site.loginBgRotate = 0;
         savedName.value = s.companyName || '';
+        // 星期开始于：非法值/未设置一律视为 1（星期一），下拉框与全局状态口径一致
+        site.weekStart = window.normWeekStart(site.weekStart);
+        window.WeekStart.value = site.weekStart;
         // 从初始化向导「在网站设置中编辑」跳转而来：自动切到「网站设置」标签页
         if (window.__pendingSettingsTab) { active.value = window.__pendingSettingsTab; window.__pendingSettingsTab = ''; }
         // 旧上传图若缺占位元数据，用浏览器补算并回填，消除首帧黑闪
@@ -26,8 +29,9 @@ const SettingsView = {
     }
     async function saveSite() {
       try {
-        await api.put('/api/settings', { companyName: site.companyName, icp: site.icp, systemName: site.systemName, defaultSource: site.defaultSource, allowSelfPurchase: site.allowSelfPurchase });
+        await api.put('/api/settings', { companyName: site.companyName, icp: site.icp, systemName: site.systemName, defaultSource: site.defaultSource, allowSelfPurchase: site.allowSelfPurchase, weekStart: window.normWeekStart(site.weekStart) });
         savedName.value = site.companyName;
+        window.WeekStart.value = window.normWeekStart(site.weekStart); // 全局共享状态即时生效（SPA 内）
         ElementPlus.ElMessage.success('已保存企业名称');
         window.dispatchEvent(new CustomEvent('brand-changed')); // 顶部标题/企业名称实时刷新
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
@@ -328,6 +332,19 @@ const SettingsView = {
             <template #title>已保存企业名称：{{ savedName }}</template>
           </el-alert>
           <el-input v-model="site.companyName" :placeholder="savedName || '请输入企业名称'" maxlength="128" show-word-limit style="max-width:640px" />
+          <el-form label-position="top" style="margin-top:16px">
+            <el-form-item label="星期开始于">
+              <el-select v-model="site.weekStart" style="max-width:220px">
+                <el-option :value="1" label="星期一" />
+                <el-option :value="2" label="星期二" />
+                <el-option :value="3" label="星期三" />
+                <el-option :value="4" label="星期四" />
+                <el-option :value="5" label="星期五" />
+                <el-option :value="6" label="星期六" />
+                <el-option :value="0" label="星期日" />
+              </el-select>
+            </el-form-item>
+          </el-form>
           <div v-if="canWrite('settings')" style="margin-top:12px"><el-button type="primary" @click="saveSite">保存</el-button></div>
         </el-card>
 

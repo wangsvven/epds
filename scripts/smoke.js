@@ -207,6 +207,21 @@ async function listOk(p, token) {
     need(d && typeof d === 'object' && 'systemName' in d, 'settings 缺少 systemName：' + brief(d));
     return 'systemName=' + d.systemName;
   });
+  await step('system', '设置 weekStart：PUT 写 0 → GET 读回 0；不传该键时既有值不被冲掉', async () => {
+    // 写 weekStart=0（星期日），并带一个其它键以贴近真实保存体
+    const put1 = needOk(await api('PUT', '/api/settings', { token, body: { companyName: '冒烟企业', weekStart: 0 } }), 'settings PUT 0');
+    need(put1.weekStart === 0, 'PUT weekStart=0 后读回应仍为 0，实际 ' + brief(put1.weekStart));
+    const g1 = needOk(await api('GET', '/api/settings', { token }), 'settings GET 0');
+    need(g1.weekStart === 0, 'GET 应读回 0，实际 ' + brief(g1.weekStart));
+    // 不传 weekStart，仅改 companyName → 既有 weekStart 必须保留
+    const put2 = needOk(await api('PUT', '/api/settings', { token, body: { companyName: '冒烟企业改' } }), 'settings PUT 不传 weekStart');
+    need(put2.weekStart === 0, '不传 weekStart 时旧值应被保留为 0，实际 ' + brief(put2.weekStart));
+    const g2 = needOk(await api('GET', '/api/settings', { token }), 'settings GET 保留');
+    need(g2.weekStart === 0, 'GET 应仍为 0，实际 ' + brief(g2.weekStart));
+    // 还原为默认值 1，避免污染后续（临时库本就会清理，这里仅为稳妥）
+    await api('PUT', '/api/settings', { token, body: { weekStart: 1 } });
+    return '0 写读一致 / 不传键值保留 / 还原 1';
+  });
   await step('system', '初始化状态 GET /api/init-status', async () => {
     const d = needOk(await api('GET', '/api/init-status', { token }), 'init-status');
     need('initialized' in d, '缺少 initialized：' + brief(d));
