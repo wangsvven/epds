@@ -56,7 +56,19 @@ const App = {
     const collapsed = ref(typeof window !== 'undefined' && window.innerWidth < 768);
     const route = ref('home');
     const loginForm = reactive({ username: '', password: '' });
-    const loginLoading = ref(false);
+    const loginLoading = ref(false); // 请求中标记（兼作防重复提交守卫）
+    const loginError = ref(''); // 表单内错误位文案（空 = 不显示）
+    const LOGIN_TIMEOUT = 15000; // 登录请求超时（毫秒），超时按网络异常处理
+    // 输入时清掉上一次的错误提示（避免红字滞留）；watch 已在 api.js 全局解构，可直接用
+    watch(() => [loginForm.username, loginForm.password], () => { loginError.value = ''; });
+    /* Enter 触发登录：在 keydown 阶段处理——浏览器「回车隐式提交表单」的默认动作
+     * 发生在 keydown，keyup 才处理拦不住刷新；此处 preventDefault 从源头掐掉，
+     * 再显式调用 login()。输入法组词中的回车（isComposing / keyCode 229）不触发。 */
+    function onLoginEnter(e) {
+      if (e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      login();
+    }
     // 登录页背景 / 品牌：背景由服务端直出到 CSS 变量 --login-bg（无闪跳），
     // 这里仅作为回退（如从非 / 路径进入）与品牌名同步。
     const loginBg = ref('');
@@ -112,14 +124,41 @@ const App = {
       } catch (e) {}
     }
     async function login() {
+      // ① 防重复：正在请求中直接返回（双击、连按回车、点击与回车并发都挡住）
+      if (loginLoading.value) return;
+      // ② 本地校验：不通过只在表单内提示，不发请求
+      const username = String(loginForm.username || '').trim();
+      if (!username) { loginError.value = '请输入账号'; return; }
+      // 宽松格式：无空格、2–64 字符。后端支持登录名或邮箱登录、且有 admin/拼音缩写等账号，禁止加严格正则
+      if (/\s/.test(username) || username.length < 2 || username.length > 64) { loginError.value = '账号格式不正确'; return; }
+      if (!loginForm.password) { loginError.value = '请输入密码'; return; }
+      // ④ 开 loading（按钮与输入框随之禁用，模板侧绑定 loginLoading）
+      loginError.value = '';
       loginLoading.value = true;
       try {
-        const r = await api.post('/api/login', loginForm);
+        // ⑤ 发起登录请求：与超时赛跑（底层请求不中断，仅前端先行按网络异常处理）
+        const r = await Promise.race([
+          api.post('/api/login', { username, password: loginForm.password }),
+          new Promise((_, reject) => setTimeout(() => { const er = new Error('timeout'); er.code = 'NETWORK'; reject(er); }, LOGIN_TIMEOUT))
+        ]);
+        // ⑥ 成功：存 token 与登录时间（token 键名 erp_token 与 api.js 一致），其余成功路径与现行相同
         localStorage.setItem('erp_token', r.token);
+        localStorage.setItem('erp_last_login', new Date().toISOString());
+        loginForm.password = ''; // 成功后也不在内存里留密码
         token.value = r.token; me.name = r.user.name; me.role = r.user.role;
         await fetchMe();
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
-      finally { loginLoading.value = false; }
+      } catch (e) {
+        if (e && e.status) {
+          // ⑥ 业务失败（401 密码错误等）：清密码，弹窗提示后端文案
+          loginForm.password = '';
+          ElementPlus.ElMessage.error(e.message || '用户名或密码错误');
+        } else {
+          // ⑥ 网络异常/超时：保留密码便于重试，表单内提示
+          loginError.value = '网络异常，请重试';
+        }
+      } finally {
+        loginLoading.value = false; // ⑦ 兜底关 loading
+      }
     }
     function logout() { localStorage.removeItem('erp_token'); Auth.loaded = false; Auth.isAdmin = false; Auth.writeModules = []; token.value = ''; location.reload(); }
     // 页面跳转：移动端自动收起抽屉；未完成初始化时，除「文档中心/全局设置/用户管理」外一律转跳回初始化向导
@@ -174,7 +213,7 @@ const App = {
     // 网站设置保存后实时刷新顶部标题/企业名称
     window.addEventListener('brand-changed', fetchMe);
 
-    return { token, me, tenant, siteVersion, initialized, initMode, collapsed, route, loginForm, loginLoading, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
+    return { token, me, tenant, siteVersion, initialized, initMode, collapsed, route, loginForm, loginLoading, loginError, onLoginEnter, loginBg, loginBrand, visibleMenu, current, login, logout, go, viewVersion, theme, toggleTheme, menuIcon };
   },
   template: `
   <div v-if="!token">
@@ -194,9 +233,10 @@ const App = {
             <div class="sub">本地自托管版 · 请登录</div>
           </div>
           <el-form @submit.prevent="login">
-            <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" autocomplete="username" @keyup.enter="login" /></el-form-item>
-            <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password autocomplete="current-password" @keyup.enter="login" /></el-form-item>
-            <el-button type="primary" size="large" class="login-btn" :loading="loginLoading" @click="login">登录</el-button>
+            <el-form-item><el-input v-model="loginForm.username" placeholder="账号" size="large" autocomplete="username" :disabled="loginLoading" @keydown.enter="onLoginEnter" /></el-form-item>
+            <el-form-item><el-input v-model="loginForm.password" type="password" placeholder="密码" size="large" show-password autocomplete="current-password" :disabled="loginLoading" @keydown.enter="onLoginEnter" /></el-form-item>
+            <div v-if="loginError" class="login-error">{{ loginError }}</div>
+            <el-button type="primary" native-type="button" size="large" class="login-btn" :loading="loginLoading" :disabled="loginLoading" @click="login">登录</el-button>
           </el-form>
         </div>
       </div>
