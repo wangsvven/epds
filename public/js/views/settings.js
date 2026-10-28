@@ -153,7 +153,7 @@ const SettingsView = {
     function isLoginBgPreset(url) { return LOGIN_BG_PRESETS.some(p => p.url === url); }
     function isLoginBgCustom(url) { return String(url || '').startsWith('/api/login-bg/'); }
     // ---------- 单位维护（分包/兄弟/监理/抄送 + 作业建管/实施单位） ----------
-    const UNIT_TYPES = ['分包单位', '兄弟单位', '监理单位', '抄送单位'];
+    const UNIT_TYPES = ['分包单位', '兄弟单位', '监理单位', '抄送单位', '勘察单位'];
     const units = ref([]);
     const unitDlg = reactive({ visible: false, editingId: null, form: { type: '', name: '', sort: 0 } });
     async function loadUnits() {
@@ -196,7 +196,7 @@ const SettingsView = {
       <el-tab-pane label="单位维护" name="units">
         <el-alert type="info" :closable="false" style="margin-bottom:16px">
           <template #title>引用说明</template>
-          <div style="font-size:13px;line-height:1.9">周计划的分包单位、监理单位和抄送单位分别从对应类别选择：分包与监理默认排序第一条，抄送默认排序前两条。项目分包单位仅可从“分包（已方）单位”选择；借工管理仅使用“兄弟单位”。修改或删除已被业务数据引用的单位，请先确认影响范围。</div>
+          <div style="font-size:13px;line-height:1.9">周计划的分包单位、监理单位和抄送单位分别从对应类别选择：分包与监理默认排序第一条，抄送默认排序前两条。项目分包单位仅可从“分包（已方）单位”选择；借工管理仅使用“兄弟单位”。现场勘察记录的勘察单位从“勘察单位”类别选择，新建勘察记录时默认带入排序第一条。修改或删除已被业务数据引用的单位，请先确认影响范围。</div>
         </el-alert>
         <el-card v-for="t in UNIT_TYPES" :key="t" style="margin-bottom:16px">
           <template #header>

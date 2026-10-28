@@ -510,7 +510,8 @@ const PlansView = {
     //                     ｜3.工作任务=plan.content｜4.1=plan.outageRange
     //   B 类·模板侧标准内容/规则算出：4.3 环境描述=模板标准文案｜4.4 班组措施=模板标准文案
     //                     ｜勘察日期=plan.startDate 前 10 位（取不到则不作为来源）
-    //   C 类·不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位、4.4 运维措施、接地线
+    //                     ｜勘察单位=单位维护「勘察单位」类别按 sort 排序的第一条（无维护数据则为空）
+    //   C 类·不带入（现场勘察时才定）：勘察设备双重名称、4.2 保留的带电部位、4.4 运维措施、接地线
     const SV_ENV_DESC_DEFAULT = '工作环境：本次施工作业在乡村，现场车流量较小，人流量较少。';
     // 4.4 班组应采取的安全措施：取自勘察单模板侧标准内容（整行一条；分组时默认归属「全组」）。
     // 与周计划无关——周计划没有对应字段，不得从任何计划字段取值。
@@ -537,18 +538,13 @@ const PlansView = {
     }
     // 小组人员选项：作业人员名单（GET /api/workers，即「用户管理-作业人员名单」那套数据），排除状态「待定」
     const surveyPeople = computed(() => workersFull.value.filter(w => w.name && w.status !== '待定'));
-    // 勘察单位下拉选项：汇总系统内已出现的单位值 —— 周计划「作业建管单位（市/县）」
-    // 「作业实施单位（市/县）」+ 已保存 survey 的 surveyUnit，去重排序；支持自定义输入，
-    // 存量值即使不在选项里也能正常回显（当前值一并并入选项）。
+    // 勘察单位下拉选项：单位维护「勘察单位」类别（按维护排序）+ 当前值回显保护；
+    // 模板侧保留 allow-create 手填，手填/改选值徽标按现行比对语义计「人工填写」。
     const svUnitOpts = computed(() => {
-      const set = new Set();
-      const push = v => { const s = String(v == null ? '' : v).trim(); if (s) set.add(s); };
-      (list.value || []).forEach(p => {
-        push(p.buildCity); push(p.buildCounty); push(p.execCity); push(p.execCounty);
-        if (p.survey && typeof p.survey === 'object') push(p.survey.surveyUnit);
-      });
-      if (surveyDlg.form) push(surveyDlg.form.surveyUnit);
-      return [...set].sort((a, b) => a.localeCompare(b, 'zh'));
+      const names = unitsByType('勘察单位').map(u => u.name);
+      const cur = surveyDlg.form ? String(surveyDlg.form.surveyUnit || '').trim() : '';
+      if (cur && names.indexOf(cur) === -1) names.push(cur);
+      return names;
     });
     const svGroupCount = computed(() => {
       const g = surveyDlg.form && surveyDlg.form.grouping;
@@ -770,9 +766,9 @@ const PlansView = {
     //         当前值为空 → 来源有值（被人工清掉）= 人工填写；来源也为空 = 待填写
     //   来源值（seed）在打开时按计划/规则算一次，保存动作不改它 → 保存前后、重开前后徽标一致
     //   作业分组是模板外的纯控制项，不挂任何徽标；小组卡内字段同样不挂
-    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures', 'envDesc'];
+    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures', 'envDesc', 'surveyUnit'];
     // B 类（固定文案 / 规则算出）→「规则自动带入」；其余带入字段是 A 类（抄周计划字段）→「周计划自动带入」
-    const SV_RULE_FIELDS = ['envDesc', 'surveyDate', 'teamMeasures'];
+    const SV_RULE_FIELDS = ['envDesc', 'surveyDate', 'teamMeasures', 'surveyUnit'];
     const SV_BADGE_FIELDS = [
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
@@ -801,10 +797,16 @@ const PlansView = {
       const plan = matDlg.plan;
       if (!plan || !plan.id) return;
       // 来源值 = 计划字段原样搬运（部门/完整编号/3.工作任务/4.1/勘察日期）+ 规则默认文案（4.3/4.4）
-      // 不带入（现场勘察时才定）：勘察单位、勘察设备双重名称、4.2 保留的带电部位。
+      // + 规则取值（勘察单位 = 单位维护「勘察单位」排序第一条）
+      // 不带入（现场勘察时才定）：勘察设备双重名称、4.2 保留的带电部位。
       const saved = (plan.survey && typeof plan.survey === 'object' && !Array.isArray(plan.survey)) ? plan.survey : null;
       const str = v => (v == null ? '' : String(v)).trim();
       const seed = surveySeed(plan);
+      // 勘察单位来源 = 单位维护「勘察单位」类别按 sort 排序的第一条（无维护数据则为空）；
+      // 名单未加载（为空）时先补拉一次，与打开编辑器时 ensureHazards 的兜底加载同理。
+      if (!units.value.length) await loadHazards();
+      const svUnitList = unitsByType('勘察单位').slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+      seed.surveyUnit = svUnitList.length ? str(svUnitList[0].name) : '';
       surveyDlg.seed = seed;
       // 旧数据兼容：4a 阶段 survey 里 workLocation（工作地点）与 workTask（工作内容）是两个分开的框，
       // 本批起合并为一个「3.工作任务」框 —— 打开时按「工作地点 + 换行 + 工作内容」拼接显示，
@@ -850,7 +852,7 @@ const PlansView = {
         await ensureHazards();   // 预置标准危险点依赖危险点库，未加载先取一次
         surveyDlg.form = {
           grouping: '不分小组',
-          surveyUnit: '', team: seed.team, surveyNo: seed.surveyNo, dualName: '',
+          surveyUnit: seed.surveyUnit, team: seed.team, surveyNo: seed.surveyNo, dualName: '',
           workLocation: '', workTask: seed.workTask,
           outageScope: seed.outageScope, retainedLive: '', groups: [],
           envDesc: seed.envDesc, opsMeasures: '', teamMeasures: seed.teamMeasures, ground10: '', ground04: '',
