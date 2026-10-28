@@ -363,16 +363,21 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
 // 流水号从已落库的领料单推导，不新增字段；Node 单线程下 create 处理函数（计算单号→入数组→saveDB）全程同步、无 await 让出，
 // 并发请求在 JS 层串行，后到者能看到前者记录并取 max+1，故同一秒并发也不会撞号；
 // 扫描含已作废/已删除记录，确保单号不回收复用；仅计 4 位新格式后缀，旧 6 位 HHMMSS 后缀不计入（避免开局被带成 120506 而非 0001）。
+// 领料单号：当日 YYYYMMDD-流水（3 位起、当日有效，如 20261028-001）
+// 流水只统计「新格式当日单号」：前缀为当日 YYYYMMDD- 且余下全为数字；旧 LL-YYYYMMDD-NNNN 前缀不同、天然隔离，不解析
 function reqNoNow() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
-  const prefix = 'LL-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-';
+  const prefix = d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-';
   let max = 0;
   for (const r of DB.materialRequisitions) {
-    const suf = typeof r.reqNo === 'string' ? r.reqNo.slice(prefix.length) : '';
-    if (/^\d{4}$/.test(suf)) { const n = parseInt(suf, 10); if (n > max) max = n; }
+    const no = r && r.reqNo;
+    if (typeof no !== 'string' || no.indexOf(prefix) !== 0) continue;
+    const suf = no.slice(prefix.length);
+    if (/^\d+$/.test(suf)) { const n = parseInt(suf, 10); if (n > max) max = n; }
   }
-  return prefix + String(max + 1).padStart(4, '0');
+  // 超过 999 时位数自然增长（1000、1001…），不截断、不封顶
+  return prefix + String(max + 1).padStart(3, '0');
 }
 // 从暂存的物料生成领料单；领料数量可任意填写（默认=可继续领料），但不能大于可继续领料
 // 请求体：{ items: [{ id, qty }] }（兼容旧 { ids: [...] } = 按可继续领料全量生成）

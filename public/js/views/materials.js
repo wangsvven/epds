@@ -810,22 +810,8 @@ const Requisitions = {
       if (filters.keyword && !r.reqNo.toLowerCase().includes(filters.keyword.toLowerCase())) return false;
       return true;
     }).slice().sort((a, b) => cmpReqNo(a.reqNo, b.reqNo)));
-    // 单号排序：先日期升序；同日新格式（4 位流水）在前按流水升序，旧格式（6 位时间）在后按时间升序
-    function reqNoKey(no) {
-      const m = String(no || '').match(/^LL-(\d{8})-(\d{4}|\d{6})$/);
-      if (!m) return null;
-      return { date: m[1], grp: m[2].length === 4 ? 0 : 1, seq: m[2] };
-    }
-    function cmpReqNo(a, b) {
-      const ka = reqNoKey(a), kb = reqNoKey(b);
-      if (!ka && !kb) return 0;
-      if (!ka) return 1; // 无法识别的单号排最后
-      if (!kb) return -1;
-      if (ka.date !== kb.date) return ka.date < kb.date ? -1 : 1;
-      if (ka.grp !== kb.grp) return ka.grp - kb.grp;
-      if (ka.seq !== kb.seq) return ka.seq < kb.seq ? -1 : 1;
-      return 0;
-    }
+    // 单号排序口径（js/utils.js 的 reqNoKey / cmpReqNo，冒烟脚本共用同一份纯函数）：
+    // 日期升序 → 同日按组：新格式 YYYYMMDD-NNN(0) → LL-四位流水(1) → LL-六位时间(2) → 组内流水数值升序；无法识别的排最后
     function resetFilters() { filters.project = ''; filters.status = ''; filters.keyword = ''; }
     function sumQty(r) { return r.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); }
     function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }

@@ -43,3 +43,28 @@ function fmtKm(n) {
   const v = Math.round((Number(n) || 0) * 1000) / 1000;
   return String(v);
 }
+
+/* ---------------- 领料单号解析与排序（材料台账领料单列表用） ----------------
+ * 三种并存格式，同日分组顺序：新格式 → LL-四位流水 → LL-六位时间；组内按数值升序；无法识别的排最后。
+ *   新格式：YYYYMMDD-NNN（当日流水，位数可自然增长到 1000+）
+ *   旧格式：LL-YYYYMMDD-NNNN（4 位流水）/ LL-YYYYMMDD-NNNNNN（6 位时间）
+ * 纯函数、无依赖；window.MaterialNo 供冒烟脚本（vm 加载）与前端共用。 */
+function reqNoKey(no) {
+  const s = String(no == null ? '' : no);
+  let m = s.match(/^(\d{8})-(\d+)$/);
+  if (m) return { date: m[1], grp: 0, seq: parseInt(m[2], 10) };
+  m = s.match(/^LL-(\d{8})-(\d{4}|\d{6})$/);
+  if (m) return { date: m[1], grp: m[2].length === 4 ? 1 : 2, seq: parseInt(m[2], 10) };
+  return null;
+}
+function cmpReqNo(a, b) {
+  const ka = reqNoKey(a), kb = reqNoKey(b);
+  if (!ka && !kb) return 0;
+  if (!ka) return 1; // 无法识别的单号排最后
+  if (!kb) return -1;
+  if (ka.date !== kb.date) return ka.date < kb.date ? -1 : 1;
+  if (ka.grp !== kb.grp) return ka.grp - kb.grp;
+  if (ka.seq !== kb.seq) return ka.seq - kb.seq;   // 数值比较：新格式流水位数会变长
+  return 0;
+}
+if (typeof window !== 'undefined') window.MaterialNo = { key: reqNoKey, cmp: cmpReqNo };

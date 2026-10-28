@@ -334,32 +334,70 @@ async function listOk(p, token) {
   });
   await step('materials', '领料单 GET /api/materialRequisitions', async () => listOk('/api/materialRequisitions', token).then(d => d.length + ' 条'));
 
-  // 单号规范化：LL-YYYYMMDD-NNNN，当天 4 位流水号从 0001 起、只增不减
-  await step('materials', '领料单号格式 LL-YYYYMMDD-NNNN 与流水号递增', async () => {
-    const mk = async () => {
-      const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: materialId, qty: 3 }] } }), 'requisition create');
-      need(d && d.data && d.data.reqNo, '响应缺少 reqNo');
-      return d.data.reqNo;
-    };
-    const re = /^LL-\d{8}-\d{4}$/;
-    const n1 = await mk();
-    need(re.test(n1), '单号格式应为 LL-YYYYMMDD-NNNN，实际 ' + n1);
-    need(n1.endsWith('-0001'), '当日首张单号应为 ...-0001，实际 ' + n1);
-    const n2 = await mk();
-    need(re.test(n2), '单号格式应为 LL-YYYYMMDD-NNNN，实际 ' + n2);
-    const s1 = +n1.slice(-4), s2 = +n2.slice(-4);
-    need(s2 === s1 + 1, '流水号应从 ' + s1 + ' 递增到 ' + (s1 + 1) + '，实际 ' + n2);
-    return n1 + ' → ' + n2;
+  // 领料单号解析/排序与前端共用同一份纯函数（public/js/utils.js → window.MaterialNo）
+  const MaterialNo = (() => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'utils.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    return sandbox.window.MaterialNo;
+  })();
+  // 领料单号：当日 YYYYMMDD-NNN（3 位流水、当日有效）；旧 LL-YYYYMMDD-NNNN 前缀不同、不参与推导
+  const ymd = off => { const d = new Date(Date.now() + (off || 0) * 86400000); const p = n => String(n).padStart(2, '0'); return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()); };
+  const TODAY = ymd(0), YDAY = ymd(-1);
+  let reqNoNew = '';
+  const mkReq = async (qty) => {
+    const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: materialId, qty: qty || 1 }] } }), 'requisition create');
+    need(d && d.data && d.data.reqNo, '响应缺少 reqNo');
+    return d.data.reqNo;
+  };
+  const insertReq = async (reqNo) => {
+    needOk(await api('POST', '/api/materialRequisitions', { token, body: { reqNo, projects: ['冒烟测试项目'], items: [], status: '待入库', createdAt: reqNo.slice(0, 8) } }), 'insert ' + reqNo);
+  };
+  await step('materials', '领料单号新格式：当日首单 YYYYMMDD-001（旧 LL- 单与昨日单均不计入）', async () => {
+    // 先造两张干扰项：今日旧格式 LL-<今日>-0042、昨日新格式 <昨日>-005
+    await insertReq('LL-' + TODAY + '-0042');
+    await insertReq(YDAY + '-005');
+    const n1 = await mkReq(1);
+    need(/^\d{8}-\d{3}$/.test(n1), '单号格式应为 YYYYMMDD-NNN，实际 ' + n1);
+    need(n1.indexOf('LL-') !== 0, '新单号不应带 LL- 前缀，实际 ' + n1);
+    need(n1 === TODAY + '-001', '当日首单应为 ' + TODAY + '-001，实际 ' + n1);
+    const n2 = await mkReq(1);
+    need(/^\d{8}-\d{3}$/.test(n2), '单号格式应为 YYYYMMDD-NNN，实际 ' + n2);
+    need(n2 === TODAY + '-002', '次单应为 ' + TODAY + '-002，实际 ' + n2);
+    reqNoNew = n2;
+    return n1 + ' → ' + n2 + '（已插入 LL-' + TODAY + '-0042 与 ' + YDAY + '-005 作干扰）';
   });
-  await step('materials', '领料单下载文件名 = reqNo（新旧格式兼容）', async () => {
+  await step('materials', '领料单号当日超 999 位数自然增长（不报错、不截断）', async () => {
+    await insertReq(TODAY + '-999');
+    const n = await mkReq(1);
+    need(n === TODAY + '-1000', '应自然增长为 ' + TODAY + '-1000，实际 ' + n);
+    return n;
+  });
+  await step('materials', '单号排序：同日 新格式 → LL-四位 → LL-六位，组内数值升序', async () => {
+    const mixed = ['LL-' + TODAY + '-0002', TODAY + '-1000', 'X-无法识别', 'LL-' + TODAY + '-222544', TODAY + '-999', 'LL-' + TODAY + '-0001', TODAY + '-001'];
+    const want = [TODAY + '-001', TODAY + '-999', TODAY + '-1000', 'LL-' + TODAY + '-0001', 'LL-' + TODAY + '-0002', 'LL-' + TODAY + '-222544', 'X-无法识别'];
+    const got = mixed.slice().sort((a, b) => MaterialNo.cmp(a, b));
+    need(JSON.stringify(got) === JSON.stringify(want), '同日混合排序不符\n      实际：' + got.join(' , ') + '\n      期望：' + want.join(' , '));
+    // 跨日：昨日单号整体排在今日之前
+    const cross = [TODAY + '-001', YDAY + '-005'].sort((a, b) => MaterialNo.cmp(a, b));
+    need(cross[0] === YDAY + '-005', '跨日应昨日在前，实际 ' + cross.join(' , '));
+    return got.join(' , ');
+  });
+  await step('materials', '领料单下载文件名 = reqNo（新格式与旧 LL- 格式并存）', async () => {
     const list = needOk(await api('GET', '/api/materialRequisitions', { token }), 'requisition list');
-    need(list.length >= 2, '应至少 2 张领料单，实际 ' + list.length);
-    const rec = list[list.length - 1];
-    const res = await fetch(base + '/api/materialRequisitions/' + rec.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
-    need(res.ok, '下载应成功');
-    const cd = res.headers.get('Content-Disposition') || '';
-    need(cd.indexOf('"' + rec.reqNo + '.xlsx"') > -1 || cd.indexOf(rec.reqNo + '.xlsx') > -1, '文件名应为 reqNo.xlsx，实际 ' + cd);
-    return rec.reqNo + '.xlsx';
+    const nw = list.find(r => r.reqNo === reqNoNew);
+    const old = list.find(r => /^LL-\d{8}-\d{4}$/.test(r.reqNo || ''));
+    need(nw, '列表未包含新格式单号 ' + reqNoNew);
+    need(old, '列表未包含旧格式 LL- 单号');
+    for (const rec of [nw, old]) {
+      const res = await fetch(base + '/api/materialRequisitions/' + rec.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+      need(res.ok, '下载应成功：' + rec.reqNo);
+      const cd = res.headers.get('Content-Disposition') || '';
+      need(cd.indexOf(rec.reqNo + '.xlsx') > -1, '文件名应为 reqNo.xlsx，实际 ' + cd);
+    }
+    return nw.reqNo + '.xlsx ／ ' + old.reqNo + '.xlsx';
   });
 
   /* ---------- 到货统计（聚合口径回归，纯函数与前端共用） ---------- */
