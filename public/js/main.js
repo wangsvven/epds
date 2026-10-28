@@ -129,8 +129,6 @@ const App = {
       // ② 本地校验：不通过只在表单内提示，不发请求
       const username = String(loginForm.username || '').trim();
       if (!username) { loginError.value = '请输入账号'; return; }
-      // 宽松格式：无空格、2–64 字符。后端支持登录名或邮箱登录、且有 admin/拼音缩写等账号，禁止加严格正则
-      if (/\s/.test(username) || username.length < 2 || username.length > 64) { loginError.value = '账号格式不正确'; return; }
       if (!loginForm.password) { loginError.value = '请输入密码'; return; }
       // ④ 开 loading（按钮与输入框随之禁用，模板侧绑定 loginLoading）
       loginError.value = '';
