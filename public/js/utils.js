@@ -45,17 +45,17 @@ function fmtKm(n) {
 }
 
 /* ---------------- 领料单号解析与排序（材料台账领料单列表用） ----------------
- * 三种并存格式，同日分组顺序：新格式 → LL-四位流水 → LL-六位时间；组内按数值升序；无法识别的排最后。
- *   新格式：YYYYMMDD-NNN（当日流水，位数可自然增长到 1000+）
- *   旧格式：LL-YYYYMMDD-NNNN（4 位流水）/ LL-YYYYMMDD-NNNNNN（6 位时间）
+ * 定版格式：LL-YYYYMMDD-NNN（3 位当日流水，位数可自然增长到 1000+）。
+ * 解析同时接受无 LL- 前缀的历史测试期写法（YYYYMMDD-NNN），仅用于排序兼容，不再用于生成。
+ * 同日排序口径：流水组（3 位及以上数字后缀，含残留旧 4 位流水）按数值升序 → 6 位时间后缀组按值升序 → 无法识别的排最后。
  * 纯函数、无依赖；window.MaterialNo 供冒烟脚本（vm 加载）与前端共用。 */
 function reqNoKey(no) {
   const s = String(no == null ? '' : no);
-  let m = s.match(/^(\d{8})-(\d+)$/);
-  if (m) return { date: m[1], grp: 0, seq: parseInt(m[2], 10) };
-  m = s.match(/^LL-(\d{8})-(\d{4}|\d{6})$/);
-  if (m) return { date: m[1], grp: m[2].length === 4 ? 1 : 2, seq: parseInt(m[2], 10) };
-  return null;
+  const m = s.match(/^(?:LL-)?(\d{8})-(\d+)$/);
+  if (!m) return null;
+  const suf = m[2];
+  // 6 位数字后缀按「时间」语义处理，其余（3/4/5/7+ 位）按「流水」语义
+  return { date: m[1], grp: suf.length === 6 ? 1 : 0, seq: parseInt(suf, 10) };
 }
 function cmpReqNo(a, b) {
   const ka = reqNoKey(a), kb = reqNoKey(b);
@@ -64,7 +64,7 @@ function cmpReqNo(a, b) {
   if (!kb) return -1;
   if (ka.date !== kb.date) return ka.date < kb.date ? -1 : 1;
   if (ka.grp !== kb.grp) return ka.grp - kb.grp;
-  if (ka.seq !== kb.seq) return ka.seq - kb.seq;   // 数值比较：新格式流水位数会变长
+  if (ka.seq !== kb.seq) return ka.seq - kb.seq;   // 数值比较：流水位数会变长
   return 0;
 }
 if (typeof window !== 'undefined') window.MaterialNo = { key: reqNoKey, cmp: cmpReqNo };

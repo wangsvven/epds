@@ -363,12 +363,12 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
 // 流水号从已落库的领料单推导，不新增字段；Node 单线程下 create 处理函数（计算单号→入数组→saveDB）全程同步、无 await 让出，
 // 并发请求在 JS 层串行，后到者能看到前者记录并取 max+1，故同一秒并发也不会撞号；
 // 扫描含已作废/已删除记录，确保单号不回收复用；仅计 4 位新格式后缀，旧 6 位 HHMMSS 后缀不计入（避免开局被带成 120506 而非 0001）。
-// 领料单号：当日 YYYYMMDD-流水（3 位起、当日有效，如 20261028-001）
-// 流水只统计「新格式当日单号」：前缀为当日 YYYYMMDD- 且余下全为数字；旧 LL-YYYYMMDD-NNNN 前缀不同、天然隔离，不解析
+// 领料单号：LL-YYYYMMDD-流水（3 位起、当日有效，如 LL-20261028-001）
+// 流水只统计同前缀（LL-当日YYYYMMDD- 且余下全为数字）的记录；历史单已由 migrate-reqno-20261028 全量重编为本格式，推导天然连续
 function reqNoNow() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
-  const prefix = d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-';
+  const prefix = 'LL-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-';
   let max = 0;
   for (const r of DB.materialRequisitions) {
     const no = r && r.reqNo;

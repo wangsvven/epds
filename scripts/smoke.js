@@ -343,7 +343,7 @@ async function listOk(p, token) {
     vm.runInContext(code, sandbox);
     return sandbox.window.MaterialNo;
   })();
-  // 领料单号：当日 YYYYMMDD-NNN（3 位流水、当日有效）；旧 LL-YYYYMMDD-NNNN 前缀不同、不参与推导
+  // 领料单号定版格式：LL-YYYYMMDD-NNN（3 位当日流水）；无前缀写法只作为历史测试期格式参与排序解析
   const ymd = off => { const d = new Date(Date.now() + (off || 0) * 86400000); const p = n => String(n).padStart(2, '0'); return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()); };
   const TODAY = ymd(0), YDAY = ymd(-1);
   let reqNoNew = '';
@@ -355,49 +355,79 @@ async function listOk(p, token) {
   const insertReq = async (reqNo) => {
     needOk(await api('POST', '/api/materialRequisitions', { token, body: { reqNo, projects: ['冒烟测试项目'], items: [], status: '待入库', createdAt: reqNo.slice(0, 8) } }), 'insert ' + reqNo);
   };
-  await step('materials', '领料单号新格式：当日首单 YYYYMMDD-001（旧 LL- 单与昨日单均不计入）', async () => {
-    // 先造两张干扰项：今日旧格式 LL-<今日>-0042、昨日新格式 <昨日>-005
-    await insertReq('LL-' + TODAY + '-0042');
-    await insertReq(YDAY + '-005');
+  await step('materials', '领料单号定版：当日首单 LL-YYYYMMDD-001（无前缀/昨日单均不计入推导）', async () => {
+    // 干扰项：历史无前缀写法（不匹配 LL-<今日>- 前缀）、昨日 LL- 单（日期不同）
+    await insertReq(TODAY + '-005');
+    await insertReq('LL-' + YDAY + '-005');
     const n1 = await mkReq(1);
-    need(/^\d{8}-\d{3}$/.test(n1), '单号格式应为 YYYYMMDD-NNN，实际 ' + n1);
-    need(n1.indexOf('LL-') !== 0, '新单号不应带 LL- 前缀，实际 ' + n1);
-    need(n1 === TODAY + '-001', '当日首单应为 ' + TODAY + '-001，实际 ' + n1);
+    need(/^LL-\d{8}-\d{3}$/.test(n1), '单号格式应为 LL-YYYYMMDD-NNN，实际 ' + n1);
+    need(n1 === 'LL-' + TODAY + '-001', '当日首单应为 LL-' + TODAY + '-001，实际 ' + n1);
     const n2 = await mkReq(1);
-    need(/^\d{8}-\d{3}$/.test(n2), '单号格式应为 YYYYMMDD-NNN，实际 ' + n2);
-    need(n2 === TODAY + '-002', '次单应为 ' + TODAY + '-002，实际 ' + n2);
+    need(n2 === 'LL-' + TODAY + '-002', '次单应为 LL-' + TODAY + '-002，实际 ' + n2);
     reqNoNew = n2;
-    return n1 + ' → ' + n2 + '（已插入 LL-' + TODAY + '-0042 与 ' + YDAY + '-005 作干扰）';
+    return n1 + ' → ' + n2 + '（已插入 ' + TODAY + '-005 与 LL-' + YDAY + '-005 作干扰）';
   });
   await step('materials', '领料单号当日超 999 位数自然增长（不报错、不截断）', async () => {
-    await insertReq(TODAY + '-999');
+    await insertReq('LL-' + TODAY + '-999');
     const n = await mkReq(1);
-    need(n === TODAY + '-1000', '应自然增长为 ' + TODAY + '-1000，实际 ' + n);
+    need(n === 'LL-' + TODAY + '-1000', '应自然增长为 LL-' + TODAY + '-1000，实际 ' + n);
     return n;
   });
-  await step('materials', '单号排序：同日 新格式 → LL-四位 → LL-六位，组内数值升序', async () => {
-    const mixed = ['LL-' + TODAY + '-0002', TODAY + '-1000', 'X-无法识别', 'LL-' + TODAY + '-222544', TODAY + '-999', 'LL-' + TODAY + '-0001', TODAY + '-001'];
-    const want = [TODAY + '-001', TODAY + '-999', TODAY + '-1000', 'LL-' + TODAY + '-0001', 'LL-' + TODAY + '-0002', 'LL-' + TODAY + '-222544', 'X-无法识别'];
+  await step('materials', '单号排序：日期升序 → 流水组（数值）→ 6 位时间组 → 无法识别', async () => {
+    const D = TODAY;
+    // 流水组：0001(1) 0002(2) 003(3) 999(1000) 1000；时间组：222544；再加无前缀写法与脏号
+    const mixed = ['LL-' + D + '-0002', D + '-1000', 'X-无法识别', 'LL-' + D + '-222544', D + '-999', 'LL-' + D + '-0001', D + '-003'];
+    const want = ['LL-' + D + '-0001', 'LL-' + D + '-0002', D + '-003', D + '-999', D + '-1000', 'LL-' + D + '-222544', 'X-无法识别'];
     const got = mixed.slice().sort((a, b) => MaterialNo.cmp(a, b));
     need(JSON.stringify(got) === JSON.stringify(want), '同日混合排序不符\n      实际：' + got.join(' , ') + '\n      期望：' + want.join(' , '));
     // 跨日：昨日单号整体排在今日之前
-    const cross = [TODAY + '-001', YDAY + '-005'].sort((a, b) => MaterialNo.cmp(a, b));
-    need(cross[0] === YDAY + '-005', '跨日应昨日在前，实际 ' + cross.join(' , '));
+    const cross = ['LL-' + D + '-001', 'LL-' + YDAY + '-005'].sort((a, b) => MaterialNo.cmp(a, b));
+    need(cross[0] === 'LL-' + YDAY + '-005', '跨日应昨日在前，实际 ' + cross.join(' , '));
     return got.join(' , ');
   });
-  await step('materials', '领料单下载文件名 = reqNo（新格式与旧 LL- 格式并存）', async () => {
+  await step('materials', '历史重编脚本：同日 LL-四位 + LL-六位混合 → 按 createdAt 重编且二次运行不变', async () => {
+    const os = require('os');
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'reqno-mig-'));
+    const sample = {
+      materialRequisitions: [
+        { id: 'b2', reqNo: 'LL-20261024-0002', createdAt: '2026-10-24 13:08', status: '已作废', deleted: false, items: [] },
+        { id: 't1', reqNo: 'LL-20261024-123004', createdAt: '2026-10-24 12:30', status: '已作废', deleted: false, items: [] },
+        { id: 'a1', reqNo: 'LL-20261024-0001', createdAt: '2026-10-24 13:07', status: '已入库', deleted: false, items: [] },
+        { id: 'd1', reqNo: 'LL-20261024-122908', createdAt: '2026-10-24 12:29', status: '已作废', deleted: true, items: [] },
+        { id: 'x1', reqNo: '20261028-001', createdAt: '2026-10-28 15:54', status: '待入库', deleted: false, items: [] },
+        { id: 'bad', reqNo: '临时单', createdAt: '2026-10-24 09:00', status: '待入库', deleted: false, items: [] }
+      ]
+    };
+    fs.writeFileSync(path.join(tdir, 'db.json'), JSON.stringify(sample, null, 2), 'utf8');
+    const scriptPath = path.join(ROOT, 'scripts', 'migrate-reqno-20261028.js');
+    const run = () => require('child_process').spawnSync(process.execPath, [scriptPath, '--data', tdir, '--apply'], { encoding: 'utf8' });
+    const r1 = run();
+    need(r1.status === 0, '首次迁移应成功退出，实际 status=' + r1.status + ' ' + (r1.stderr || ''));
+    const after = JSON.parse(fs.readFileSync(path.join(tdir, 'db.json'), 'utf8'));
+    const byId = {}; after.materialRequisitions.forEach(r => { byId[r.id] = r; });
+    const expect = { d1: 'LL-20261024-001', t1: 'LL-20261024-002', a1: 'LL-20261024-003', b2: 'LL-20261024-004', x1: 'LL-20261028-001', bad: '临时单' };
+    Object.keys(expect).forEach(k => need(byId[k] && byId[k].reqNo === expect[k], '记录 ' + k + ' 新号应为 ' + expect[k] + '，实际 ' + (byId[k] && byId[k].reqNo)));
+    need(byId.d1.deleted === true && byId.d1.status === '已作废', '已删除记录的状态/删除标记不应被改动');
+    need(after.materialRequisitions.length === sample.materialRequisitions.length, '记录数不应变化');
+    // 二次运行：应为幂等（无改动）
+    const before2 = fs.readFileSync(path.join(tdir, 'db.json'), 'utf8');
+    const r2 = run();
+    need(r2.status === 0, '二次迁移应成功退出');
+    const after2 = fs.readFileSync(path.join(tdir, 'db.json'), 'utf8');
+    need(after2 === before2, '二次运行不应改动文件（幂等）');
+    need((r2.stdout || '').indexOf('无需写盘') > -1, '二次运行应报告无需写盘，实际：' + (r2.stdout || '').slice(-80));
+    fs.rmSync(tdir, { recursive: true, force: true });
+    return '5 条重编 + 1 条脏号跳过；二次运行无变化';
+  });
+  await step('materials', '领料单下载文件名 = reqNo（定版格式）', async () => {
     const list = needOk(await api('GET', '/api/materialRequisitions', { token }), 'requisition list');
     const nw = list.find(r => r.reqNo === reqNoNew);
-    const old = list.find(r => /^LL-\d{8}-\d{4}$/.test(r.reqNo || ''));
-    need(nw, '列表未包含新格式单号 ' + reqNoNew);
-    need(old, '列表未包含旧格式 LL- 单号');
-    for (const rec of [nw, old]) {
-      const res = await fetch(base + '/api/materialRequisitions/' + rec.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
-      need(res.ok, '下载应成功：' + rec.reqNo);
-      const cd = res.headers.get('Content-Disposition') || '';
-      need(cd.indexOf(rec.reqNo + '.xlsx') > -1, '文件名应为 reqNo.xlsx，实际 ' + cd);
-    }
-    return nw.reqNo + '.xlsx ／ ' + old.reqNo + '.xlsx';
+    need(nw, '列表未包含新生成单号 ' + reqNoNew);
+    const res = await fetch(base + '/api/materialRequisitions/' + nw.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(res.ok, '下载应成功：' + nw.reqNo);
+    const cd = res.headers.get('Content-Disposition') || '';
+    need(cd.indexOf(nw.reqNo + '.xlsx') > -1, '文件名应为 reqNo.xlsx，实际 ' + cd);
+    return nw.reqNo + '.xlsx';
   });
 
   /* ---------- 到货统计（聚合口径回归，纯函数与前端共用） ---------- */

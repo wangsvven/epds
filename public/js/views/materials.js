@@ -811,7 +811,8 @@ const Requisitions = {
       return true;
     }).slice().sort((a, b) => cmpReqNo(a.reqNo, b.reqNo)));
     // 单号排序口径（js/utils.js 的 reqNoKey / cmpReqNo，冒烟脚本共用同一份纯函数）：
-    // 日期升序 → 同日按组：新格式 YYYYMMDD-NNN(0) → LL-四位流水(1) → LL-六位时间(2) → 组内流水数值升序；无法识别的排最后
+    // 日期升序 → 同日内 流水组（3 位及以上数字后缀，含残留旧 4 位）按数值升序 → 6 位时间后缀组按值升序 → 无法识别的排最后
+    // 定版格式 LL-YYYYMMDD-NNN；解析同时接受无 LL- 前缀的历史测试期写法。
     function resetFilters() { filters.project = ''; filters.status = ''; filters.keyword = ''; }
     function sumQty(r) { return r.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); }
     function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }
