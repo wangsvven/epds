@@ -32,7 +32,7 @@ const SettingsView = {
         await api.put('/api/settings', { companyName: site.companyName, icp: site.icp, systemName: site.systemName, defaultSource: site.defaultSource, allowSelfPurchase: site.allowSelfPurchase, weekStart: window.normWeekStart(site.weekStart) });
         savedName.value = site.companyName;
         window.WeekStart.value = window.normWeekStart(site.weekStart); // 全局共享状态即时生效（SPA 内）
-        ElementPlus.ElMessage.success('已保存企业名称');
+        ElementPlus.ElMessage.success('设置已保存');
         window.dispatchEvent(new CustomEvent('brand-changed')); // 顶部标题/企业名称实时刷新
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }

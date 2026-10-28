@@ -62,10 +62,27 @@ const PlansView = {
     const list = ref([]);
     const loading = ref(false);
     const projects = ref([]); const projectsFull = ref([]); const workers = ref([]);
+    const leaderAccounts = ref([]);                     // 班组长候选：登录账号中「用户组=班组长」且「状态=启用」的姓名
     const teams = ref([]);                              // 班组管理（施工班组）→ 作业班组下拉源
     const filters = reactive({ startDate: '', endDate: '', name: '', content: '', noProject: false, team: '', leader: '', ticketType: '', projectScope: [] });
     const page = ref(1); const pageSize = ref(20);
     const dlg = reactive({ visible: false, editingId: null, form: null, ticketNoDirty: false });
+    // 表单班组长选项 = 账号候选 ∪ 当前值（回显保护：账号已删除/改组/停用，或历史值来自作业人员名单时，原样带上可存回）
+    const leaderOptsForm = computed(() => {
+      const out = leaderAccounts.value.slice();
+      const cur = String((dlg.form && dlg.form.teamLeader) || '').trim();
+      if (cur && out.indexOf(cur) < 0) out.push(cur);
+      return out;
+    });
+    // 列表筛选班组长选项 = 账号候选 ∪ 已有计划出现过的 leader 值（保证历史计划仍能被筛出来）
+    const leaderOptsFilter = computed(() => {
+      const out = leaderAccounts.value.slice();
+      list.value.forEach(p => {
+        const n = String(p.leader || '').trim();
+        if (n && out.indexOf(n) < 0) out.push(n);
+      });
+      return out;
+    });
     const emptyForm = () => ({
       name: '', content: '', shadowContent: '', planType: '周计划',
       project: '', subProject: '', workType: '配农网工程',
@@ -101,6 +118,14 @@ const PlansView = {
         teams.value = arr.slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0)).map(t => t.name).filter(Boolean);
       } catch (e) {}
       try { const r = await api.get('/api/workers'); const arr = Array.isArray(r) ? r : (r.data || []); workersFull.value = arr; workers.value = arr.map(w => w.name).filter(Boolean); } catch (e) {}
+      // 班组长候选改为取登录账号（作业人员名单不再作为班组长来源）：用户组=班组长 且 状态=启用，按姓名去重
+      try {
+        const r = await api.get('/api/users');
+        const arr = Array.isArray(r) ? r : (r.data || []);
+        const names = arr.filter(u => u && u.userGroup === '班组长' && u.status === '启用')
+          .map(u => String(u.name || '').trim()).filter(Boolean);
+        leaderAccounts.value = names.filter((n, i) => names.indexOf(n) === i);
+      } catch (e) {}
       try { const r = await api.get('/api/contacts'); contacts.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
       await loadHazards();
     }
@@ -1220,7 +1245,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1274,7 +1299,7 @@ const PlansView = {
         </div>
         <div class="pf-item"><span class="pf-label">班组长：</span>
           <el-select v-model="filters.leader" placeholder="全部" clearable class="pf-select" @change="page=1">
-            <el-option v-for="w in workers" :key="w" :label="w" :value="w" />
+            <el-option v-for="w in leaderOptsFilter" :key="w" :label="w" :value="w" />
           </el-select>
         </div>
         <div class="pf-item"><span class="pf-label">工作票类型：</span>
@@ -1569,7 +1594,7 @@ const PlansView = {
           <el-col :xs="24" :sm="12">
             <el-form-item label="班组长" required>
               <el-select v-model="dlg.form.teamLeader" placeholder="请选择" filterable clearable style="width:100%">
-                <el-option v-for="w in workers" :key="w" :label="w" :value="w" />
+                <el-option v-for="w in leaderOptsForm" :key="w" :label="w" :value="w" />
               </el-select>
             </el-form-item>
           </el-col>
