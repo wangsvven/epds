@@ -637,7 +637,39 @@ async function listOk(p, token) {
     need(hit.length === 2, '回灌后同名计划应为 2 条，实为 ' + hit.length);
     const a = hit.find(p => p.id === mk.id), b = hit.find(p => p.id !== mk.id);
     need(a && b && a.team === b.team && a.startDate === b.startDate && a.staffText === b.staffText && a.workType === b.workType, '回灌后字段与原记录不一致');
-    return '导出 ' + (total - 2) + ' 条 → 回灌 ' + d.added + ' 条，字段一致';
+    // 内置导入模板是 54 列（比导出多一列「班组长」），按表头名称取列才不错位：填一行验证
+    const tplWb = xlsx.read(fs.readFileSync(path.join(ROOT, 'assets', 'plan-import-template.xlsx')), { type: 'buffer' });
+    const ts = tplWb.Sheets[tplWb.SheetNames[0]];
+    const rng = xlsx.utils.decode_range(ts['!ref']);
+    const findCol = nm => {
+      for (let R = 0; R <= 1; R++) for (let C = 0; C <= rng.e.c; C++) {
+        const c = ts[xlsx.utils.encode_cell({ r: R, c: C })];
+        if (c && String(c.v).trim() === nm) return C;
+      }
+      return -1;
+    };
+    const put = (nm, v) => {
+      const C = findCol(nm);
+      need(C >= 0, '模板缺少列：' + nm);
+      ts[xlsx.utils.encode_cell({ r: 2, c: C })] = { t: 's', v: String(v) };
+    };
+    put('作业计划名称', '冒烟模板列位计划'); put('作业类型', '配农网工程');
+    put('计划开始时间', '2026-11-09 08:00:00'); put('计划结束时间', '2026-11-09 18:00:00');
+    put('班组长', '模板班组长'); put('杆塔（基）', '9'); put('停电范围', '模板停电范围');
+    ts['!ref'] = xlsx.utils.encode_range({ s: rng.s, e: { r: 2, c: rng.e.c } });   // 模板原本只有两行表头，写入行后要扩范围
+    const tplOut = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(tplOut, ts, tplWb.SheetNames[0]);
+    const tplBuf = xlsx.write(tplOut, { type: 'buffer', bookType: 'xlsx' });
+    const fd2 = new FormData();
+    fd2.append('file', new Blob([tplBuf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'tpl.xlsx');
+    const up2 = await fetch(base + '/api/workPlans/import', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd2, signal: AbortSignal.timeout(15000) });
+    const d2 = await up2.json();
+    need(up2.status === 200 && d2 && d2.ok, '模板导入失败：' + brief(d2));
+    const got = needOk(await api('GET', '/api/workPlans', { token }), 'list');
+    const tp = (Array.isArray(got) ? got : (got.data || [])).find(p => p.name === '冒烟模板列位计划');
+    need(tp && tp.leader === '模板班组长' && tp.wlPole === '9' && tp.outageRange === '模板停电范围',
+      '54 列模板列位错位：' + brief(tp && { leader: tp.leader, wlPole: tp.wlPole, outageRange: tp.outageRange }));
+    return '回灌 ' + d.added + ' 条字段一致；模板 54 列落位正确';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');

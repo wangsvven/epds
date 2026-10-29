@@ -62,13 +62,19 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     }
     const errors = [];
     const parsed = [];
-    // 按表头自动识别列位：
-    //   新格式（原周报 48/54 列两行表头）A=序号 B=作业计划名称 C=作业类型 … F/G=计划开始/结束时间
-    //   老格式 A=作业计划名称 B=计划类型 C=关联项目 D=班组 E=班组长 F/G=开始/结束（纯日期）
-    const HEAD = (rows[0] || []).map(v => String(v == null ? '' : v).trim());
-    const NEW_LAYOUT = HEAD[0] === '序号' || HEAD[1] === '作业计划名称';
+    // 按表头名称取列（不再写死列号）：原周报格式有两套——导出 48 列、内置导入模板 54 列（模板在「作业班组」后多一列「班组长」），
+    // 从第 33 列起整体错开一位，只有按名称取才不会错位。子表头（当日计划工作量 / 备注）的列名在图片行 2，覆盖行 1。
+    // 老格式（A=作业计划名称 B=计划类型 …）不认这两行表头，走后面的老分支。
+    const HEAD = {};
+    [rows[0] || [], rows[1] || []].forEach(line => line.forEach((v, i) => {
+      const t = String(v == null ? '' : v).trim();
+      if (t) HEAD[t] = i;
+    }));
+    const NEW_LAYOUT = HEAD['作业计划名称'] !== undefined && HEAD['计划开始时间'] !== undefined;
     const cellText = (r, i) => String(r[i] == null ? '' : r[i]).trim();
     const cellList = (r, i) => (cellText(r, i) ? cellText(r, i).split(/[；;]/).map(s => s.trim()).filter(Boolean) : []);
+    const col = (r, name) => (HEAD[name] === undefined ? '' : cellText(r, HEAD[name]));
+    const colList = (r, name) => (HEAD[name] === undefined ? [] : cellList(r, HEAD[name]));
     const DT_RE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/;
     // 新格式没有「计划类型」列：按导入入口页签决定（周计划管理 / 月计划管理），默认周计划
     const wantType = String((req.query && req.query.planType) || '');
@@ -76,9 +82,9 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       if (i === 0) return; // 表头
       const rowNo = i + 1;
       if (NEW_LAYOUT) {
-        const pName = cellText(r, 1);
-        const start = cellText(r, 5);
-        const end = cellText(r, 6);
+        const pName = col(r, '作业计划名称');
+        const start = col(r, '计划开始时间');
+        const end = col(r, '计划结束时间');
         if (!pName && !start && !end) return; // 空行 / 第 2 行分组子表头
         if (!pName) { errors.push('第' + rowNo + '行：作业计划名称不能为空'); return; }
         if (!DT_RE.test(start)) { errors.push('第' + rowNo + '行：计划开始时间「' + (start || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss'); return; }
@@ -87,23 +93,26 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
         parsed.push(planItem({
           name: pName,
           planType: PLAN_TYPES.includes(wantType) ? wantType : '周计划',
-          workType: cellText(r, 2), specialty: cellText(r, 3), dept: cellText(r, 4),
+          workType: col(r, '作业类型'), specialty: col(r, '作业专业'), dept: col(r, '省专业管理部门'),
           startDate: start, endDate: end,
-          voltage: cellText(r, 7), station: cellText(r, 8), address: cellText(r, 9),
-          content: cellText(r, 10), ticketType: cellText(r, 11),
-          riskLevel: cellText(r, 12), gridRisk: cellText(r, 13), riskFactors: cellList(r, 14),
-          buildCity: cellText(r, 15), buildCounty: cellText(r, 16),
-          execCity: cellText(r, 17), execCounty: cellText(r, 18),
-          team: cellText(r, 19), subcontractors: cellList(r, 20), supervisor: cellText(r, 21),
-          ccUnits: cellList(r, 22),
-          chargePerson: cellText(r, 23), chargePersonPhone: cellText(r, 24),
-          staffText: cellText(r, 25), majorRisk: cellText(r, 26), controlMeasures: cellText(r, 27),
-          staffCount: cellText(r, 28), highStaff: cellText(r, 29), guardian: cellText(r, 30),
-          arrivalPersons: cellText(r, 31), safetyPatrol: cellText(r, 32),
-          gasTester: cellText(r, 37), machine: cellText(r, 38),
-          wlPole: cellText(r, 39), wlLine1035: cellText(r, 40), wlCable: cellText(r, 41),
-          wlRing: cellText(r, 42), wlVacuum: cellText(r, 43), wlTransformer: cellText(r, 44),
-          wlLine04: cellText(r, 45), outageRange: cellText(r, 46), outageHours: cellText(r, 47)
+          voltage: col(r, '电压等级'), station: col(r, '变电站/线路'), address: col(r, '作业地址'),
+          content: col(r, '作业内容'), ticketType: col(r, '工作票类型'),
+          riskLevel: col(r, '作业风险等级'), gridRisk: col(r, '电网风险等级'), riskFactors: colList(r, '风险因素'),
+          buildCity: col(r, '作业建管单位（市）'), buildCounty: col(r, '作业建管单位（县）'),
+          execCity: col(r, '作业实施（施工）单位（市）'), execCounty: col(r, '作业实施（施工）单位（县）'),
+          team: col(r, '作业班组'), subcontractors: colList(r, '分包单位'), supervisor: col(r, '监理单位'),
+          ccUnits: colList(r, '抄送单位'),
+          chargePerson: col(r, '工作负责人'), chargePersonPhone: col(r, '工作负责人联系方式'),
+          staffText: col(r, '作业实施（施工）人员（不包含工作负责人）'),
+          majorRisk: col(r, '重特大人身事故风险'), controlMeasures: col(r, '风险管控措施'),
+          staffCount: col(r, '作业人员（共多少人）'), highStaff: col(r, '其中高处作业人员'),
+          guardian: col(r, '专责监护人'), arrivalPersons: col(r, '到岗到位人员'), safetyPatrol: col(r, '安全巡查人员'),
+          leader: col(r, '班组长'), teamLeader: col(r, '班组长'),   // 模板有此列，导出没有
+          gasTester: col(r, '气体检测人员'), machine: col(r, '是否涉及机械施工'),
+          wlPole: col(r, '杆塔（基）'), wlLine1035: col(r, '10kV/35kV线路（km/单线）'), wlCable: col(r, '电缆（千米）'),
+          wlRing: col(r, '环网柜（个）'), wlVacuum: col(r, '真空开关（个）'), wlTransformer: col(r, '变压器（个）'),
+          wlLine04: col(r, '0.4/0.22kV线路（km/单线）'),
+          outageRange: col(r, '停电范围'), outageHours: col(r, '时户数')
         }));
         return;
       }
