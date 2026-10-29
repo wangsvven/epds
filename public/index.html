@@ -1134,8 +1134,8 @@
   .pdt-day.out { color:var(--text-3); opacity:.6; }
   .pdt-day.today { box-shadow:0 0 0 1px var(--brand) inset; color:var(--brand); }
   .pdt-day.on { background:var(--brand); color:#fff; font-weight:600; box-shadow:none; }
-  /* 时间区：抬头行（时/分/秒）+ 三列循环滚动（可视 7 行 × 36px = 252px，与日历区等高） */
-  .pdt-time { flex:0 0 158px; display:flex; flex-direction:column; border-left:1px solid var(--line); }
+  /* 时间区：抬头行（时/分）+ 两列循环滚动（可视 7 行 × 36px = 252px，与日历区等高） */
+  .pdt-time { flex:0 0 106px; display:flex; flex-direction:column; border-left:1px solid var(--line); }
   .pdt-time-head { display:flex; align-items:center; height:44px; }
   .pdt-time-head span { flex:1 1 0; text-align:center; font-size:12.5px; color:var(--text-3); }
   .pdt-cols { position:relative; display:flex; height:252px; }
@@ -1160,7 +1160,7 @@
   .pdt-ok:hover { background:var(--brand-soft); }
   .pdt-ok:disabled { color:var(--text-3); cursor:not-allowed; background:transparent; }
   @media (max-width:768px){
-    .pdt-time { flex:0 0 132px; }
+    .pdt-time { flex:0 0 96px; }
     .pdt-cols { height:232px; }   /* 与移动端日历区（数字 31px）等高 */
     .pdt-band { top:108px; }
     .pdt-day { height:31px; font-size:12.5px; }

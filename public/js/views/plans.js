@@ -2175,26 +2175,26 @@ const PlanDateTime = {
     });
     const HOURS = Array.from({ length: 24 }, (_, i) => pad(i));
     const MINUTES = Array.from({ length: 60 }, (_, i) => pad(i));
-    const SECONDS = Array.from({ length: 60 }, (_, i) => pad(i));
+    // 计划时间只到「时、分」（不到秒）
     // 无限循环滚动：同一组数值重复 5 份，打开时定位到中间一份；越出后在滚动停止时按整周期跳回等值位置
     const ROW = 36;             // 单元格行高（与 .pdt-cell 样式保持一致）
     const BAND_TOP = ROW * 3;   // 选中带顶边 = 第 4 行（可视 7 行）
     const REPEAT = 5;           // 重复份数（前后各留 2 份余量）
     const rep = arr => { const out = []; for (let c = 0; c < REPEAT; c++) arr.forEach(v => out.push(v)); return out; };
-    const HOURS_REP = rep(HOURS), MINUTES_REP = rep(MINUTES), SECONDS_REP = rep(SECONDS);
+    const HOURS_REP = rep(HOURS), MINUTES_REP = rep(MINUTES);
     const open = ref(false);
     const triggerEl = ref(null);
     const panelEl = ref(null);
-    const colH = ref(null); const colM = ref(null); const colS = ref(null);
-    const colRef = { h: colH, mi: colM, s: colS };
-    const colList = { h: HOURS, mi: MINUTES, s: SECONDS };
-    const colSelKey = { h: 'h', mi: 'mi', s: 's' };
-    const sync = { h: false, mi: false, s: false };   // 程序滚动期间不回读，避免自激
-    const timers = { h: 0, mi: 0, s: 0 };
-    const pos = reactive({ top: 0, left: 0, width: 460 });
+    const colH = ref(null); const colM = ref(null);
+    const colRef = { h: colH, mi: colM };
+    const colList = { h: HOURS, mi: MINUTES };
+    const colSelKey = { h: 'h', mi: 'mi' };
+    const sync = { h: false, mi: false };   // 程序滚动期间不回读，避免自激
+    const timers = { h: 0, mi: 0 };
+    const pos = reactive({ top: 0, left: 0, width: 408 });
     const now0 = new Date();
     const view = reactive({ y: now0.getFullYear(), m: now0.getMonth() + 1 });
-    const sel = reactive({ y: 0, m: 0, d: 0, h: 0, mi: 0, s: 0, has: false });
+    const sel = reactive({ y: 0, m: 0, d: 0, h: 0, mi: 0, has: false });
 
     function parse(v) {
       const t = String(v == null ? '' : v).trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
@@ -2203,7 +2203,7 @@ const PlanDateTime = {
     }
     const text = computed(() => {
       const p = parse(props.modelValue);
-      return p ? p.y + '-' + pad(p.m) + '-' + pad(p.d) + ' ' + pad(p.h) + ':' + pad(p.mi) + ':' + pad(p.s) : '';
+      return p ? p.y + '-' + pad(p.m) + '-' + pad(p.d) + ' ' + pad(p.h) + ':' + pad(p.mi) : '';
     });
     const cells = computed(() => {
       // 月首偏移按全局「星期开始于」旋转：lead = (当月1号周几 - weekStart + 7) % 7
@@ -2228,7 +2228,7 @@ const PlanDateTime = {
     function applyPos() {
       const el = triggerEl.value; if (!el) return;
       const r = el.getBoundingClientRect();
-      const pw = Math.min(460, window.innerWidth - 24);
+      const pw = Math.min(408, window.innerWidth - 24);
       const ph = panelEl.value ? panelEl.value.offsetHeight : 338;
       const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
       let top = r.bottom + 6;
@@ -2304,7 +2304,7 @@ const PlanDateTime = {
       if (props.disabled) return;
       const p = parse(props.modelValue);
       if (p) Object.assign(sel, p, { has: true });
-      else Object.assign(sel, { y: 0, m: 0, d: 0, h: 0, mi: 0, s: 0, has: false });
+      else Object.assign(sel, { y: 0, m: 0, d: 0, h: 0, mi: 0, has: false });
       const t = new Date();
       view.y = p ? p.y : t.getFullYear();
       view.m = p ? p.m : t.getMonth() + 1;
@@ -2312,7 +2312,7 @@ const PlanDateTime = {
       applyPos(); bindEvents();
       nextTick(() => {
         applyPos();
-        ['h', 'mi', 's'].forEach(kind => {
+        ['h', 'mi'].forEach(kind => {
           if (!colRef[kind].value) return;
           sync[kind] = true;
           scrollValueToBand(kind, sel.has ? sel[colSelKey[kind]] : 0, false);
@@ -2336,19 +2336,19 @@ const PlanDateTime = {
     }
     function confirm() {
       if (!sel.has) return;
-      emit('update:modelValue', sel.y + '-' + pad(sel.m) + '-' + pad(sel.d) + ' ' + pad(sel.h) + ':' + pad(sel.mi) + ':' + pad(sel.s));
+      emit('update:modelValue', sel.y + '-' + pad(sel.m) + '-' + pad(sel.d) + ' ' + pad(sel.h) + ':' + pad(sel.mi));
       close();
     }
     function pickNow() {
       const t = new Date();
-      Object.assign(sel, { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate(), h: t.getHours(), mi: t.getMinutes(), s: t.getSeconds(), has: true });
+      Object.assign(sel, { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate(), h: t.getHours(), mi: t.getMinutes(), has: true });
       view.y = sel.y; view.m = sel.m;
       confirm();
     }
     function clear() { emit('update:modelValue', ''); }
     onBeforeUnmount(unbindEvents);
 
-    return { pad, WEEK, HOURS_REP, MINUTES_REP, SECONDS_REP, open, triggerEl, panelEl, colH, colM, colS, pos, view, sel, text, cells, isToday, isSel, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear, onColScroll, pickCell };
+    return { pad, WEEK, HOURS_REP, MINUTES_REP, open, triggerEl, panelEl, colH, colM, pos, view, sel, text, cells, isToday, isSel, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear, onColScroll, pickCell };
   },
   template: `
   <div class="pdt" :class="{ 'is-open': open }">
@@ -2378,7 +2378,7 @@ const PlanDateTime = {
             </div>
           </div>
           <div class="pdt-time">
-            <div class="pdt-time-head"><span>时</span><span>分</span><span>秒</span></div>
+            <div class="pdt-time-head"><span>时</span><span>分</span></div>
             <div class="pdt-cols">
               <div class="pdt-band" aria-hidden="true"></div>
               <div class="pdt-col" ref="colH" @scroll="onColScroll('h')">
@@ -2386,9 +2386,6 @@ const PlanDateTime = {
               </div>
               <div class="pdt-col" ref="colM" @scroll="onColScroll('mi')">
                 <div v-for="(m, i) in MINUTES_REP" :key="'m' + i" class="pdt-cell" :class="{ on: sel.has && pad(sel.mi) === m }" @click="pickCell('mi', m)">{{ m }}</div>
-              </div>
-              <div class="pdt-col" ref="colS" @scroll="onColScroll('s')">
-                <div v-for="(s, i) in SECONDS_REP" :key="'s' + i" class="pdt-cell" :class="{ on: sel.has && pad(sel.s) === s }" @click="pickCell('s', s)">{{ s }}</div>
               </div>
             </div>
           </div>
