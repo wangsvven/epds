@@ -1181,9 +1181,11 @@ const PlansView = {
         return;
       }
       const fd = new FormData(); fd.append('file', file);
+      // 新格式（原周报列位）没有「计划类型」列：按当前页签决定落库类型
+      const planType = (tab.value === 'month' || tab.value === 'archived') ? '月计划' : '周计划';
       importDlg.importing = true;
       try {
-        const res = await fetch('/api/workPlans/import', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd });
+        const res = await fetch('/api/workPlans/import?planType=' + encodeURIComponent(planType), { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd });
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || '导入失败');
         ElementPlus.ElMessage.success('已导入 ' + d.added + ' 条作业计划');

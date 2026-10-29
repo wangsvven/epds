@@ -62,14 +62,56 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     }
     const errors = [];
     const parsed = [];
+    // 按表头自动识别列位：
+    //   新格式（原周报 48/54 列两行表头）A=序号 B=作业计划名称 C=作业类型 … F/G=计划开始/结束时间
+    //   老格式 A=作业计划名称 B=计划类型 C=关联项目 D=班组 E=班组长 F/G=开始/结束（纯日期）
+    const HEAD = (rows[0] || []).map(v => String(v == null ? '' : v).trim());
+    const NEW_LAYOUT = HEAD[0] === '序号' || HEAD[1] === '作业计划名称';
+    const cellText = (r, i) => String(r[i] == null ? '' : r[i]).trim();
+    const cellList = (r, i) => (cellText(r, i) ? cellText(r, i).split(/[；;]/).map(s => s.trim()).filter(Boolean) : []);
+    const DT_RE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/;
+    // 新格式没有「计划类型」列：按导入入口页签决定（周计划管理 / 月计划管理），默认周计划
+    const wantType = String((req.query && req.query.planType) || '');
     rows.forEach((r, i) => {
       if (i === 0) return; // 表头
-      const pName = String(r[0] || '').trim();
-      const pType = String(r[1] || '').trim();
-      const start = String(r[5] || '').trim();
-      const end = String(r[6] || '').trim();
-      if (!pName && !pType && !start && !end) return; // 空行
       const rowNo = i + 1;
+      if (NEW_LAYOUT) {
+        const pName = cellText(r, 1);
+        const start = cellText(r, 5);
+        const end = cellText(r, 6);
+        if (!pName && !start && !end) return; // 空行 / 第 2 行分组子表头
+        if (!pName) { errors.push('第' + rowNo + '行：作业计划名称不能为空'); return; }
+        if (!DT_RE.test(start)) { errors.push('第' + rowNo + '行：计划开始时间「' + (start || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss'); return; }
+        if (!DT_RE.test(end)) { errors.push('第' + rowNo + '行：计划结束时间「' + (end || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss'); return; }
+        if (end < start) { errors.push('第' + rowNo + '行：计划结束时间早于开始时间'); return; }
+        parsed.push(planItem({
+          name: pName,
+          planType: PLAN_TYPES.includes(wantType) ? wantType : '周计划',
+          workType: cellText(r, 2), specialty: cellText(r, 3), dept: cellText(r, 4),
+          startDate: start, endDate: end,
+          voltage: cellText(r, 7), station: cellText(r, 8), address: cellText(r, 9),
+          content: cellText(r, 10), ticketType: cellText(r, 11),
+          riskLevel: cellText(r, 12), gridRisk: cellText(r, 13), riskFactors: cellList(r, 14),
+          buildCity: cellText(r, 15), buildCounty: cellText(r, 16),
+          execCity: cellText(r, 17), execCounty: cellText(r, 18),
+          team: cellText(r, 19), subcontractors: cellList(r, 20), supervisor: cellText(r, 21),
+          ccUnits: cellList(r, 22),
+          chargePerson: cellText(r, 23), chargePersonPhone: cellText(r, 24),
+          staffText: cellText(r, 25), majorRisk: cellText(r, 26), controlMeasures: cellText(r, 27),
+          staffCount: cellText(r, 28), highStaff: cellText(r, 29), guardian: cellText(r, 30),
+          arrivalPersons: cellText(r, 31), safetyPatrol: cellText(r, 32),
+          gasTester: cellText(r, 37), machine: cellText(r, 38),
+          wlPole: cellText(r, 39), wlLine1035: cellText(r, 40), wlCable: cellText(r, 41),
+          wlRing: cellText(r, 42), wlVacuum: cellText(r, 43), wlTransformer: cellText(r, 44),
+          wlLine04: cellText(r, 45), outageRange: cellText(r, 46), outageHours: cellText(r, 47)
+        }));
+        return;
+      }
+      const pName = cellText(r, 0);
+      const pType = cellText(r, 1);
+      const start = cellText(r, 5);
+      const end = cellText(r, 6);
+      if (!pName && !pType && !start && !end) return; // 空行
       if (!pName) { errors.push('第' + rowNo + '行：作业计划名称不能为空'); return; }
       if (!PLAN_TYPES.includes(pType)) { errors.push('第' + rowNo + '行：计划类型「' + (pType || '空') + '」无效（仅支持：周计划 / 月计划）'); return; }
       if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) { errors.push('第' + rowNo + '行：计划开始日期「' + (start || '空') + '」格式应为 YYYY-MM-DD'); return; }

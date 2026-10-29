@@ -617,6 +617,28 @@ async function listOk(p, token) {
     need(rows - 2 >= 1, '不带 scope 时应导出全部，实为 ' + (rows - 2));
     return '48 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / scope 过滤 OK / ' + buf.length + 'B';
   });
+  await step('plans', '周计划导出 → 原样回灌导入（按表头识别列位，往返条数一致）', async () => {
+    // 先造一条字段齐全的计划，保证往返有可比对的数据
+    const mk = needOk(await api('POST', '/api/workPlans', {
+      token, body: { name: '冒烟回灌计划', planType: '周计划', workType: '配农网工程', team: '施工一队', startDate: '2026-11-02 08:00:00', endDate: '2026-11-03 18:00:00', staffText: '张三/13800000000', voltage: '10kV' }
+    }), 'plan POST');
+    need(mk && mk.id, '响应缺少 id');
+    const r = await fetch(base + '/api/workPlans/export?scope=week', { headers: { Authorization: 'Bearer ' + token } });
+    const buf = Buffer.from(await r.arrayBuffer());
+    const total = xlsx.utils.decode_range(xlsx.read(buf, { type: 'buffer' }).Sheets.Sheet1['!ref']).e.r + 1;
+    const fd = new FormData();
+    fd.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'roundtrip.xlsx');
+    const up = await fetch(base + '/api/workPlans/import?planType=' + encodeURIComponent('周计划'), { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd, signal: AbortSignal.timeout(15000) });
+    const d = await up.json();
+    need(up.status === 200 && d && d.ok, '往返导入失败：' + brief(d));
+    need(d.added === total - 2, '导入 ' + d.added + ' 条，导出数据行 ' + (total - 2) + ' 条');
+    const again = needOk(await api('GET', '/api/workPlans', { token }), 'list');
+    const hit = (Array.isArray(again) ? again : (again.data || [])).filter(p => p.name === '冒烟回灌计划' && !p.deleted);
+    need(hit.length === 2, '回灌后同名计划应为 2 条，实为 ' + hit.length);
+    const a = hit.find(p => p.id === mk.id), b = hit.find(p => p.id !== mk.id);
+    need(a && b && a.team === b.team && a.startDate === b.startDate && a.staffText === b.staffText && a.workType === b.workType, '回灌后字段与原记录不一致');
+    return '导出 ' + (total - 2) + ' 条 → 回灌 ' + d.added + ' 条，字段一致';
+  });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');
     need(p && p.id, '响应缺少 id');
