@@ -582,6 +582,16 @@ async function listOk(p, token) {
     need(one.project === '冒烟测试项目', 'detail.project 不匹配');
     return 'id=' + d.id;
   });
+  await step('plans', '周计划导入模板下载 GET /api/workPlans/import-template', async () => {
+    const r = await fetch(base + '/api/workPlans/import-template', { headers: { Authorization: 'Bearer ' + token } });
+    need(r.status === 200, '状态码 ' + r.status);
+    need(/spreadsheetml\.sheet/.test(r.headers.get('content-type') || ''), 'Content-Type 非 xlsx');
+    const buf = Buffer.from(await r.arrayBuffer());
+    const local = fs.readFileSync(path.join(ROOT, 'assets', 'plan-import-template.xlsx'));
+    need(buf.length === local.length, '长度 ' + buf.length + ' ≠ 入仓原件 ' + local.length);
+    need(buf.slice(0, 2).toString() === 'PK', '不是 xlsx（zip）文件');
+    return buf.length + 'B';
+  });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');
     need(p && p.id, '响应缺少 id');

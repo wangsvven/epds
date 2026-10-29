@@ -1162,22 +1162,47 @@ const PlansView = {
         ElementPlus.ElMessage.success('已删除'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
-    function importPlans() {
-      const input = document.createElement('input');
-      input.type = 'file'; input.accept = '.xlsx,.xls,.csv';
-      input.onchange = async () => {
-        const file = input.files && input.files[0];
-        if (!file) return;
-        const fd = new FormData(); fd.append('file', file);
-        try {
-          const res = await fetch('/api/workPlans/import', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd });
-          const d = await res.json();
-          if (!res.ok) throw new Error(d.error || '导入失败');
-          ElementPlus.ElMessage.success('已导入 ' + d.added + ' 条作业计划');
-          load();
-        } catch (e) { ElementPlus.ElMessage.error(e.message); }
-      };
-      input.click();
+    // 导入周计划：工具栏按钮只负责打开说明对话框，选文件/下载模板都在对话框内完成
+    const importDlg = reactive({ visible: false, importing: false });
+    const importFileRef = ref(null);
+    function importPlans() { importDlg.visible = true; }
+    function pickImportFile() {
+      if (importDlg.importing || !importFileRef.value) return;
+      importFileRef.value.value = '';
+      importFileRef.value.click();
+    }
+    async function onImportFileChange(e) {
+      const input = e.target;
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 10 * 1024 * 1024) {
+        ElementPlus.ElMessage.error('文件大小超过 10MB');
+        input.value = '';
+        return;
+      }
+      const fd = new FormData(); fd.append('file', file);
+      importDlg.importing = true;
+      try {
+        const res = await fetch('/api/workPlans/import', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || '导入失败');
+        ElementPlus.ElMessage.success('已导入 ' + d.added + ' 条作业计划');
+        importDlg.visible = false;
+        load();
+      } catch (err) { ElementPlus.ElMessage.error(err.message); }
+      finally { importDlg.importing = false; input.value = ''; }
+    }
+    async function downloadImportTemplate() {
+      try {
+        const res = await fetch('/api/workPlans/import-template', { headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') } });
+        if (!res.ok) throw new Error('模板下载失败');
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = '周计划导入模板.xlsx';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(a.href);
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     async function exportPlans() {
       try {
@@ -1247,7 +1272,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1376,6 +1401,19 @@ const PlansView = {
         <template #footer>
           <el-button @click="qtyDlg.visible=false">取消</el-button>
           <el-button type="primary" :loading="qtyDlg.busy" @click="submitQuantities">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog title="导入周计划" v-model="importDlg.visible" width="min(560px, 94%)">
+        <div class="plan-imp-tip">支持原周报的两行表头格式（.xlsx /.xls），文件不超过 10MB。作业班组须与本企业已有班组名称一致，班组长可不填；先检查整份文件，再逐条新增周计划。</div>
+        <div class="plan-imp-tip">工作负责人和施工人员按原姓名保存；项目不自动匹配，导入后可在「编辑」中关联。导入不会覆盖已有计划；再次导入同一文件会新增另一批计划。</div>
+        <div class="plan-imp-acts">
+          <el-button size="small" @click="downloadImportTemplate">下载导入模板</el-button>
+          <el-button size="small" type="primary" :loading="importDlg.importing" :disabled="importDlg.importing" @click="pickImportFile">选择文件</el-button>
+          <input ref="importFileRef" type="file" accept=".xlsx,.xls" style="display:none" @change="onImportFileChange" />
+        </div>
+        <template #footer>
+          <el-button :disabled="importDlg.importing" @click="importDlg.visible=false">关闭</el-button>
         </template>
       </el-dialog>
 

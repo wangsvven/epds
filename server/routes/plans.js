@@ -101,6 +101,15 @@ app.get('/api/workPlans/export', (req, res) => {
   res.send(buf);
 });
 
+// 周计划导入模板下载：assets/plan-import-template.xlsx 随代码分发（用户提供的原件）
+app.get('/api/workPlans/import-template', (req, res) => {
+  const f = path.join(ROOT, 'assets', 'plan-import-template.xlsx');
+  if (!fs.existsSync(f)) return res.status(404).json({ error: '导入模板尚未内置：缺少 assets/plan-import-template.xlsx' });
+  res.setHeader('Content-Disposition', 'attachment; filename="plan-import-template.xlsx"');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(fs.readFileSync(f));
+});
+
 // 班组长专用：仅填写「当日计划工作量」7 项（工程实际施工量）
 app.put('/api/workPlans/:id/quantities', (req, res) => {
   const p = (DB.workPlans || []).find(x => x.id === req.params.id && !x.deleted);
