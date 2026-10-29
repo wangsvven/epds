@@ -99,6 +99,15 @@ const ArrivalStats = {
     });
     const emptyText = computed(() => (arrivalDate.value && viewRows.value.length === 0) ? '当日无到货记录' : '暂无数据');
 
+    // 当前计划下有到货的日期集合（日历上画红圈的依据）
+    const arrivalDaySet = computed(() => {
+      const set = new Set();
+      allEvents.value.forEach(e => {
+        const d = String(e.at || '').slice(0, 10);
+        if (d) set.add(d);
+      });
+      return set;
+    });
     // 日志按日期分组（数据已按时间倒序）
     const logGroups = computed(() => {
       const groups = [];
@@ -111,6 +120,13 @@ const ArrivalStats = {
       return groups;
     });
 
+    // 日历单元格：到货日挂 'arrival-day'（偶数日再加 'arrival-day-b' 换一种圈法）
+    function dayCellClass(d) {
+      if (!d) return '';
+      const key = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+      if (!arrivalDaySet.value.has(key)) return '';
+      return d.getDate() % 2 === 0 ? 'arrival-day arrival-day-b' : 'arrival-day';
+    }
     function pad2(n) { return String(n).padStart(2, '0'); }
     function ymd(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
     function cnDate(v) {
@@ -163,7 +179,7 @@ const ArrivalStats = {
     return {
       loading, plan, plans, page, pageSize, paged, agg, recent, allEvents, onPlanChange, fmt, load,
       arrivalDate, onlyDay, viewRows, pagerText, daySummary, dayEvents, dayKinds, daySum,
-      emptyText, logGroups, setToday, setYesterday, onOnlyDayChange, downloadLog
+      emptyText, logGroups, setToday, setYesterday, onOnlyDayChange, downloadLog, arrivalDaySet, dayCellClass
     };
   },
   template: `
@@ -176,7 +192,7 @@ const ArrivalStats = {
       <span class="as-dategrp">
         <span class="as-datelb">到货日期</span>
         <el-date-picker v-model="arrivalDate" type="date" value-format="YYYY-MM-DD" clearable
-          placeholder="选择日期" class="as-date" :teleported="true" />
+          placeholder="选择日期" class="as-date" :teleported="true" :cell-class-name="dayCellClass" />
       </span>
       <el-button size="small" class="as-quick" @click="setToday">今天</el-button>
       <el-button size="small" class="as-quick" @click="setYesterday">昨天</el-button>
