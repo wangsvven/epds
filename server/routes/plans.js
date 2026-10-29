@@ -123,7 +123,14 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
           chargePerson: col(r, '工作负责人'), chargePersonPhone: col(r, '工作负责人联系方式'),
           staffText: col(r, '作业实施（施工）人员（不包含工作负责人）'),
           majorRisk: col(r, '重特大人身事故风险'), controlMeasures: col(r, '风险管控措施'),
-          staffCount: col(r, '作业人员（共多少人）'), highStaff: col(r, '其中高处作业人员'),
+          // 「作业人员（共多少人）」以施工人员名单实际人数为准（与表单「从作业人员名单选择」后自动带数的口径一致）；
+          // 名单为空时沿用文件里的值，避免把纯手填的人数清空
+          staffCount: (() => {
+            const txt = col(r, '作业实施（施工）人员（不包含工作负责人）');
+            const n = txt ? txt.split(/[；;]/).map(s => s.trim()).filter(Boolean).length : 0;
+            return n ? String(n) : col(r, '作业人员（共多少人）');
+          })(),
+          highStaff: col(r, '其中高处作业人员'),
           guardian: col(r, '专责监护人'), arrivalPersons: col(r, '到岗到位人员'), safetyPatrol: col(r, '安全巡查人员'),
           leader: col(r, '班组长'), teamLeader: col(r, '班组长'),   // 模板有此列，导出没有
           gasTester: col(r, '气体检测人员'), machine: col(r, '是否涉及机械施工'),

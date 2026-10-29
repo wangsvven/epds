@@ -656,6 +656,8 @@ async function listOk(p, token) {
     put('作业计划名称', '冒烟模板列位计划'); put('作业类型', '配农网工程');
     put('计划开始时间', '2026-11-09 08'); put('计划结束时间', '2026-11-09 18');   // 只写到小时也应接受
     put('班组长', '模板班组长'); put('杆塔（基）', '9'); put('停电范围', '模板停电范围');
+    put('作业实施（施工）人员（不包含工作负责人）', '甲/13000000001；乙/13000000002');
+    put('作业人员（共多少人）', '9');   // 与名单人数冲突时，应以名单为准（导入按名单重算）
     ts['!ref'] = xlsx.utils.encode_range({ s: rng.s, e: { r: 2, c: rng.e.c } });   // 模板原本只有两行表头，写入行后要扩范围
     const tplOut = xlsx.utils.book_new();
     xlsx.utils.book_append_sheet(tplOut, ts, tplWb.SheetNames[0]);
@@ -671,6 +673,7 @@ async function listOk(p, token) {
       '54 列模板列位错位：' + brief(tp && { leader: tp.leader, wlPole: tp.wlPole, outageRange: tp.outageRange }));
     need(tp.startDate === '2026-11-09 08:00:00' && tp.endDate === '2026-11-09 18:00:00',
       '只写到小时的时间未补全：' + brief({ s: tp.startDate, e: tp.endDate }));
+    need(tp.staffCount === '2', '人数应按施工人员名单重算为 2，实为 ' + tp.staffCount);
     return '回灌 ' + d.added + ' 条字段一致；模板 54 列落位正确';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
