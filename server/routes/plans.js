@@ -5,6 +5,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
 
 const xlsx = require('xlsx');
+const ExcelJS = require('exceljs');
 
 const app = require('../core/app');
 const upload = require('../core/upload');
@@ -88,17 +89,99 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     res.json({ ok: true, added: parsed.length });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
-app.get('/api/workPlans/export', (req, res) => {
-  const type = String(req.query.type || '');
-  const list = DB.workPlans.filter(p => !type || p.planType === type);
-  const aoa = [['作业计划名称', '工作内容', '计划类型', '关联项目', '作业班组', '班组长', '计划开始', '计划结束', '工作票类型', '电压等级', '变电站/线路', '工作负责人', '状态']];
-  list.forEach(p => aoa.push([p.name, p.content, p.planType, p.project, p.team, p.leader, p.startDate, p.endDate, p.ticketType, p.voltage, p.station, p.chargePerson, p.status]));
-  const wb = xlsx.utils.book_new();
-  xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(aoa), '作业计划');
-  const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  res.setHeader('Content-Disposition', 'attachment; filename="workPlans_export.xlsx"');
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.send(buf);
+// ---------- 导出：对齐原周报「周计划」文件（48 列 / 两行表头 / 三处分组表头） ----------
+const PLAN_XLSX_ROW1 = [
+  '序号', '作业计划名称', '作业类型', '作业专业', '省专业管理部门', '计划开始时间', '计划结束时间', '电压等级',
+  '变电站/线路', '作业地址', '作业内容', '工作票类型', '作业风险等级', '电网风险等级', '风险因素',
+  '作业建管单位（市）', '作业建管单位（县）', '作业实施（施工）单位（市）', '作业实施（施工）单位（县）',
+  '作业班组', '分包单位', '监理单位', '抄送单位', '工作负责人', '工作负责人联系方式',
+  '作业实施（施工）人员（不包含工作负责人）', '重特大人身事故风险', '风险管控措施', '作业人员（共多少人）',
+  '其中高处作业人员', '专责监护人', '到岗到位人员', '安全巡查人员', '作业资料审核负责人',
+  '高处作业、培训交底负责人', '队伍、人员准入检查负责人', '施工机具和安全工器具检查负责人',
+  '气体检测人员', '是否涉及机械施工', '当日计划工作量', '', '', '', '', '', '', '备注', ''
+];
+const PLAN_XLSX_ROW2 = [
+  '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
+  '', '', '', '', '', '', '', '', '', '', '', '', '', '',
+  '杆塔（基）', '10kV/35kV线路（km/单线）', '电缆（千米）', '环网柜（个）', '真空开关（个）', '变压器（个）',
+  '0.4/0.22kV线路（km/单线）', '停电范围', '时户数'
+];
+const PLAN_XLSX_COLS = [
+  8.83, 22.83, 12.83, 10.83, 16.83, 21.83, 21.83, 10.83, 18.83, 40.83, 27.83, 24.83, 14.83, 14.83, 40.83,
+  20.83, 20.83, 28.83, 28.83, 12.83, 19.83, 10.83, 10.83, 12.83, 20.83, 40.83, 20.83, 40.83, 22.83, 24.83,
+  12.83, 14.83, 14.83, 20.83, 26.83, 26.83, 32.83, 14.83, 18.83, 16.83, 26.83, 14.83, 14.83, 16.83, 14.83,
+  27.83, 21.83, 8.83
+];
+function planXlsxText(v) { return v == null ? '' : String(v); }
+// 数组字段（风险因素 / 分包单位 / 抄送单位）按「；」连接；字符串原样
+function planXlsxJoin(v) { return Array.isArray(v) ? v.filter(x => x !== null && x !== undefined && x !== '').map(String).join('；') : planXlsxText(v); }
+// 数量列：纯数字串输出为数字（与目标文件一致），其余原样；空值写空字符串
+function planXlsxNum(v) {
+  const s = planXlsxText(v).trim();
+  if (!s) return '';
+  return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : planXlsxText(v);
+}
+// 施工人员：有结构化名单（staff 数组带 name）按「姓名/电话；…」拼，否则用 staffText 原文
+function planXlsxStaff(p) {
+  if (Array.isArray(p.staff) && p.staff.length && p.staff.some(w => w && typeof w === 'object' && w.name)) {
+    return p.staff.filter(w => w && w.name).map(w => w.name + (w.phone ? '/' + w.phone : '')).join('；');
+  }
+  return planXlsxText(p.staffText);
+}
+function planXlsxRow(p, i) {
+  const charge = planXlsxText(p.chargePerson);
+  return [
+    i + 1, planXlsxText(p.name), planXlsxText(p.workType), planXlsxText(p.specialty), planXlsxText(p.dept),
+    planXlsxText(p.startDate), planXlsxText(p.endDate), planXlsxText(p.voltage), planXlsxText(p.station),
+    planXlsxText(p.address), planXlsxText(p.content), planXlsxText(p.ticketType), planXlsxText(p.riskLevel),
+    planXlsxText(p.gridRisk), planXlsxJoin(p.riskFactors), planXlsxText(p.buildCity), planXlsxText(p.buildCounty),
+    planXlsxText(p.execCity), planXlsxText(p.execCounty), planXlsxText(p.team), planXlsxJoin(p.subcontractors),
+    planXlsxText(p.supervisor), planXlsxJoin(p.ccUnits), charge, planXlsxText(p.chargePersonPhone),
+    planXlsxStaff(p), planXlsxText(p.majorRisk), planXlsxText(p.controlMeasures), planXlsxNum(p.staffCount),
+    planXlsxText(p.highStaff), planXlsxText(p.guardian), planXlsxText(p.arrivalPersons), planXlsxText(p.safetyPatrol),
+    // 四个「负责人」：库里无单独字段（chargePersons 恒空），按原表样本取工作负责人
+    charge, charge, charge, charge,
+    planXlsxText(p.gasTester), planXlsxText(p.machine),
+    planXlsxNum(p.wlPole), planXlsxNum(p.wlLine1035), planXlsxNum(p.wlCable), planXlsxNum(p.wlRing),
+    planXlsxNum(p.wlVacuum), planXlsxNum(p.wlTransformer), planXlsxNum(p.wlLine04),
+    planXlsxText(p.outageRange), planXlsxNum(p.outageHours)
+  ];
+}
+app.get('/api/workPlans/export', async (req, res) => {
+  try {
+    const type = String(req.query.type || '');
+    const list = DB.workPlans.filter(p => !type || p.planType === type);
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Sheet1');
+    ws.columns = PLAN_XLSX_COLS.map(w => ({ width: w }));
+    ws.addRow(PLAN_XLSX_ROW1);
+    ws.addRow(PLAN_XLSX_ROW2);
+    list.forEach((p, i) => ws.addRow(planXlsxRow(p, i)));
+    // 41 个合并：A1:AM2 逐列纵向合并（39 个）+ AN1:AT1 + AU1:AV1
+    for (let c = 1; c <= 39; c++) ws.mergeCells(1, c, 2, c);
+    ws.mergeCells(1, 40, 1, 46);
+    ws.mergeCells(1, 47, 1, 48);
+    // 与原表一致：全表细边框 + 自动换行 + 垂直居中，数据行行高 100
+    const lastRow = 2 + list.length;
+    for (let r = 1; r <= lastRow; r++) {
+      const row = ws.getRow(r);
+      if (r > 2) row.height = 100;
+      for (let c = 1; c <= 48; c++) {
+        const cell = row.getCell(c);
+        cell.font = { name: 'Calibri', size: 12 };
+        cell.alignment = { wrapText: true, vertical: 'middle' };
+        cell.border = {
+          top: { style: 'thin' }, left: { style: 'thin' },
+          bottom: { style: 'thin' }, right: { style: 'thin' }
+        };
+      }
+      row.commit();
+    }
+    const buf = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Disposition', 'attachment; filename="workPlans_export.xlsx"');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(Buffer.from(buf));
+  } catch (e) { res.status(500).json({ error: '导出失败：' + e.message }); }
 });
 
 // 周计划导入模板下载：assets/plan-import-template.xlsx 随代码分发（用户提供的原件）

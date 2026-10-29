@@ -14,6 +14,7 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
+const xlsx = require('xlsx');                                          // 读导出 xlsx 校验表头/合并
 const { buildStoreZip, unzipEntry } = require('../server/core/util');   // 造最小 docx／读产物用（跟服务端同一套 zip 实现）
 
 const ROOT = path.resolve(__dirname, '..');
@@ -591,6 +592,19 @@ async function listOk(p, token) {
     need(buf.length === local.length, '长度 ' + buf.length + ' ≠ 入仓原件 ' + local.length);
     need(buf.slice(0, 2).toString() === 'PK', '不是 xlsx（zip）文件');
     return buf.length + 'B';
+  });
+  await step('plans', '周计划导出 GET /api/workPlans/export（48 列 / 两行表头 / 41 合并 / sheet=Sheet1）', async () => {
+    const r = await fetch(base + '/api/workPlans/export', { headers: { Authorization: 'Bearer ' + token } });
+    need(r.status === 200, '状态码 ' + r.status);
+    need(/spreadsheetml\.sheet/.test(r.headers.get('content-type') || ''), 'Content-Type 非 xlsx');
+    const buf = Buffer.from(await r.arrayBuffer());
+    const wb = xlsx.read(buf, { type: 'buffer' });
+    need(wb.SheetNames.length === 1 && wb.SheetNames[0] === 'Sheet1', 'sheet 名应为 Sheet1，实为 ' + wb.SheetNames.join(','));
+    const ws = wb.Sheets.Sheet1;
+    need(ws['!ref'] && xlsx.utils.decode_range(ws['!ref']).e.c + 1 === 48, '列数应为 48，实为 ' + (ws['!ref'] ? xlsx.utils.decode_range(ws['!ref']).e.c + 1 : '空'));
+    need(Array.isArray(ws['!merges']) && ws['!merges'].length === 41, '合并区域应为 41 个，实为 ' + (ws['!merges'] ? ws['!merges'].length : 0));
+    need(String(ws.A1.v) === '序号' && String(ws.AN1.v) === '当日计划工作量' && String(ws.AN2.v) === '杆塔（基）', '表头文字不符');
+    return '48 列 / 41 合并 / ' + buf.length + 'B';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');
