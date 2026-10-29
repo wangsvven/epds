@@ -599,8 +599,7 @@ async function listOk(p, token) {
     need(/spreadsheetml\.sheet/.test(r.headers.get('content-type') || ''), 'Content-Type 非 xlsx');
     const buf = Buffer.from(await r.arrayBuffer());
     const wb = xlsx.read(buf, { type: 'buffer' });
-    need(wb.SheetNames[0] === 'Sheet1', '首个 sheet 应为 Sheet1，实为 ' + wb.SheetNames.join(','));
-    need(wb.SheetNames.length === 1 || (wb.SheetNames.length === 2 && wb.SheetNames[1] === '_选项'), '多余 sheet：' + wb.SheetNames.join(','));
+    need(wb.SheetNames.length === 1 && wb.SheetNames[0] === 'Sheet1', 'sheet 名应为 Sheet1，实为 ' + wb.SheetNames.join(','));
     const ws = wb.Sheets.Sheet1;
     need(ws['!ref'] && xlsx.utils.decode_range(ws['!ref']).e.c + 1 === 48, '列数应为 48，实为 ' + (ws['!ref'] ? xlsx.utils.decode_range(ws['!ref']).e.c + 1 : '空'));
     need(Array.isArray(ws['!merges']) && ws['!merges'].length === 41, '合并区域应为 41 个，实为 ' + (ws['!merges'] ? ws['!merges'].length : 0));
@@ -608,7 +607,8 @@ async function listOk(p, token) {
     const rows = xlsx.utils.decode_range(ws['!ref']).e.r + 1;
     const sheetXml = (unzipEntry(buf, 'xl/worksheets/sheet1.xml') || Buffer.from('')).toString();
     const dvCount = (sheetXml.match(/<dataValidation /g) || []).length;
-    need(dvCount >= (rows > 2 ? 9 : 0) && (rows > 2 || dvCount === 0), '下拉校验数量异常：' + dvCount + '（数据行 ' + (rows - 2) + '）');
+    need(dvCount === 7, '下拉校验应为 7 处（与原表一致），实为 ' + dvCount);
+    need(/sqref="H3:H1048576"/.test(sheetXml) && /35kV,10kV,0\.4kV/.test(sheetXml), '电压等级下拉与原表不一致');
     return '48 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / ' + buf.length + 'B';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {

@@ -147,35 +147,18 @@ function planXlsxRow(p, i) {
     planXlsxText(p.outageRange), planXlsxNum(p.outageHours)
   ];
 }
-// 导出表下拉选项：与周计划表单的下拉口径一致（单选字段做下拉；风险因素/分包单位/抄送单位为多选，
-// 单元格是「；」连接的多值，用列表校验会与既有值冲突，故不做）
-const PLAN_XLSX_OPTS = {
-  workType: ['配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程', '借工'],
-  specialty: ['运检', '营销'],
-  dept: ['设备部', '产业部'],
-  voltage: ['0.4kV', '10kV', '20kV', '35kV', '110kV', '220kV'],
-  ticketType: ['配电：配电第一种工作票', '配电：配电第二种工作票', '配电：低压工作票', '线路：线路第一种工作票', '线路：线路第二种工作票'],
-  riskLevel: ['三级', '四级', '五级'],
-  gridRisk: ['无', '一级', '二级', '三级'],
-  majorRisk: ['无', '有'],
-  machine: ['是', '否']
-};
-// col 为 1 基列号：C 作业类型 / D 作业专业 / E 省专业管理部门 / H 电压等级 / L 工作票类型 /
-// M 作业风险等级 / N 电网风险等级 / T 作业班组 / V 监理单位 / AA 重特大人身事故风险 / AM 是否涉及机械施工
+// 导出表下拉：与原「周计划」文件逐字对齐（7 处、内联选项、从第 3 行覆盖到末行）
+// 列位：C 作业类型 / D 作业专业 / E 省专业管理部门 / H 电压等级 / L 工作票类型 /
+//       M 作业风险等级 / N 电网风险等级。原表没有下拉的列一律不加。
 const PLAN_XLSX_DROPS = [
-  { col: 3, key: 'workType' }, { col: 4, key: 'specialty' }, { col: 5, key: 'dept' },
-  { col: 8, key: 'voltage' }, { col: 12, key: 'ticketType' }, { col: 13, key: 'riskLevel' },
-  { col: 14, key: 'gridRisk' }, { col: 20, key: 'team' }, { col: 22, key: 'supervisor' },
-  { col: 27, key: 'majorRisk' }, { col: 39, key: 'machine' }
+  { col: 3, list: ['配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程', '借工'] },
+  { col: 4, list: ['运检', '营销'] },
+  { col: 5, list: ['设备部', '产业部'] },
+  { col: 8, list: ['35kV', '10kV', '0.4kV'] },
+  { col: 12, list: ['配电：配电第一种工作票', '配电：配电第二种工作票', '配电：低压工作票', '线路：线路第一种工作票', '线路：线路第二种工作票'] },
+  { col: 13, list: ['三级', '四级', '五级'] },
+  { col: 14, list: ['无', '一级', '二级', '三级', '四级', '五级'] }
 ];
-function planXlsxOptions() {
-  const live = arr => (Array.isArray(arr) ? arr : []).filter(x => x && !x.deleted);
-  const names = arr => live(arr).map(x => String(x.name || '').trim()).filter(Boolean);
-  return Object.assign({}, PLAN_XLSX_OPTS, {
-    team: names(DB.teams),
-    supervisor: names((DB.units || []).filter(u => u.type === '监理单位'))
-  });
-}
 app.get('/api/workPlans/export', async (req, res) => {
   try {
     const type = String(req.query.type || '');
@@ -206,37 +189,17 @@ app.get('/api/workPlans/export', async (req, res) => {
       }
       row.commit();
     }
-    // 下拉选项：集中放在隐藏工作表 _选项（避免选项含逗号或超 255 字导致内联公式失效）
-    if (lastRow >= 3) {
-      const opts = planXlsxOptions();
-      const optWs = wb.addWorksheet('_选项');
-      optWs.state = 'hidden';
-      const refs = {};
-      let i = 0;
-      Object.keys(opts).forEach(key => {
-        const vals = (opts[key] || []).map(v => String(v == null ? '' : v)).filter(Boolean);
-        if (!vals.length) return;
-        i += 1;
-        optWs.getCell(1, i).value = key;
-        vals.forEach((v, j) => { optWs.getCell(2 + j, i).value = v; });
-        refs[key] = { col: i, count: vals.length };
+    // 下拉：与原表一致，内联选项 + 从第 3 行覆盖到末行（新增行也有下拉）
+    PLAN_XLSX_DROPS.forEach(d => {
+      const colL = ws.getColumn(d.col).letter;
+      ws.dataValidations.add(colL + '3:' + colL + '1048576', {
+        type: 'list',
+        allowBlank: true,
+        showInputMessage: true,
+        showErrorMessage: true,
+        formulae: ['"' + d.list.join(',') + '"']
       });
-      PLAN_XLSX_DROPS.forEach(d => {
-        const ref = refs[d.key];
-        if (!ref) return;
-        const colL = ws.getColumn(d.col).letter;
-        const optL = optWs.getColumn(ref.col).letter;
-        ws.dataValidations.add(colL + '3:' + colL + lastRow, {
-          type: 'list',
-          allowBlank: true,
-          showErrorMessage: true,
-          errorStyle: 'stop',
-          errorTitle: '请从下拉列表中选择',
-          error: '该单元格只能填下拉列表里的选项',
-          formulae: ['_选项!$' + optL + '$2:$' + optL + '$' + (1 + ref.count)]
-        });
-      });
-    }
+    });
     const buf = await wb.xlsx.writeBuffer();
     res.setHeader('Content-Disposition', 'attachment; filename="workPlans_export.xlsx"');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
