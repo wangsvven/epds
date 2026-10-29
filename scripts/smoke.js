@@ -654,7 +654,7 @@ async function listOk(p, token) {
       ts[xlsx.utils.encode_cell({ r: 2, c: C })] = { t: 's', v: String(v) };
     };
     put('作业计划名称', '冒烟模板列位计划'); put('作业类型', '配农网工程');
-    put('计划开始时间', '2026-11-09 08:00:00'); put('计划结束时间', '2026-11-09 18:00:00');
+    put('计划开始时间', '2026-11-09 08'); put('计划结束时间', '2026-11-09 18');   // 只写到小时也应接受
     put('班组长', '模板班组长'); put('杆塔（基）', '9'); put('停电范围', '模板停电范围');
     ts['!ref'] = xlsx.utils.encode_range({ s: rng.s, e: { r: 2, c: rng.e.c } });   // 模板原本只有两行表头，写入行后要扩范围
     const tplOut = xlsx.utils.book_new();
@@ -669,6 +669,8 @@ async function listOk(p, token) {
     const tp = (Array.isArray(got) ? got : (got.data || [])).find(p => p.name === '冒烟模板列位计划');
     need(tp && tp.leader === '模板班组长' && tp.wlPole === '9' && tp.outageRange === '模板停电范围',
       '54 列模板列位错位：' + brief(tp && { leader: tp.leader, wlPole: tp.wlPole, outageRange: tp.outageRange }));
+    need(tp.startDate === '2026-11-09 08:00:00' && tp.endDate === '2026-11-09 18:00:00',
+      '只写到小时的时间未补全：' + brief({ s: tp.startDate, e: tp.endDate }));
     return '回灌 ' + d.added + ' 条字段一致；模板 54 列落位正确';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {

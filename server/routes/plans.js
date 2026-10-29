@@ -75,7 +75,22 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     const cellList = (r, i) => (cellText(r, i) ? cellText(r, i).split(/[；;]/).map(s => s.trim()).filter(Boolean) : []);
     const col = (r, name) => (HEAD[name] === undefined ? '' : cellText(r, HEAD[name]));
     const colList = (r, name) => (HEAD[name] === undefined ? [] : cellList(r, HEAD[name]));
-    const DT_RE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/;
+    // 时间列：接受 YYYY-MM-DD、YYYY-MM-DD HH（小时）、也兼容带分秒的 YYYY-MM-DD HH:mm[:ss]；
+    // Excel 里把单元格设成日期/时间格式时读到的是序列号，这里一并换算。入库统一补全为 YYYY-MM-DD HH:mm:ss
+    const DT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?$/;
+    const pad2 = n => String(n).padStart(2, '0');
+    function normDT(v) {
+      let s = v;
+      if (typeof s === 'number' && isFinite(s)) {
+        // Excel 序列号（1900 日期系统，25569 = 1970-01-01）
+        const d = new Date(Math.round((s - 25569) * 86400000));
+        s = d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate()) + ' ' +
+            pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
+      }
+      const m = String(s == null ? '' : s).trim().match(DT_RE);
+      if (!m) return null;
+      return m[1] + '-' + m[2] + '-' + m[3] + ' ' + pad2(m[4] || 0) + ':' + pad2(m[5] || 0) + ':' + pad2(m[6] || 0);
+    }
     // 新格式没有「计划类型」列：按导入入口页签决定（周计划管理 / 月计划管理），默认周计划
     const wantType = String((req.query && req.query.planType) || '');
     rows.forEach((r, i) => {
@@ -83,12 +98,15 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       const rowNo = i + 1;
       if (NEW_LAYOUT) {
         const pName = col(r, '作业计划名称');
-        const start = col(r, '计划开始时间');
-        const end = col(r, '计划结束时间');
-        if (!pName && !start && !end) return; // 空行 / 第 2 行分组子表头
+        const startRaw = HEAD['计划开始时间'] === undefined ? '' : r[HEAD['计划开始时间']];
+        const endRaw = HEAD['计划结束时间'] === undefined ? '' : r[HEAD['计划结束时间']];
+        const start = normDT(startRaw);
+        const end = normDT(endRaw);
+        const blank = !pName && (startRaw == null || String(startRaw).trim() === '') && (endRaw == null || String(endRaw).trim() === '');
+        if (blank) return; // 空行 / 第 2 行分组子表头
         if (!pName) { errors.push('第' + rowNo + '行：作业计划名称不能为空'); return; }
-        if (!DT_RE.test(start)) { errors.push('第' + rowNo + '行：计划开始时间「' + (start || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss'); return; }
-        if (!DT_RE.test(end)) { errors.push('第' + rowNo + '行：计划结束时间「' + (end || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss'); return; }
+        if (!start) { errors.push('第' + rowNo + '行：计划开始时间「' + (String(startRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
+        if (!end) { errors.push('第' + rowNo + '行：计划结束时间「' + (String(endRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (end < start) { errors.push('第' + rowNo + '行：计划结束时间早于开始时间'); return; }
         parsed.push(planItem({
           name: pName,
