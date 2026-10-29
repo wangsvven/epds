@@ -609,7 +609,13 @@ async function listOk(p, token) {
     const dvCount = (sheetXml.match(/<dataValidation /g) || []).length;
     need(dvCount === 7, '下拉校验应为 7 处（与原表一致），实为 ' + dvCount);
     need(/sqref="H3:H1048576"/.test(sheetXml) && /35kV,10kV,0\.4kV/.test(sheetXml), '电压等级下拉与原表不一致');
-    return '48 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / ' + buf.length + 'B';
+    // 口径：scope 页签过滤（临时库无月计划 → scope=month 应为 0 条，未带 scope 至少 1 条）
+    const r3 = await fetch(base + '/api/workPlans/export?scope=month', { headers: { Authorization: 'Bearer ' + token } });
+    const wb3 = xlsx.read(Buffer.from(await r3.arrayBuffer()), { type: 'buffer' });
+    const rows3 = xlsx.utils.decode_range(wb3.Sheets.Sheet1['!ref']).e.r + 1;
+    need(rows3 === 2, 'scope=month 应为 0 条数据行，实为 ' + (rows3 - 2));
+    need(rows - 2 >= 1, '不带 scope 时应导出全部，实为 ' + (rows - 2));
+    return '48 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / scope 过滤 OK / ' + buf.length + 'B';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');

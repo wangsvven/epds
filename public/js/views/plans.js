@@ -1207,7 +1207,12 @@ const PlansView = {
     async function exportPlans() {
       try {
         const token = localStorage.getItem('erp_token');
-        const res = await fetch('/api/workPlans/export', { headers: { Authorization: 'Bearer ' + token } });
+        // 导出范围 = 当前页签 + 当前筛选条件（与列表所见一致）
+        const q = new URLSearchParams({ scope: tab.value });
+        ['startDate', 'endDate', 'name', 'content', 'team', 'leader', 'ticketType'].forEach(k => { if (filters[k]) q.set(k, filters[k]); });
+        if (filters.noProject) q.set('noProject', '1');
+        if (filters.projectScope && filters.projectScope.length) q.set('projectScope', filters.projectScope.join(','));
+        const res = await fetch('/api/workPlans/export?' + q.toString(), { headers: { Authorization: 'Bearer ' + token } });
         if (!res.ok) throw new Error('导出失败');
         const blob = await res.blob();
         const a = document.createElement('a');

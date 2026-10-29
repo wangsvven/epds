@@ -159,10 +159,44 @@ const PLAN_XLSX_DROPS = [
   { col: 13, list: ['三级', '四级', '五级'] },
   { col: 14, list: ['无', '一级', '二级', '三级', '四级', '五级'] }
 ];
+// 导出范围：与前端「计划管理」列表所见一致（页签 + 筛选条 + createdAt 倒序），
+// 口径逐条对应 public/js/views/plans.js 的 tabList / filtered / load()
+const PLAN_XLSX_SCOPES = {
+  week: p => p.planType === '周计划' && !['已归档', '已取消', '已执行', '已结算'].includes(p.status),
+  month: p => p.planType === '月计划' && !['已归档', '已取消', '已执行', '已结算'].includes(p.status),
+  archived: p => p.planType === '月计划' && p.status === '已归档',
+  executed: p => p.status === '已执行',
+  settled: p => p.status === '已结算',
+  canceled: p => p.planType === '周计划' && p.status === '已取消'
+};
+function planXlsxPick(q) {
+  const scopeFn = PLAN_XLSX_SCOPES[String(q.scope || '')];
+  const type = String(q.type || '');
+  const txt = k => String(q[k] == null ? '' : q[k]);
+  const startDate = txt('startDate'), endDate = txt('endDate');
+  const name = txt('name'), content = txt('content'), team = txt('team');
+  const leader = txt('leader'), ticketType = txt('ticketType');
+  const noProject = txt('noProject') === '1';
+  const scopeNames = txt('projectScope').split(',').filter(Boolean);
+  return DB.workPlans.filter(p => {
+    if (p.deleted) return false;                                   // 列表不含已删除，导出一致
+    if (scopeFn && !scopeFn(p)) return false;
+    if (!scopeFn && type && p.planType !== type) return false;      // 兼容旧口径 ?type=
+    if (scopeNames.length && !scopeNames.includes(p.project)) return false;
+    if (startDate && p.startDate < startDate) return false;
+    if (endDate && p.endDate > endDate) return false;
+    if (name && !String(p.name || '').includes(name)) return false;
+    if (content && !String(p.content || '').includes(content)) return false;
+    if (noProject && p.project) return false;
+    if (team && p.team !== team) return false;
+    if (leader && p.leader !== leader) return false;
+    if (ticketType && p.ticketType !== ticketType) return false;
+    return true;
+  }).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
 app.get('/api/workPlans/export', async (req, res) => {
   try {
-    const type = String(req.query.type || '');
-    const list = DB.workPlans.filter(p => !type || p.planType === type);
+    const list = planXlsxPick(req.query);
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Sheet1');
     ws.columns = PLAN_XLSX_COLS.map(w => ({ width: w }));
@@ -180,7 +214,7 @@ app.get('/api/workPlans/export', async (req, res) => {
       if (r > 2) row.height = 100;
       for (let c = 1; c <= 48; c++) {
         const cell = row.getCell(c);
-        cell.font = { name: 'Calibri', size: 12 };
+        cell.font = { name: '宋体', size: 12 };
         cell.alignment = { wrapText: true, vertical: 'middle' };
         cell.border = {
           top: { style: 'thin' }, left: { style: 'thin' },
