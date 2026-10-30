@@ -169,6 +169,8 @@ const PlansView = {
       if (tab.value === 'canceled') return p.planType === '周计划' && p.status === '已取消';
       return true;
     }));
+    // 月计划管理 / 已归档月计划 = 专用检修口径面板（views/monthPlans.js）
+    const isMonthTab = computed(() => tab.value === 'month' || tab.value === 'archived');
     const filtered = computed(() => tabList.value.filter(p => {
       // 项目详情跳转带入的项目范围（项目名 + 其子项目名），精确匹配，不受关键词模糊匹配影响
       if (filters.projectScope.length && !filters.projectScope.includes(p.project)) return false;
@@ -246,6 +248,21 @@ const PlansView = {
         await api.put('/api/workPlans/' + row.id, { status: '未执行' });
         ElementPlus.ElMessage.success('已恢复，计划已回到周计划管理');
         load();
+      } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
+    }
+    // 月计划在「已执行」页签里的两步流转（周计划不受影响：只在行 planType=月计划 时出现）
+    async function monthSettle(row) {
+      try {
+        await ElementPlus.ElMessageBox.confirm('确认将月计划「' + (row.maintDevice || row.name) + '」标记为已结算？', '提示', { type: 'warning' });
+        await api.put('/api/workPlans/' + row.id, { status: '已结算' });
+        ElementPlus.ElMessage.success('已标记为已结算'); load();
+      } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
+    }
+    async function monthReopen(row) {
+      try {
+        await ElementPlus.ElMessageBox.confirm('确认将该月计划退回未执行？', '提示', { type: 'warning' });
+        await api.put('/api/workPlans/' + row.id, { status: '未执行' });
+        ElementPlus.ElMessage.success('已退回未执行'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
     async function notePlan(row) {
@@ -1224,7 +1241,8 @@ const PlansView = {
         URL.revokeObjectURL(a.href);
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
-    function onTab() { page.value = 1; }
+    // 切页签同时重拉列表：月计划面板的状态流转会改 status，共用页签需拿到最新数据
+    function onTab() { page.value = 1; load(); }
     // 项目详情「查看月/周计划」：切到对应页签，并把列表限定在该项目（含其子项目）
     const scopeLabel = ref('');
     function clearProjectScope() { filters.projectScope = []; scopeLabel.value = ''; page.value = 1; }
@@ -1279,11 +1297,12 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
-    <div style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
+    <!-- 月计划管理走专用面板（见 views/monthPlans.js），不显示周计划的日计划日历 -->
+    <div v-if="tab !== 'month'" style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:17px;font-weight:600">日计划日历</div>
       </div>
@@ -1316,6 +1335,10 @@ const PlansView = {
         <span class="plan-scope-tip">由项目详情「查看月计划 / 查看周计划」带入，关闭标签可查看全部计划</span>
       </div>
 
+      <!-- 月计划管理 / 已归档月计划：检修口径专用面板 -->
+      <month-plans-panel v-if="isMonthTab" :tab="tab" :project-scope="filters.projectScope" />
+
+      <template v-else>
       <div class="plan-filters">
         <el-date-picker v-model="filters.startDate" type="date" placeholder="开始日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
         <el-date-picker v-model="filters.endDate" type="date" placeholder="结束日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
@@ -1372,10 +1395,16 @@ const PlansView = {
               <template v-else>
                 <el-button link type="warning" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
                 <el-button link type="warning" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
-                <el-button link type="warning" size="small" @click="execPlan(row)">执行</el-button>
-                <el-button link type="warning" size="small" @click="notePlan(row)">备注</el-button>
-                <el-button link type="danger" size="small" @click="cancelPlan(row)">取消</el-button>
+                <template v-if="row.planType === '月计划' && row.status === '已执行'">
+                  <el-button link type="primary" size="small" @click="monthSettle(row)">标记已结算</el-button>
+                  <el-button link type="info" size="small" @click="monthReopen(row)">退回未执行</el-button>
+                </template>
+                <template v-else>
+                  <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
+                  <el-button link type="warning" size="small" @click="execPlan(row)">执行</el-button>
+                  <el-button link type="warning" size="small" @click="notePlan(row)">备注</el-button>
+                  <el-button link type="danger" size="small" @click="cancelPlan(row)">取消</el-button>
+                </template>
               </template>
             </div>
             <el-button v-else-if="canWrite('planQuantities')" link type="primary" size="small" @click="openQuantities(row)">填写施工量</el-button>
@@ -1432,6 +1461,7 @@ const PlansView = {
         <el-button size="small" :disabled="page <= 1" @click="page = page - 1">上一页</el-button>
         <el-button size="small" :disabled="page >= Math.max(1, Math.ceil(filtered.length / pageSize))" @click="page = page + 1">下一页</el-button>
       </div>
+      </template>
     </div>
 
     <el-dialog :title="(dlg.editingId ? '编辑' : '新增') + (dlg.form && dlg.form.planType === '月计划' ? '月计划' : '周计划')" v-model="dlg.visible" width="min(1180px, 94%)" top="4vh">

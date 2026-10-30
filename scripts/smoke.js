@@ -524,6 +524,16 @@ async function listOk(p, token) {
     return sandbox.window.PlanNo;
   })();
 
+  /* ---------- 月计划判重口径（纯函数与前端共用） ---------- */
+  const monthCalc = (() => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'monthPlans.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    return sandbox.window.MonthPlanCalc;
+  })();
+
   await step('plans', '编号规则：勘察按月取最大流水 +1，跨月归零', async () => {
     const ym = '202610';
     const plans = [
@@ -583,6 +593,53 @@ async function listOk(p, token) {
     need(one.project === '冒烟测试项目', 'detail.project 不匹配');
     return 'id=' + d.id;
   });
+  await step('plans', '月计划 CRUD 与状态流转（检修口径字段往返，流转只改 status）', async () => {
+    const body = {
+      planType: '月计划', status: '未执行', name: '冒烟月计划', maintUnit: '冒烟检修单位', areaStation: '冒烟供电所',
+      project: '冒烟工程', maintDevice: '10kV冒烟线01号杆', voltage: '10kV', deviceType: '线路', workType: '生产检修改造', leader: '小王',
+      outageStart: '2026-11-11 08:00:00', outageEnd: '2026-11-11 18:00:00',
+      workStart: '2026-11-11 08:30:00', workEnd: '2026-11-11 17:30:00',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-11 18:00:00'
+    };
+    const d = needOk(await api('POST', '/api/workPlans', { token, body }), 'workPlans POST 月计划');
+    need(d && d.id, '响应缺少 id');
+    const one = needOk(await api('GET', '/api/workPlans/' + d.id, { token }), '月计划详情');
+    need(one.planType === '月计划', 'planType 未保存：' + one.planType);
+    ['maintUnit', 'areaStation', 'maintDevice', 'deviceType', 'outageStart', 'outageEnd', 'workStart', 'workEnd'].forEach(k => {
+      need(one[k] === body[k], k + ' 未保存：' + one[k]);
+    });
+    for (const st of ['已执行', '已结算', '未执行']) {
+      needOk(await api('PUT', '/api/workPlans/' + d.id, { token, body: { status: st } }), '状态流转 → ' + st);
+      const cur = needOk(await api('GET', '/api/workPlans/' + d.id, { token }), '流转后详情');
+      need(cur.status === st, '状态应为 ' + st + '，实为 ' + cur.status);
+      need(cur.maintDevice === body.maintDevice && cur.outageStart === body.outageStart, '状态流转改动了其他字段');
+    }
+    needOk(await api('DELETE', '/api/workPlans/' + d.id, { token }), '删除月计划');
+    return '新增 → 已执行 → 已结算 → 未执行 → 删除';
+  });
+
+  await step('plans', '月计划导入判重口径（设备+停电开始；含已入库与文件内自重复）', async () => {
+    const existing = [
+      { maintDevice: 'A', outageStart: '2026-11-01 08:00:00' },
+      { maintDevice: 'B', outageStart: '2026-11-02 09:00:00' },
+      { maintDevice: 'E', outageStart: '2027-02-01 08:00:00' }
+    ];
+    const parsed = [
+      { maintDevice: 'A', outageStart: '2026-11-01 08:00:00', __row: 2 },
+      { maintDevice: 'C', outageStart: '2026-11-03 08:00:00', __row: 3 },
+      { maintDevice: 'C', outageStart: '2026-11-03 08:00:00', __row: 4 },
+      { maintDevice: 'A', outageStart: '2026-11-01 09:00:00', __row: 5 },
+      { maintDevice: 'E', outageStart: '2027-02-01 08:00:00', __row: 6 }
+    ];
+    monthCalc.judge(parsed, existing, '2026');
+    need(parsed[0].verdict === '疑似重复（与已入库第 1 条撞键）', '已入库撞键判定错：' + parsed[0].verdict);
+    need(parsed[1].verdict === '新增', '首条不应判重：' + parsed[1].verdict);
+    need(parsed[2].verdict === '疑似重复（与本文件第 3 行重复）', '文件内自重复判定错：' + parsed[2].verdict);
+    need(parsed[3].verdict === '新增', '停电开始不同不应判重：' + parsed[3].verdict);
+    need(parsed[4].verdict === '新增', '跨导入年份不应判重：' + parsed[4].verdict);
+    return '已入库 1 / 新增 3 / 自重复 1';
+  });
+
   await step('plans', '周计划导入模板下载 GET /api/workPlans/import-template', async () => {
     const r = await fetch(base + '/api/workPlans/import-template', { headers: { Authorization: 'Bearer ' + token } });
     need(r.status === 200, '状态码 ' + r.status);

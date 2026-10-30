@@ -916,6 +916,35 @@
   .pp-total { font-size:12.5px; color:var(--text-3); }
   .pp-size { width:110px; }
   .plan-pager .el-button { margin-left:0; }
+  /* ===== 月计划管理面板（检修口径） ===== */
+  .mp-kw { width:200px; }
+  .mp-year { gap:4px; }
+  .mp-year-sel { width:92px; }
+  .mp-time { display:inline-block; max-width:100%; white-space:nowrap; font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:-0.2px; color:var(--text-2); overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+  .mp-acts { display:flex; align-items:center; gap:2px; }
+  .mp-badge { flex:0 0 auto; font-size:11px; line-height:1.6; padding:0 7px; border-radius:10px; white-space:nowrap;
+    color:var(--text-2); background:var(--surface-3); border:1px solid var(--line); margin-right:4px; }
+  .mp-b-new { color:#0a66c2; background:rgba(10,102,194,.10); border-color:rgba(10,102,194,.32); }
+  .mp-b-run { color:#b26a00; background:rgba(178,106,0,.12); border-color:rgba(178,106,0,.32); }
+  .mp-b-done { color:#1a7f37; background:rgba(26,127,55,.12); border-color:rgba(26,127,55,.32); }
+  .mp-b-can { color:#c62828; background:rgba(198,40,40,.10); border-color:rgba(198,40,40,.32); }
+  .mp-imp-sum { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px; margin-bottom:10px; font-size:13px; color:var(--text-2); }
+  .mp-imp-sum b { font-weight:600; }
+  .mp-imp-sum b.ok { color:#1a7f37; }
+  .mp-imp-sum b.dup { color:#b26a00; }
+  .mp-imp-file { font-size:12px; color:var(--text-3); }
+  .mp-v-new { color:#1a7f37; font-size:13px; }
+  .mp-v-dup { color:#b26a00; font-size:13px; }
+  .mp-range { display:flex; align-items:center; gap:6px; width:100%; }
+  .mp-range-sep { font-size:12.5px; color:var(--text-3); white-space:nowrap; }
+  html.dark .mp-b-new { color:#66b2ff; }
+  html.dark .mp-b-run { color:#ffb340; }
+  html.dark .mp-b-done { color:#5ed37e; }
+  html.dark .mp-b-can { color:#ff7b72; }
+  html.dark .mp-v-new { color:#5ed37e; }
+  html.dark .mp-v-dup { color:#ffb340; }
+  html.dark .mp-imp-sum b.ok { color:#5ed37e; }
+  html.dark .mp-imp-sum b.dup { color:#ffb340; }
   /* 施工资料弹窗·文件表：空态文字按正常行距换行（EP 默认 .el-table__empty-text 行高 60px，窄屏换行后会出现大空档） */
   .mat-file-table .el-table__empty-text { line-height: 1.7; padding: 6px 0; }
   /* 现场勘察记录编辑器：顶部只读信息 + 两列表单（窄屏单列）+ 危险点卡片 */
@@ -1100,6 +1129,8 @@
     .pf-input, .pf-select, .pf-select-wide { flex:1 1 auto; width:auto; min-width:0; }
     .plan-pager { justify-content:space-between; }
     .pp-size { width:96px; }
+    .mp-acts { flex-wrap:wrap; }
+    .mp-year { width:auto; }
   }
   /* ===== 日期时间选择器（计划开始/结束时间，对齐原系统） ===== */
   .pdt { position:relative; width:100%; }
@@ -1350,6 +1381,7 @@
   <script src="/js/views/users.js"></script>
   <script src="/js/views/projects.js"></script>
   <script src="/js/views/plans.js"></script>
+  <script src="/js/views/monthPlans.js"></script>
   <script src="/js/views/actualWorks.js"></script>
   <script src="/js/main.js"></script>
 </body>

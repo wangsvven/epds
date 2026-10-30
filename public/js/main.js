@@ -342,6 +342,7 @@ app.component('Outbounds', Outbounds);
 app.component('ArrivalStats', ArrivalStats);
 
 app.component('PlanDateTime', PlanDateTime);
+app.component('MonthPlansPanel', MonthPlansPanel);
 app.component('PlansView', PlansView);
 app.component('ActualConstructionView', ActualConstructionView);
 app.mount('#app');
