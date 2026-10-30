@@ -593,20 +593,26 @@ async function listOk(p, token) {
     need(one.project === '冒烟测试项目', 'detail.project 不匹配');
     return 'id=' + d.id;
   });
-  await step('plans', '月计划 CRUD 与状态流转（检修口径字段往返，流转只改 status）', async () => {
+  await step('plans', '月计划 CRUD 与状态流转（22 字段往返，流转只改 status）', async () => {
     const body = {
-      planType: '月计划', status: '未执行', name: '冒烟月计划', maintUnit: '冒烟检修单位', areaStation: '冒烟供电所',
-      project: '冒烟工程', maintDevice: '10kV冒烟线01号杆', voltage: '10kV', deviceType: '线路', workType: '生产检修改造', leader: '小王',
-      outageStart: '2026-11-11 08:00:00', outageEnd: '2026-11-11 18:00:00',
-      workStart: '2026-11-11 08:30:00', workEnd: '2026-11-11 17:30:00',
-      startDate: '2026-11-11 08:00:00', endDate: '2026-11-11 18:00:00'
+      planType: '月计划', status: '未执行', name: '10kV冒烟线01号杆', areaStation: '冒烟供电所',
+      opsUnit: '冒烟运维中心', maintUnit: '冒烟检修单位', project: '冒烟工程', projectName: '冒烟工程项目',
+      maintDevice: '10kV冒烟线01号杆', voltage: '10kV', deviceType: '配网主线',
+      outageStart: '2026-11-11 08:00:00', outageEnd: '2026-11-11 16:00:00',
+      workTime: '11月11日-11月11日08:30-15:30', workType: '配农网工程',
+      maintContent: '更换绝缘子', affectArea: '冒烟村 1-3 组', transformerCount: '12', outageHouseholds: 96,
+      importantUsers: '无', gridRisk: '三级', riskLevel: 'IV', outageCount2m: '1', outageCountYear: '4',
+      planNote: '冒烟备注', leader: '小王',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-11 16:00:00'
     };
     const d = needOk(await api('POST', '/api/workPlans', { token, body }), 'workPlans POST 月计划');
     need(d && d.id, '响应缺少 id');
     const one = needOk(await api('GET', '/api/workPlans/' + d.id, { token }), '月计划详情');
     need(one.planType === '月计划', 'planType 未保存：' + one.planType);
-    ['maintUnit', 'areaStation', 'maintDevice', 'deviceType', 'outageStart', 'outageEnd', 'workStart', 'workEnd'].forEach(k => {
-      need(one[k] === body[k], k + ' 未保存：' + one[k]);
+    ['opsUnit', 'maintUnit', 'project', 'projectName', 'maintDevice', 'voltage', 'deviceType', 'outageStart', 'outageEnd',
+      'workTime', 'workType', 'maintContent', 'affectArea', 'transformerCount', 'importantUsers', 'gridRisk', 'riskLevel',
+      'outageCount2m', 'outageCountYear', 'planNote', 'leader'].forEach(k => {
+      need(String(one[k]) === String(body[k]), k + ' 未保存：' + one[k]);
     });
     for (const st of ['已执行', '已结算', '未执行']) {
       needOk(await api('PUT', '/api/workPlans/' + d.id, { token, body: { status: st } }), '状态流转 → ' + st);
@@ -615,7 +621,40 @@ async function listOk(p, token) {
       need(cur.maintDevice === body.maintDevice && cur.outageStart === body.outageStart, '状态流转改动了其他字段');
     }
     needOk(await api('DELETE', '/api/workPlans/' + d.id, { token }), '删除月计划');
-    return '新增 → 已执行 → 已结算 → 未执行 → 删除';
+    return '22 字段往返 + 新增 → 已执行 → 已结算 → 未执行 → 删除';
+  });
+
+  await step('plans', '月计划表单联动：工作时间同月/跨月生成 + 停电时户数', async () => {
+    const same = monthCalc.genWorkTime('2026-11-11 08:00:00', '2026-11-11 16:00:00');
+    need(same === '11月11日-11月11日08:30-15:30', '同月生成错：' + same);
+    const cross = monthCalc.genWorkTime('2026-10-31 22:00:00', '2026-11-01 06:00:00');
+    need(cross === '10月31日-11月1日22:30-05:30', '跨月生成错：' + cross);
+    const months = (cross.match(/(\d+)月/g) || []).map(x => Number(x.replace('月', '')));
+    need(months.length === 2 && months.every(m => m >= 1 && m <= 12), '跨月拼出非法月份：' + cross + ' → ' + months.join(','));
+    need(monthCalc.hours('2026-11-11 08:00', '2026-11-11 16:00') === 8, '时长应为 8 小时');
+    need(monthCalc.households(12, '2026-11-11 08:00', '2026-11-11 16:00') === 96, '时户数应为 96');
+    need(monthCalc.households(3, '2026-11-11 08:00', '2026-11-11 11:30') === 11, '3×3.5 → 11（四舍五入）');
+    need(monthCalc.households('', '2026-11-11 08:00', '2026-11-11 16:00') === '', '配变数为空应存空');
+    return same + ' / ' + cross + ' / 96';
+  });
+
+  await step('plans', '月计划必填校验（4 项必填 + 结束须晚于开始）', async () => {
+    const empty = monthCalc.validate({});
+    need(empty.maintDevice === '请填写检修设备', '检修设备必填未拦下');
+    need(empty.workType === '请选择检修类型', '检修类型必填未拦下');
+    need(empty.outageStart === '请选择计划停电开始时间', '停电开始必填未拦下');
+    need(empty.outageEnd === '请选择计划停电结束时间', '停电结束必填未拦下');
+    const back = monthCalc.validate({
+      maintDevice: 'X', workType: '配农网工程',
+      outageStart: '2026-11-11 16:00:00', outageEnd: '2026-11-11 08:00:00'
+    });
+    need(back.outageEnd === '计划停电结束时间须晚于开始时间', '结束早于开始未拦下：' + back.outageEnd);
+    const pass = monthCalc.validate({
+      maintDevice: 'X', workType: '配农网工程',
+      outageStart: '2026-11-11 08:00:00', outageEnd: '2026-11-11 16:00:00'
+    });
+    need(Object.values(pass).every(v => !v), '合法表单不应报错');
+    return '4 项必填 + 时序校验 OK';
   });
 
   await step('plans', '月计划导入判重口径（设备+停电开始；含已入库与文件内自重复）', async () => {
