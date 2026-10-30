@@ -116,6 +116,15 @@ const DocumentsView = {
     /* 各分组可独立展开（互不影响） */
     const libOpen = reactive({ rules: false, tech: false, safety: false, hospitals: false, emergency: false });
     const rules = ref([]);
+    const rulePage = ref(1);
+    const rulePageSize = ref(10);
+    const rulePaged = computed(() => rules.value.slice((rulePage.value - 1) * rulePageSize.value, rulePage.value * rulePageSize.value));
+    /* 规则列表变短（删除末页最后一条）时把页码钳回最大页，避免停在空白页 */
+    watch(() => rules.value.length, () => {
+      const size = rulePageSize.value || 10;
+      const maxP = Math.max(1, Math.ceil(rules.value.length / size));
+      if (rulePage.value > maxP) rulePage.value = maxP;
+    });
     const ruleDlg = reactive({ visible: false, editing: false, busy: false, id: '', workType: '', category: '', keywords: '', techId: '', techName: '', techIds: [], safetyId: '', safetyName: '', safetyIds: [] });
     const ruleImportInput = ref(null);
     const rulePreview = reactive({ visible: false, busy: false, rows: [], errors: [] });
@@ -612,7 +621,7 @@ const DocumentsView = {
     return {
       docs, docTab, activeCat, catCount,
       wt, wtHazardOpen, wtHazards, loadWt, toggleWtHazards,
-      lib, libOpen, rules, ruleDlg, ruleImportInput, rulePreview,
+      lib, libOpen, rules, ruleDlg, ruleImportInput, rulePreview, rulePage, rulePageSize, rulePaged,
       loadLib, loadRules, toggleLib, openRuleAdd, openRuleEdit, submitRule, removeRule,
       measures, meaDlg, measureLabel, openMeaAdd, openMeaEdit, submitMea, removeMea, meaView, openMeaView, meaViewBlocks, meaInsertTab,
       defaultMea, loadDefaultMeta, clearAllMeasures, loadDefaultMeasures, defaultMeaTip,
@@ -749,7 +758,7 @@ const DocumentsView = {
                         </div>
                       </div>
 
-                      <el-table class="flat-table" :data="rules" empty-text="暂无数据" style="width:100%">
+                      <el-table class="flat-table" :data="rulePaged" empty-text="暂无数据" style="width:100%">
                         <el-table-column prop="workType" label="作业类型" min-width="130" show-overflow-tooltip />
                         <el-table-column label="规则" min-width="170">
                           <template #default="{row}">
@@ -780,6 +789,15 @@ const DocumentsView = {
                           </div>
                         </template>
                       </el-table>
+                      <div v-if="rules.length" class="rule-pager">
+                        <span class="rule-total">共 {{ rules.length }} 条</span>
+                        <el-pagination background layout="prev, pager, next"
+                          :total="rules.length" :page-size="rulePageSize" :current-page="rulePage"
+                          @current-change="p=>rulePage=p" />
+                        <el-select :model-value="rulePageSize" size="small" style="width:104px" @change="n=>{rulePageSize=n;rulePage=1}">
+                          <el-option v-for="n in [10,20,50]" :key="n" :label="n + ' 条/页'" :value="n" />
+                        </el-select>
+                      </div>
                     </div>
                   </template>
 
