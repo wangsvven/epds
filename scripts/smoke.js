@@ -638,7 +638,7 @@ async function listOk(p, token) {
     return same + ' / ' + cross + ' / 96';
   });
 
-  await step('plans', '月计划必填校验（4 项必填 + 结束须晚于开始）', async () => {
+  await step('plans', '月计划必填校验（4 项必填 + 结束不得早于开始）', async () => {
     const empty = monthCalc.validate({});
     need(empty.maintDevice === '请填写检修设备', '检修设备必填未拦下');
     need(empty.workType === '请选择检修类型', '检修类型必填未拦下');
@@ -648,7 +648,12 @@ async function listOk(p, token) {
       maintDevice: 'X', workType: '配农网工程',
       outageStart: '2026-11-11 16:00:00', outageEnd: '2026-11-11 08:00:00'
     });
-    need(back.outageEnd === '计划停电结束时间须晚于开始时间', '结束早于开始未拦下：' + back.outageEnd);
+    need(back.outageEnd === '计划停电结束时间不能早于开始时间', '结束早于开始未拦下：' + back.outageEnd);
+    const same = monthCalc.validate({
+      maintDevice: 'X', workType: '配农网工程',
+      outageStart: '2026-11-11 16:00:00', outageEnd: '2026-11-11 16:00:00'
+    });
+    need(same.outageEnd === '', '结束等于开始应允许（≥），实为：' + same.outageEnd);
     const pass = monthCalc.validate({
       maintDevice: 'X', workType: '配农网工程',
       outageStart: '2026-11-11 08:00:00', outageEnd: '2026-11-11 16:00:00'

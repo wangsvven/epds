@@ -2189,7 +2189,12 @@ const PlanDateTime = {
   props: {
     modelValue: { type: String, default: '' },
     placeholder: { type: String, default: '请选择日期' },
-    disabled: { type: Boolean, default: false }
+    disabled: { type: Boolean, default: false },
+    // 最小可选值：早于它的日期在日历上禁用（如结束时间不能早于开始时间）
+    min: { type: String, default: '' },
+    // 面板默认带出的值：modelValue 为空时，打开面板即定位并选中它（日期优先同一天）
+    defaultFrom: { type: String, default: '' },
+    minTip: { type: String, default: '所选时间不能早于允许的最早时间' }
   },
   emits: ['update:modelValue'],
   setup(props, { emit }) {
@@ -2234,6 +2239,20 @@ const PlanDateTime = {
     const text = computed(() => {
       const p = parse(props.modelValue);
       return p ? p.y + '-' + pad(p.m) + '-' + pad(p.d) + ' ' + pad(p.h) + ':' + pad(p.mi) : '';
+    });
+    // 最小可选值（下游用它挡「结束早于开始」）
+    const minP = computed(() => parse(props.min));
+    const numOf = o => o.y * 100000000 + o.m * 1000000 + o.d * 10000 + o.h * 100 + (o.mi || 0);
+    const dayNum = o => o.y * 10000 + o.m * 100 + o.d;
+    function isDayDisabled(c) {
+      const p = minP.value;
+      if (!p) return false;
+      return dayNum(c) < dayNum(p);
+    }
+    const selInvalid = computed(() => {
+      const p = minP.value;
+      if (!p || !sel.has) return false;
+      return numOf(sel) < numOf(p);
     });
     const cells = computed(() => {
       // 月首偏移按全局「星期开始于」旋转：lead = (当月1号周几 - weekStart + 7) % 7
@@ -2332,7 +2351,7 @@ const PlanDateTime = {
     }
     function doOpen() {
       if (props.disabled) return;
-      const p = parse(props.modelValue);
+      const p = parse(props.modelValue) || parse(props.defaultFrom);
       if (p) Object.assign(sel, p, { has: true });
       else Object.assign(sel, { y: 0, m: 0, d: 0, h: 0, mi: 0, has: false });
       const t = new Date();
@@ -2354,6 +2373,10 @@ const PlanDateTime = {
     function close() { open.value = false; unbindEvents(); }
     function toggle() { open.value ? close() : doOpen(); }
     function pickDay(c) {
+      if (isDayDisabled(c)) {
+        ElementPlus.ElMessage.warning(props.minTip);
+        return;
+      }
       sel.y = c.y; sel.m = c.m; sel.d = c.d; sel.has = true;
       if (c.m !== view.m || c.y !== view.y) { view.y = c.y; view.m = c.m; }
     }
@@ -2366,6 +2389,7 @@ const PlanDateTime = {
     }
     function confirm() {
       if (!sel.has) return;
+      if (selInvalid.value) { ElementPlus.ElMessage.warning(props.minTip); return; }
       emit('update:modelValue', sel.y + '-' + pad(sel.m) + '-' + pad(sel.d) + ' ' + pad(sel.h) + ':' + pad(sel.mi));
       close();
     }
@@ -2378,7 +2402,7 @@ const PlanDateTime = {
     function clear() { emit('update:modelValue', ''); }
     onBeforeUnmount(unbindEvents);
 
-    return { pad, WEEK, HOURS_REP, MINUTES_REP, open, triggerEl, panelEl, colH, colM, pos, view, sel, text, cells, isToday, isSel, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear, onColScroll, pickCell };
+    return { pad, WEEK, HOURS_REP, MINUTES_REP, open, triggerEl, panelEl, colH, colM, pos, view, sel, text, cells, isToday, isSel, isDayDisabled, selInvalid, move, toggle, close, pickDay, pickTime, confirm, pickNow, clear, onColScroll, pickCell };
   },
   template: `
   <div class="pdt" :class="{ 'is-open': open }">
@@ -2404,7 +2428,7 @@ const PlanDateTime = {
             </div>
             <div class="pdt-week"><span v-for="w in WEEK" :key="w">{{ w }}</span></div>
             <div class="pdt-grid">
-              <div v-for="(c, i) in cells" :key="i" class="pdt-day" :class="{ out: !c.cur, today: isToday(c), on: isSel(c) }" @click="pickDay(c)">{{ c.d }}</div>
+              <div v-for="(c, i) in cells" :key="i" class="pdt-day" :class="{ out: !c.cur, today: isToday(c), on: isSel(c), dis: isDayDisabled(c) }" @click="pickDay(c)">{{ c.d }}</div>
             </div>
           </div>
           <div class="pdt-time">
@@ -2421,8 +2445,9 @@ const PlanDateTime = {
           </div>
         </div>
         <div class="pdt-foot">
-          <button type="button" class="pdt-now" @click="pickNow">此刻</button>
-          <button type="button" class="pdt-ok" :disabled="!sel.has" @click="confirm">确定</button>
+          <button v-if="!selInvalid" type="button" class="pdt-now" @click="pickNow">此刻</button>
+          <span v-else class="pdt-warn">{{ minTip }}</span>
+          <button type="button" class="pdt-ok" :disabled="!sel.has || selInvalid" @click="confirm">确定</button>
         </div>
       </div>
     </teleport>

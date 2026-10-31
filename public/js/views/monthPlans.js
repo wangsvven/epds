@@ -105,7 +105,7 @@ const MonthPlanCalc = {
     if (!String(g.workType || '').trim()) out.workType = '请选择检修类型';
     if (!s) out.outageStart = '请选择计划停电开始时间';
     if (!e) out.outageEnd = '请选择计划停电结束时间';
-    if (s && e && e <= s) out.outageEnd = '计划停电结束时间须晚于开始时间';
+    if (s && e && e < s) out.outageEnd = '计划停电结束时间不能早于开始时间';
     return out;
   },
   keyOf(o) { return String((o && o.maintDevice) || '').trim() + '||' + String((o && o.outageStart) || '').trim(); }
@@ -259,7 +259,30 @@ const MonthPlansPanel = {
       if (!workTimeTouched.value) f.workTime = MonthPlanCalc.genWorkTime(f.outageStart, f.outageEnd);
       f.outageHouseholds = MonthPlanCalc.households(f.transformerCount, f.outageStart, f.outageEnd);
       errors.outageStart = ''; errors.outageEnd = '';
+      if (timeInvalid.value) {
+        errors.outageEnd = '计划停电结束时间不能早于开始时间';
+        warn('计划停电结束时间不能早于开始时间');
+      }
     }
+    // 结束时间是否早于开始时间（早于 → 锁提交、面板内也锁确定）
+    const timeInvalid = computed(() => {
+      const f = dlg.form;
+      if (!f) return false;
+      const s = String(f.outageStart || '').trim();
+      const e = String(f.outageEnd || '').trim();
+      return !!(s && e && e < s);
+    });
+    // 结束时间面板的默认带出值：开始时间 + 2 小时，跨天则压回同日 23:59
+    const outageEndHint = computed(() => {
+      const f = dlg.form;
+      const p = f && MonthPlanCalc.parse(f.outageStart);   // 返回 Date
+      if (!p || isNaN(p.getTime())) return '';
+      const p2 = MonthPlanCalc.pad2;
+      const t = new Date(p.getTime() + 2 * 3600 * 1000);
+      const sameDay = t.getFullYear() === p.getFullYear() && t.getMonth() === p.getMonth() && t.getDate() === p.getDate();
+      if (!sameDay) return p.getFullYear() + '-' + p2(p.getMonth() + 1) + '-' + p2(p.getDate()) + ' 23:59';
+      return t.getFullYear() + '-' + p2(t.getMonth() + 1) + '-' + p2(t.getDate()) + ' ' + p2(t.getHours()) + ':' + p2(t.getMinutes());
+    });
     function onWorkTimeInput() {
       workTimeTouched.value = String(dlg.form.workTime || '').trim() !== '';
     }
@@ -267,8 +290,10 @@ const MonthPlansPanel = {
       dlg.form.outageHouseholds = MonthPlanCalc.households(dlg.form.transformerCount, dlg.form.outageStart, dlg.form.outageEnd);
     }
     const durationText = computed(() => {
-      const h = MonthPlanCalc.hours(dlg.form && dlg.form.outageStart, dlg.form && dlg.form.outageEnd);
-      return h ? h.toFixed(1) + ' 小时' : '—';
+      const f = dlg.form;
+      if (!f || !f.outageStart || !f.outageEnd) return '—';
+      const h = MonthPlanCalc.hours(f.outageStart, f.outageEnd);
+      return h.toFixed(1) + ' 小时';
     });
     const householdsText = computed(() => {
       const v = dlg.form && dlg.form.outageHouseholds;
@@ -435,7 +460,7 @@ const MonthPlansPanel = {
       list, loading, filters, page, pageSize, importYear, yearOpts,
       areaOpts, maintUnitOpts, leaderOpts, workTypeOpts, deviceTypeOpts, voltageOpts, projectOpts,
       tabList, filtered, paged, maxPage, idxBase, fmtRange, badgeClass,
-      dlg, errors, derived, workTimeTouched, durationText, householdsText,
+      dlg, errors, derived, workTimeTouched, durationText, householdsText, timeInvalid, outageEndHint,
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
       exportXlsx, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
@@ -569,7 +594,9 @@ const MonthPlansPanel = {
           <plan-date-time v-model="dlg.form.outageStart" placeholder="开始时间" :disabled="dlg.readonly" @update:model-value="onOutageChange" />
         </el-form-item>
         <el-form-item label="计划停电结束时间" required :error="errors.outageEnd">
-          <plan-date-time v-model="dlg.form.outageEnd" placeholder="结束时间" :disabled="dlg.readonly" @update:model-value="onOutageChange" />
+          <plan-date-time v-model="dlg.form.outageEnd" placeholder="结束时间" :disabled="dlg.readonly"
+            :min="dlg.form.outageStart" :default-from="outageEndHint"
+            min-tip="计划停电结束时间不能早于开始时间" @update:model-value="onOutageChange" />
         </el-form-item>
         <div class="mp-dur-row"><div class="mp-dur">停电时长 <b>{{ durationText }}</b></div></div>
         <el-form-item class="mp-auto-row">
@@ -634,7 +661,7 @@ const MonthPlansPanel = {
           <span class="mp-foot-tip">带 <b>*</b> 为必填项</span>
           <div class="mp-foot-btns">
             <el-button @click="dlg.visible=false">{{ dlg.readonly ? '关闭' : '取消' }}</el-button>
-            <el-button v-if="!dlg.readonly" type="primary" :loading="dlg.busy" @click="submit">确定</el-button>
+            <el-button v-if="!dlg.readonly" type="primary" :loading="dlg.busy" :disabled="timeInvalid" @click="submit">确定</el-button>
           </div>
         </div>
       </template>

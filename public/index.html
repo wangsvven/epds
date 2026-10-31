@@ -1210,6 +1210,9 @@
   .pdt-day.out { color:var(--text-3); opacity:.6; }
   .pdt-day.today { box-shadow:0 0 0 1px var(--brand) inset; color:var(--brand); }
   .pdt-day.on { background:var(--brand); color:#fff; font-weight:600; box-shadow:none; }
+  .pdt-day.dis { color:var(--text-3); opacity:.32; cursor:not-allowed; }
+  .pdt-day.dis:hover { background:transparent; }
+  .pdt-warn { font-size:11.5px; line-height:1.3; color:#d92b2b; max-width:250px; }
   /* 时间区：抬头行（时/分）+ 两列循环滚动（可视 7 行 × 36px = 252px，与日历区等高） */
   .pdt-time { flex:0 0 106px; display:flex; flex-direction:column; border-left:1px solid var(--line); }
   .pdt-time-head { display:flex; align-items:center; height:44px; }
