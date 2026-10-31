@@ -272,7 +272,7 @@ const MonthPlansPanel = {
     });
     const householdsText = computed(() => {
       const v = dlg.form && dlg.form.outageHouseholds;
-      return (v === '' || v === undefined || v === null) ? '—' : String(v);
+      return (v === '' || v === undefined || v === null) ? '' : String(v);
     });
 
     function validate() {
@@ -529,12 +529,12 @@ const MonthPlansPanel = {
 
     <el-dialog :title="dlg.readonly ? '查看计划' : (dlg.editingId ? '编辑计划' : '新增计划')"
       v-model="dlg.visible" width="min(780px, 96%)" top="6vh" class="mp-dlg">
-      <el-form v-if="dlg.form" label-position="right" label-width="180px" class="mp-form" :class="{ 'mp-readonly': dlg.readonly }">
+      <el-form v-if="dlg.form" label-position="right" label-width="190px" class="mp-form" :class="{ 'mp-readonly': dlg.readonly }">
         <el-form-item label="运维单位">
           <el-input v-model="dlg.form.opsUnit" maxlength="60" :disabled="dlg.readonly" placeholder="默认：国网富顺县供电公司" />
         </el-form-item>
         <el-form-item label="检修单位" class="mp-auto-row">
-          <template #label><span>检修单位：</span><span v-if="derived.maintUnit" class="mp-auto">自动带出</span></template>
+          <template #label><span v-if="derived.maintUnit" class="mp-auto">自动带出</span><span>检修单位：</span></template>
           <el-select v-model="dlg.form.maintUnit" filterable allow-create default-first-option clearable
             placeholder="请选择（可来自关联项目）" :disabled="dlg.readonly" @change="onManual('maintUnit')">
             <el-option v-for="o in maintUnitOpts" :key="o" :label="o" :value="o" />
@@ -547,7 +547,7 @@ const MonthPlansPanel = {
           </el-select>
         </el-form-item>
         <el-form-item label="涉及工程项目" class="mp-auto-row">
-          <template #label><span>涉及工程项目：</span><span v-if="derived.projectName" class="mp-auto">自动带出</span></template>
+          <template #label><span v-if="derived.projectName" class="mp-auto">自动带出</span><span>涉及工程项目：</span></template>
           <el-input v-model="dlg.form.projectName" maxlength="120" :disabled="dlg.readonly"
             placeholder="未关联项目时填写；关联项目后自动带出" @input="onManual('projectName')" />
         </el-form-item>
@@ -561,7 +561,7 @@ const MonthPlansPanel = {
           </el-select>
         </el-form-item>
         <el-form-item label="设备类型">
-          <el-select v-model="dlg.form.deviceType" clearable :disabled="dlg.readonly" placeholder="配网支线、配网主线、不涉及">
+          <el-select v-model="dlg.form.deviceType" clearable :disabled="dlg.readonly" placeholder="配网主线、配网支线、不涉及">
             <el-option v-for="d in deviceTypeOpts" :key="d" :label="d" :value="d" />
           </el-select>
         </el-form-item>
@@ -573,7 +573,7 @@ const MonthPlansPanel = {
         </el-form-item>
         <div class="mp-dur-row"><div class="mp-dur">停电时长 <b>{{ durationText }}</b></div></div>
         <el-form-item class="mp-auto-row">
-          <template #label><span>计划工作时间：</span><span class="mp-state">{{ workTimeTouched ? '已手动修改' : '自动生成' }}</span></template>
+          <template #label><span class="mp-state">{{ workTimeTouched ? '已手动修改' : '自动生成' }}</span><span>计划工作时间：</span></template>
           <el-input v-model="dlg.form.workTime" maxlength="120" :disabled="dlg.readonly" @input="onWorkTimeInput" />
         </el-form-item>
         <el-form-item label="检修类型" required :error="errors.workType">
@@ -582,13 +582,16 @@ const MonthPlansPanel = {
           </el-select>
         </el-form-item>
         <el-form-item label="检修内容">
-          <el-input v-model="dlg.form.maintContent" type="textarea" :rows="2" maxlength="2000" :disabled="dlg.readonly" />
+          <el-input v-model="dlg.form.maintContent" type="textarea" :rows="3" maxlength="2000" :disabled="dlg.readonly"
+            placeholder="留空" />
         </el-form-item>
         <el-form-item label="影响用户和区域">
-          <el-input v-model="dlg.form.affectArea" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
+          <el-input v-model="dlg.form.affectArea" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly"
+            placeholder="影响主要用户和区域" />
         </el-form-item>
         <el-form-item label="停电涉及中压配变数">
-          <el-input v-model="dlg.form.transformerCount" maxlength="8" :disabled="dlg.readonly" @input="onCountChange" />
+          <el-input v-model="dlg.form.transformerCount" maxlength="8" :disabled="dlg.readonly"
+            placeholder="停电涉及中压配变数" @input="onCountChange" />
         </el-form-item>
         <el-form-item label="停电时户数">
           <div class="mp-ro-wrap">
@@ -616,7 +619,7 @@ const MonthPlansPanel = {
           <el-input v-model="dlg.form.outageCountYear" maxlength="8" :disabled="dlg.readonly" />
         </el-form-item>
         <el-form-item label="班组长" class="mp-auto-row">
-          <template #label><span>班组长：</span><span v-if="derived.leader" class="mp-auto">自动带出</span></template>
+          <template #label><span v-if="derived.leader" class="mp-auto">自动带出</span><span>班组长：</span></template>
           <el-select v-model="dlg.form.leader" filterable allow-create default-first-option clearable
             placeholder="请选择或输入" :disabled="dlg.readonly" @change="onManual('leader')">
             <el-option v-for="o in leaderOpts" :key="o" :label="o" :value="o" />
