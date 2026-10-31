@@ -945,36 +945,29 @@
   html.dark .mp-v-dup { color:#ffb340; }
   html.dark .mp-imp-sum b.ok { color:#5ed37e; }
   html.dark .mp-imp-sum b.dup { color:#ffb340; }
-  /* 月计划表单（22 字段，三分区 + 顶部带出区） */
-  .mp-form { max-height:68vh; overflow:auto; padding-right:6px; }
-  .mp-derive { background:#f2f6fb; border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:16px; }
-  .mp-derive-row { display:flex; align-items:center; gap:10px; }
-  .mp-derive-lb { font-size:13px; color:var(--text-2); white-space:nowrap; }
-  .mp-derive-sel { width:380px; max-width:100%; }
-  .mp-derive-hint { margin-top:8px; font-size:12px; line-height:1.6; color:var(--text-3); }
-  .mp-sec { margin-bottom:16px; }
-  .mp-sec-title { display:flex; align-items:center; gap:8px; font-size:14px; font-weight:600; color:var(--text-1); margin-bottom:12px; }
-  .mp-sec-title::before { content:''; width:3px; height:14px; border-radius:2px; background:#3370ff; }
-  .mp-item { margin-bottom:12px; }
-  .mp-lb { display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text-2); margin-bottom:6px; line-height:1.5; }
-  .mp-req { color:#d92b2b; font-weight:600; }
-  .mp-auto { font-size:11px; line-height:17px; padding:0 6px; border-radius:10px; color:#0a66c2;
+  /* 月计划表单（22 字段，标签左置、单列） */
+  .mp-form { max-height:70vh; overflow:auto; padding:2px 8px 0 0; }
+  .mp-form .el-form-item { display:flex; align-items:flex-start; margin-bottom:14px; }
+  .mp-form .el-form-item__label { flex:0 0 180px; width:180px; font-size:13.5px; color:var(--text-2); }
+  .mp-form .el-form-item__label::after { content:'：'; }
+  .mp-form .el-form-item__content { flex:1 1 auto; margin-left:0 !important; min-width:0; }
+  .mp-inline { display:flex; align-items:center; gap:8px; width:100%; min-width:0; }
+  .mp-inline > .el-select, .mp-inline > .el-input { flex:1 1 auto; min-width:0; }
+  .mp-auto { flex:0 0 auto; font-size:11px; line-height:17px; padding:0 6px; border-radius:10px; color:#0a66c2;
     background:rgba(10,102,194,.10); border:1px solid rgba(10,102,194,.28); }
-  .mp-state { font-size:11px; line-height:17px; padding:0 6px; border-radius:10px; color:var(--text-3);
+  .mp-state { flex:0 0 auto; font-size:11px; line-height:17px; padding:0 6px; border-radius:10px; color:var(--text-3);
     background:var(--surface-3); border:1px solid var(--line); }
-  .mp-dur { text-align:center; font-size:12.5px; color:var(--text-2); margin:-2px 0 12px; }
+  .mp-dur-row { margin:-4px 0 14px 180px; }
+  .mp-dur { text-align:center; font-size:12.5px; color:var(--text-2); }
   .mp-dur b { color:#0a66c2; font-weight:600; }
-  .mp-ro { min-height:32px; display:flex; align-items:center; padding:0 11px; border-radius:6px;
+  .mp-ro-wrap { width:100%; }
+  .mp-ro { width:100%; min-height:32px; display:flex; align-items:center; padding:0 11px; border-radius:6px;
     background:#eef5ff; border:1px solid rgba(10,102,194,.25); color:#0a66c2; font-weight:600; font-size:13px; }
   .mp-ro-hint { margin-top:5px; font-size:11.5px; color:var(--text-3); }
-  .mp-err { margin-top:4px; font-size:12px; color:#d92b2b; }
-  .mp-haserr .el-input__wrapper, .mp-haserr .el-textarea__inner,
-  .mp-haserr .el-select__wrapper, .mp-haserr .pdt-input { box-shadow:0 0 0 1px #d92b2b inset; }
   .mp-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; }
   .mp-foot-tip { font-size:12.5px; color:var(--text-3); }
   .mp-foot-tip b { color:#d92b2b; }
   .mp-foot-btns { display:flex; gap:8px; }
-  html.dark .mp-derive { background:rgba(10,132,255,.08); }
   html.dark .mp-ro { background:rgba(10,132,255,.12); color:#66b2ff; }
   html.dark .mp-auto { color:#66b2ff; }
   html.dark .mp-dur b { color:#66b2ff; }
@@ -1164,9 +1157,9 @@
     .pp-size { width:96px; }
     .mp-acts { flex-wrap:wrap; }
     .mp-year { width:auto; }
-    .mp-derive-row { flex-wrap:wrap; }
-    .mp-derive-sel { width:100%; }
-    .mp-form { max-height:64vh; }
+    .mp-form { max-height:66vh; }
+    .mp-dur-row { margin-left:146px; }
+    .mp-dlg .el-form-item__label { flex:0 0 146px; width:146px; font-size:12.5px; }
     .mp-foot { flex-direction:column-reverse; align-items:stretch; }
     .mp-foot-btns { justify-content:flex-end; }
   }

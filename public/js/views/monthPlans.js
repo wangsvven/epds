@@ -527,193 +527,113 @@ const MonthPlansPanel = {
       <el-button size="small" :disabled="page >= maxPage" @click="page = page + 1">下一页</el-button>
     </div>
 
-    <el-dialog :title="dlg.readonly ? '查看月计划' : (dlg.editingId ? '编辑月计划' : '新增月计划')"
-      v-model="dlg.visible" width="min(980px, 96%)" top="5vh" class="mp-dlg">
-      <div v-if="dlg.form" class="mp-form">
-        <!-- 顶部带出区 -->
-        <div class="mp-derive">
-          <div class="mp-derive-row">
-            <span class="mp-derive-lb">关联项目</span>
-            <el-select v-model="dlg.form.project" filterable clearable placeholder="请选择项目"
-              :disabled="dlg.readonly" class="mp-derive-sel" @change="onProjectChange">
-              <el-option v-for="o in projectOpts" :key="o" :label="o" :value="o" />
+    <el-dialog :title="dlg.readonly ? '查看计划' : (dlg.editingId ? '编辑计划' : '新增计划')"
+      v-model="dlg.visible" width="min(780px, 96%)" top="6vh" class="mp-dlg">
+      <el-form v-if="dlg.form" label-position="right" label-width="180px" class="mp-form" :class="{ 'mp-readonly': dlg.readonly }">
+        <el-form-item label="运维单位">
+          <el-input v-model="dlg.form.opsUnit" maxlength="60" :disabled="dlg.readonly" placeholder="默认：国网富顺县供电公司" />
+        </el-form-item>
+        <el-form-item label="检修单位">
+          <div class="mp-inline">
+            <el-select v-model="dlg.form.maintUnit" filterable allow-create default-first-option clearable
+              placeholder="请选择（可来自关联项目）" :disabled="dlg.readonly" @change="onManual('maintUnit')">
+              <el-option v-for="o in maintUnitOpts" :key="o" :label="o" :value="o" />
             </el-select>
+            <span v-if="derived.maintUnit" class="mp-auto">自动带出</span>
           </div>
-          <div class="mp-derive-hint">选定项目后，下方带「自动带出」标记的字段将被填充，仍可手动修改。</div>
-        </div>
-
-        <!-- 基本信息 -->
-        <div class="mp-sec">
-          <div class="mp-sec-title">基本信息</div>
-          <el-row :gutter="16">
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">运维单位</label>
-                <el-input v-model="dlg.form.opsUnit" maxlength="60" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">检修单位<span v-if="derived.maintUnit" class="mp-auto">自动带出</span></label>
-                <el-select v-model="dlg.form.maintUnit" filterable allow-create default-first-option clearable
-                  placeholder="请选择或输入" :disabled="dlg.readonly" @change="onManual('maintUnit')">
-                  <el-option v-for="o in maintUnitOpts" :key="o" :label="o" :value="o" />
-                </el-select>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item">
-                <label class="mp-lb">涉及工程项目<span v-if="derived.projectName" class="mp-auto">自动带出</span></label>
-                <el-input v-model="dlg.form.projectName" maxlength="120" :disabled="dlg.readonly" @input="onManual('projectName')" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item" :class="{ 'mp-haserr': !!errors.maintDevice }">
-                <label class="mp-lb">检修设备<span class="mp-req">*</span></label>
-                <el-input v-model="dlg.form.maintDevice" type="textarea" :rows="2" maxlength="200" :disabled="dlg.readonly"
-                  @input="errors.maintDevice = ''" />
-                <div v-if="errors.maintDevice" class="mp-err">{{ errors.maintDevice }}</div>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <div class="mp-item">
-                <label class="mp-lb">电压等级</label>
-                <el-select v-model="dlg.form.voltage" :disabled="dlg.readonly" placeholder="请选择">
-                  <el-option v-for="v in voltageOpts" :key="v" :label="v" :value="v" />
-                </el-select>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <div class="mp-item">
-                <label class="mp-lb">设备类型</label>
-                <el-select v-model="dlg.form.deviceType" clearable :disabled="dlg.readonly" placeholder="请选择">
-                  <el-option v-for="d in deviceTypeOpts" :key="d" :label="d" :value="d" />
-                </el-select>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="8">
-              <div class="mp-item" :class="{ 'mp-haserr': !!errors.workType }">
-                <label class="mp-lb">检修类型<span class="mp-req">*</span></label>
-                <el-select v-model="dlg.form.workType" clearable :disabled="dlg.readonly" placeholder="请选择" @change="errors.workType = ''">
-                  <el-option v-for="w in workTypeOpts" :key="w" :label="w" :value="w" />
-                </el-select>
-                <div v-if="errors.workType" class="mp-err">{{ errors.workType }}</div>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item">
-                <label class="mp-lb">检修内容</label>
-                <el-input v-model="dlg.form.maintContent" type="textarea" :rows="3" maxlength="2000" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-          </el-row>
-        </div>
-
-        <!-- 停电安排 -->
-        <div class="mp-sec">
-          <div class="mp-sec-title">停电安排</div>
-          <el-row :gutter="16">
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item" :class="{ 'mp-haserr': !!errors.outageStart }">
-                <label class="mp-lb">计划停电开始时间<span class="mp-req">*</span></label>
-                <plan-date-time v-model="dlg.form.outageStart" placeholder="开始时间" :disabled="dlg.readonly" @update:model-value="onOutageChange" />
-                <div v-if="errors.outageStart" class="mp-err">{{ errors.outageStart }}</div>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item" :class="{ 'mp-haserr': !!errors.outageEnd }">
-                <label class="mp-lb">计划停电结束时间<span class="mp-req">*</span></label>
-                <plan-date-time v-model="dlg.form.outageEnd" placeholder="结束时间" :disabled="dlg.readonly" @update:model-value="onOutageChange" />
-                <div v-if="errors.outageEnd" class="mp-err">{{ errors.outageEnd }}</div>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-dur">停电时长 <b>{{ durationText }}</b></div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item">
-                <label class="mp-lb">计划工作时间<span class="mp-state">{{ workTimeTouched ? '已手动修改' : '自动生成' }}</span></label>
-                <el-input v-model="dlg.form.workTime" maxlength="120" :disabled="dlg.readonly" @input="onWorkTimeInput" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item">
-                <label class="mp-lb">影响用户和区域</label>
-                <el-input v-model="dlg.form.affectArea" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">停电涉及中压配变数</label>
-                <el-input v-model="dlg.form.transformerCount" maxlength="8" :disabled="dlg.readonly" @input="onCountChange" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">停电时户数</label>
-                <div class="mp-ro">{{ householdsText }}</div>
-                <div class="mp-ro-hint">自动计算：中压配变数 × 停电时长（小时）</div>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item">
-                <label class="mp-lb">涉及重要电力用户名称</label>
-                <el-input v-model="dlg.form.importantUsers" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-          </el-row>
-        </div>
-
-        <!-- 风险与执行 -->
-        <div class="mp-sec">
-          <div class="mp-sec-title">风险与执行</div>
-          <el-row :gutter="16">
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">电网风险等级</label>
-                <el-select v-model="dlg.form.gridRisk" :disabled="dlg.readonly" placeholder="请选择">
-                  <el-option v-for="g in MP_GRID_RISKS" :key="g" :label="g" :value="g" />
-                </el-select>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">作业风险等级</label>
-                <el-select v-model="dlg.form.riskLevel" :disabled="dlg.readonly" placeholder="请选择">
-                  <el-option v-for="r in MP_RISK_LEVELS" :key="r" :label="r" :value="r" />
-                </el-select>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">近2月停电次数</label>
-                <el-input v-model="dlg.form.outageCount2m" maxlength="8" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">本年度停电次数</label>
-                <el-input v-model="dlg.form.outageCountYear" maxlength="8" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <div class="mp-item">
-                <label class="mp-lb">班组长<span v-if="derived.leader" class="mp-auto">自动带出</span></label>
-                <el-select v-model="dlg.form.leader" filterable allow-create default-first-option clearable
-                  placeholder="请选择或输入" :disabled="dlg.readonly" @change="onManual('leader')">
-                  <el-option v-for="o in leaderOpts" :key="o" :label="o" :value="o" />
-                </el-select>
-              </div>
-            </el-col>
-            <el-col :xs="24" :sm="24">
-              <div class="mp-item">
-                <label class="mp-lb">备注</label>
-                <el-input v-model="dlg.form.planNote" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
-              </div>
-            </el-col>
-          </el-row>
-        </div>
-      </div>
+        </el-form-item>
+        <el-form-item label="关联项目">
+          <el-select v-model="dlg.form.project" filterable clearable :disabled="dlg.readonly"
+            placeholder="选择后自动带出检修单位、涉及工程项目、班组长" @change="onProjectChange">
+            <el-option v-for="o in projectOpts" :key="o" :label="o" :value="o" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="涉及工程项目">
+          <div class="mp-inline">
+            <el-input v-model="dlg.form.projectName" maxlength="120" :disabled="dlg.readonly"
+              placeholder="未关联项目时填写；关联项目后自动带出" @input="onManual('projectName')" />
+            <span v-if="derived.projectName" class="mp-auto">自动带出</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="检修设备" required :error="errors.maintDevice">
+          <el-input v-model="dlg.form.maintDevice" type="textarea" :rows="2" maxlength="200" :disabled="dlg.readonly"
+            placeholder="替换原停电位置" @input="errors.maintDevice = ''" />
+        </el-form-item>
+        <el-form-item label="电压等级">
+          <el-select v-model="dlg.form.voltage" :disabled="dlg.readonly" placeholder="请选择">
+            <el-option v-for="v in voltageOpts" :key="v" :label="v" :value="v" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="设备类型">
+          <el-select v-model="dlg.form.deviceType" clearable :disabled="dlg.readonly" placeholder="配网主线、配网支线、不涉及">
+            <el-option v-for="d in deviceTypeOpts" :key="d" :label="d" :value="d" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="计划停电开始时间" required :error="errors.outageStart">
+          <plan-date-time v-model="dlg.form.outageStart" placeholder="开始时间" :disabled="dlg.readonly" @update:model-value="onOutageChange" />
+        </el-form-item>
+        <el-form-item label="计划停电结束时间" required :error="errors.outageEnd">
+          <plan-date-time v-model="dlg.form.outageEnd" placeholder="结束时间" :disabled="dlg.readonly" @update:model-value="onOutageChange" />
+        </el-form-item>
+        <div class="mp-dur-row"><div class="mp-dur">停电时长 <b>{{ durationText }}</b></div></div>
+        <el-form-item label="计划工作时间">
+          <div class="mp-inline">
+            <el-input v-model="dlg.form.workTime" maxlength="120" :disabled="dlg.readonly" @input="onWorkTimeInput" />
+            <span class="mp-state">{{ workTimeTouched ? '已手动修改' : '自动生成' }}</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="检修类型" required :error="errors.workType">
+          <el-select v-model="dlg.form.workType" clearable :disabled="dlg.readonly" placeholder="请选择" @change="errors.workType = ''">
+            <el-option v-for="w in workTypeOpts" :key="w" :label="w" :value="w" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="检修内容">
+          <el-input v-model="dlg.form.maintContent" type="textarea" :rows="2" maxlength="2000" :disabled="dlg.readonly" />
+        </el-form-item>
+        <el-form-item label="影响用户和区域">
+          <el-input v-model="dlg.form.affectArea" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
+        </el-form-item>
+        <el-form-item label="停电涉及中压配变数">
+          <el-input v-model="dlg.form.transformerCount" maxlength="8" :disabled="dlg.readonly" @input="onCountChange" />
+        </el-form-item>
+        <el-form-item label="停电时户数">
+          <div class="mp-ro-wrap">
+            <div class="mp-ro">{{ householdsText }}</div>
+            <div class="mp-ro-hint">自动计算：中压配变数 × 停电时长（小时）</div>
+          </div>
+        </el-form-item>
+        <el-form-item label="涉及重要电力用户名称">
+          <el-input v-model="dlg.form.importantUsers" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
+        </el-form-item>
+        <el-form-item label="电网风险等级">
+          <el-select v-model="dlg.form.gridRisk" :disabled="dlg.readonly" placeholder="请选择">
+            <el-option v-for="g in MP_GRID_RISKS" :key="g" :label="g" :value="g" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="作业风险等级">
+          <el-select v-model="dlg.form.riskLevel" :disabled="dlg.readonly" placeholder="请选择">
+            <el-option v-for="r in MP_RISK_LEVELS" :key="r" :label="r" :value="r" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="近2月停电次数">
+          <el-input v-model="dlg.form.outageCount2m" maxlength="8" :disabled="dlg.readonly" />
+        </el-form-item>
+        <el-form-item label="本年度停电次数">
+          <el-input v-model="dlg.form.outageCountYear" maxlength="8" :disabled="dlg.readonly" />
+        </el-form-item>
+        <el-form-item label="班组长">
+          <div class="mp-inline">
+            <el-select v-model="dlg.form.leader" filterable allow-create default-first-option clearable
+              placeholder="请选择或输入" :disabled="dlg.readonly" @change="onManual('leader')">
+              <el-option v-for="o in leaderOpts" :key="o" :label="o" :value="o" />
+            </el-select>
+            <span v-if="derived.leader" class="mp-auto">自动带出</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="dlg.form.planNote" type="textarea" :rows="2" maxlength="500" :disabled="dlg.readonly" />
+        </el-form-item>
+      </el-form>
       <template #footer>
         <div class="mp-foot">
           <span class="mp-foot-tip">带 <b>*</b> 为必填项</span>
