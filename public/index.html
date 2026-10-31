@@ -938,6 +938,11 @@
   .mp-act-more .el-button { padding-left:0; padding-right:0; }
   .mp-dd-danger { color:#c62828 !important; }
   html.dark .mp-dd-danger { color:#ff7b72 !important; }
+  /* 已归档行：整体置灰 + 轻微底色，明确「只读 / 已完成」 */
+  .el-table .mp-row-archived > td.el-table__cell { background-color:rgba(128,128,128,.07) !important; color:var(--text-3) !important; }
+  .el-table .mp-row-archived:hover > td.el-table__cell { background-color:rgba(128,128,128,.12) !important; }
+  .el-table .mp-row-archived .mp-t-d,
+  .el-table .mp-row-archived .mp-t-h { color:var(--text-3) !important; }
   .mp-badge { flex:0 0 auto; font-size:11px; line-height:1.6; padding:0 7px; border-radius:10px; white-space:nowrap;
     color:var(--text-2); background:var(--surface-3); border:1px solid var(--line); margin-right:4px; }
   .mp-b-new { color:#0a66c2; background:rgba(10,102,194,.10); border-color:rgba(10,102,194,.32); }

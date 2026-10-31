@@ -188,7 +188,8 @@ const MonthPlansPanel = {
     }
 
     /* ---------------- 列表 / 筛选 / 分页 ---------------- */
-    const tabList = computed(() => props.tab === 'archived'
+    const isArchived = computed(() => props.tab === 'archived');
+    const tabList = computed(() => isArchived.value
       ? list.value.filter(p => p.status === '已归档')
       : list.value.filter(p => p.status === '未执行'));
 
@@ -274,6 +275,8 @@ const MonthPlansPanel = {
     const workClock = v => splitWork(v).h;
 
     const badgeClass = st => ({ '未执行': 'mp-b-new', '已执行': 'mp-b-run', '已结算': 'mp-b-done', '已归档': 'mp-b-arc', '已取消': 'mp-b-can' }[st] || 'mp-b-new');
+    // 已归档行整体置灰，视觉上明确「只读 / 已完成」
+    const rowCls = ({ row }) => (row && row.status === '已归档') ? 'mp-row-archived' : '';
 
     /* ---------------- 新增 / 编辑 / 查看 ---------------- */
     const dlg = reactive({ visible: false, editingId: '', busy: false, readonly: false, form: null });
@@ -451,6 +454,11 @@ const MonthPlansPanel = {
       return confirmDo('确认将「' + rowLabel(row) + '」归档？归档后可在「已归档月计划」中查看。',
         () => setStatus(row, '已归档', '已归档'));
     }
+    // 取消归档：回到「月计划管理」（未执行），让已归档记录可重新激活
+    function unarchivePlan(row) {
+      return confirmDo('确认将「' + rowLabel(row) + '」取消归档？取消后回到「月计划管理」列表。',
+        () => setStatus(row, '未执行', '已取消归档'));
+    }
     async function removePlan(row) {
       try {
         await ElementPlus.ElMessageBox.confirm('确认删除月计划「' + rowLabel(row) + '」？删除后不可恢复。', '提示',
@@ -466,6 +474,7 @@ const MonthPlansPanel = {
     function onAct(row, cmd) {
       if (cmd === 'copy') return copyMonth(row);
       if (cmd === 'archive') return archivePlan(row);
+      if (cmd === 'unarchive') return unarchivePlan(row);
       if (cmd === 'delete') return removePlan(row);
     }
     // 查看弹窗里的状态流转：二次确认后改状态并关窗
@@ -640,12 +649,12 @@ const MonthPlansPanel = {
     return {
       list, loading, filters, page, pageSize, importYear, yearOpts,
       areaOpts, maintUnitOpts, leaderOpts, workTypeOpts, deviceTypeOpts, voltageOpts, projectOpts,
-      tabList, filtered, paged, maxPage, idxBase, fmtRange, badgeClass,
+      tabList, isArchived, filtered, paged, maxPage, idxBase, fmtRange, badgeClass, rowCls,
       outageDay, outageClock, workDay, workClock,
       dlg, errors, derived, workTimeTouched, durationText, householdsText, timeInvalid, outageEndHint,
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
-      makeWeek, editRow, copyMonth, archivePlan, removePlan, onAct, formStatus, flowFromView, saveWith,
+      makeWeek, editRow, copyMonth, archivePlan, unarchivePlan, removePlan, onAct, formStatus, flowFromView, saveWith,
       exportXlsx, exporting, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
       MP_DEVICE_TYPES, MP_VOLTAGES, MP_WORK_TYPES, MP_GRID_RISKS, MP_RISK_LEVELS, MP_STATUS, MP_COLS
     };
@@ -667,20 +676,20 @@ const MonthPlansPanel = {
       <el-input v-model="filters.keyword" placeholder="关键词（项目/工作内容/检修设备）" clearable class="pf-input mp-kw" @input="page=1" />
       <span class="pf-actions-sep" />
       <div class="pf-actions">
-        <el-button v-if="canWrite('plans')" type="primary" size="small" @click="openAdd">新增计划</el-button>
+        <el-button v-if="canWrite('plans') && !isArchived" type="primary" size="small" @click="openAdd">新增计划</el-button>
         <div class="pf-item mp-year">
           <span class="pf-label">导入年份：</span>
           <el-select v-model="importYear" size="small" class="mp-year-sel">
             <el-option v-for="y in yearOpts" :key="y" :label="y" :value="y" />
           </el-select>
         </div>
-        <el-button v-if="canWrite('plans')" size="small" @click="pickImpFile">导入预览 xls</el-button>
+        <el-button v-if="canWrite('plans') && !isArchived" size="small" @click="pickImpFile">导入预览 xls</el-button>
         <el-button size="small" :loading="exporting" title="按「月计划导出模板」生成（主网/配网两张子表），导出文件可直接再导入" @click="exportXlsx">导出 xlsx</el-button>
       </div>
       <input ref="impInput" type="file" accept=".xlsx,.xls" style="display:none" @change="onImpFile" />
     </div>
 
-    <el-table :data="paged" v-loading="loading" class="plan-table mp-table" style="width:100%">
+    <el-table :data="paged" v-loading="loading" class="plan-table mp-table" style="width:100%" :row-class-name="rowCls">
       <el-table-column type="index" label="序号" width="52" align="center" :index="idxBase" />
       <el-table-column prop="maintUnit" label="检修单位" width="96" class-name="mp-wrapcell" />
       <el-table-column prop="projectName" label="涉及工程项目" min-width="104" show-overflow-tooltip />
@@ -710,18 +719,33 @@ const MonthPlansPanel = {
         <template #default="{row}">
           <div class="mp-acts">
             <template v-if="canWrite('plans')">
-              <el-button link type="primary" size="small" class="mp-act-lead" @click="makeWeek(row)">新增周计划</el-button>
-              <el-button link type="primary" size="small" @click="editRow(row)">编辑</el-button>
-              <el-dropdown trigger="click" class="mp-act-more" @command="c => onAct(row, c)">
-                <el-button link type="primary" size="small">更多<svg class="mp-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="copy">复制</el-dropdown-item>
-                    <el-dropdown-item v-if="row.status !== '已归档'" command="archive">归档</el-dropdown-item>
-                    <el-dropdown-item command="delete" divided class="mp-dd-danger">删除</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              <template v-if="isArchived">
+                <el-button link type="primary" size="small" @click="openView(row)">查看</el-button>
+                <el-button link type="primary" size="small" @click="copyMonth(row)">复制</el-button>
+                <el-dropdown trigger="click" class="mp-act-more" @command="c => onAct(row, c)">
+                  <el-button link type="primary" size="small">更多<svg class="mp-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="unarchive">取消归档</el-dropdown-item>
+                      <el-dropdown-item command="delete" divided class="mp-dd-danger">删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </template>
+              <template v-else>
+                <el-button link type="primary" size="small" class="mp-act-lead" @click="makeWeek(row)">新增周计划</el-button>
+                <el-button link type="primary" size="small" @click="editRow(row)">编辑</el-button>
+                <el-dropdown trigger="click" class="mp-act-more" @command="c => onAct(row, c)">
+                  <el-button link type="primary" size="small">更多<svg class="mp-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="copy">复制</el-dropdown-item>
+                      <el-dropdown-item command="archive">归档</el-dropdown-item>
+                      <el-dropdown-item command="delete" divided class="mp-dd-danger">删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </template>
             </template>
             <el-button v-else link type="primary" size="small" @click="openView(row)">查看</el-button>
           </div>
@@ -734,7 +758,8 @@ const MonthPlansPanel = {
             <path d="M11 38l7-21a5 5 0 0 1 4.7-3.4h18.6A5 5 0 0 1 46 17l7 21" />
             <path d="M11 38h11l2.5 5h15L42 38h11" />
           </svg>
-          <span>暂无数据</span>
+          <span v-if="isArchived">暂无可归档的月计划，归档后在「月计划管理」中点击「更多 ▾ → 归档」即可在此查看</span>
+          <span v-else>暂无数据</span>
         </div>
       </template>
     </el-table>
