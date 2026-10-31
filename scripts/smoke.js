@@ -161,6 +161,22 @@ async function listOk(p, token) {
     need(d && d.ok === true, 'health.ok 应为 true：' + brief(d));
     return d.name;
   });
+  await step('基础', '服务器时间基准 GET /api/server-time（北京时间 UTC+8）', async () => {
+    const r = await fetch(base + '/api/server-time');
+    need(r.status === 200, '状态码 ' + r.status);
+    need(/no-store/i.test(r.headers.get('cache-control') || ''), '缺少 no-store 缓存头');
+    const d = await r.json();
+    need(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(d.now || ''), 'now 格式不符：' + d.now);
+    need(d.tzOffsetMinutes === 480 && d.timeZone === 'Asia/Shanghai', '时区参数不符：' + brief(d));
+    need(Math.abs(Date.now() - Number(d.ts)) < 5 * 60 * 1000, 'ts 与本机偏差过大：' + d.ts);
+    const t = new Date(Number(d.ts) + 480 * 60000);
+    const p2 = n => String(n).padStart(2, '0');
+    const expect = t.getUTCFullYear() + '-' + p2(t.getUTCMonth() + 1) + '-' + p2(t.getUTCDate()) + ' ' + p2(t.getUTCHours()) + ':' + p2(t.getUTCMinutes());
+    need(d.now.slice(0, 16) === expect, 'now 与 ts 换算不一致：' + d.now + ' vs ' + expect);
+    const pc = needOk(await api('GET', '/api/public-config'), 'public-config');
+    need(Number(pc.serverTs) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(pc.serverDate || ''), 'public-config 缺少 serverTs/serverDate');
+    return d.now + ' · ' + d.timeZone;
+  });
   await step('基础', '首页 GET /', async () => {
     const r = await fetch(base + '/');
     need(r.status === 200, 'GET / 期望 200，实际 ' + r.status);

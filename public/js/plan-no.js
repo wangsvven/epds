@@ -28,7 +28,7 @@
 
   // 年月（4 位年 + 2 位月），按给定日期取，默认取当天
   function ymOf(d) {
-    const t = d instanceof Date ? d : new Date();
+    const t = d instanceof Date ? d : (window.ServerTime ? window.ServerTime.now() : new Date());
     return t.getFullYear() + pad2(t.getMonth() + 1);
   }
 

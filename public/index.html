@@ -1173,6 +1173,15 @@
     .mp-foot-tip { font-size:12px; }
     .mp-foot-btns { justify-content:flex-end; }
   }
+  /* ===== 全局设置 · 时间源（服务器北京时间 UTC+8） ===== */
+  .ts-card .ts-now { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+  .ts-now-val { font-size:22px; font-weight:600; letter-spacing:.4px; color:var(--text-1); font-variant-numeric:tabular-nums; }
+  .ts-now-tz { font-size:12.5px; color:var(--text-3); }
+  .ts-tip { font-size:13px; line-height:1.85; color:var(--text-2); margin-top:6px; }
+  .ts-tip b { color:var(--text-1); font-weight:600; }
+  .ts-warn { color:#c26a00; }
+  .ts-ok { color:var(--text-3); }
+
   /* ===== 日期时间选择器（计划开始/结束时间，对齐原系统） ===== */
   .pdt { position:relative; width:100%; }
   .pdt-input { display:flex; align-items:center; gap:6px; height:32px; padding:0 10px; border-radius:8px; cursor:pointer;
@@ -1243,6 +1252,7 @@
     .pdt-cols { height:232px; }   /* 与移动端日历区（数字 31px）等高 */
     .pdt-band { top:108px; }
     .pdt-day { height:31px; font-size:12.5px; }
+    .ts-now-val { font-size:19px; }
     .pdt-cal { padding:0 6px 8px; }
   }
   /* 入库核对徽标：紧凑描边徽标（深浅色通用） */
@@ -1410,6 +1420,7 @@
   <script src="/vendor/element-plus-locale-zh-cn.js"></script>
   <script src="/vendor/xlsx.full.min.js"></script>
   <script src="/js/api.js"></script>
+  <script src="/js/server-time.js"></script>
   <script src="/js/utils.js"></script>
   <script src="/js/arrival-calc.js"></script>
   <script src="/js/plan-no.js"></script>

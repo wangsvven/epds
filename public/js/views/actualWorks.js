@@ -11,7 +11,7 @@ const ACTUAL_WORK_BUCKETS = {
 const ActualConstructionView = {
   setup() {
     const pad2 = n => String(n).padStart(2, '0');
-    const todayStr = () => { const d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); };
+    const todayStr = () => { const d = ServerTime.now(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); };
     const tab = ref('fill');
     const form = reactive({ date: todayStr(), project: '', workTypes: [], workers: [] });
     // 工作类型 / 施工人员：默认单选，打开「多选」开关才支持多选

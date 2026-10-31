@@ -188,8 +188,8 @@ const PlansView = {
     // 日计划日历概览：未来 21 天内的有效计划（跨日计划按覆盖日期展示）
     const daySlice = v => String(v || '').slice(0, 10);
     const upcoming = computed(() => {
-      const today = fmtDate(new Date());
-      const end21 = fmtDate(new Date(Date.now() + 21 * 86400000));
+      const today = fmtDate(ServerTime.now());
+      const end21 = fmtDate(ServerTime.now(21));
       return list.value.filter(p => !['已取消', '已归档'].includes(p.status) && p.startDate && p.endDate && daySlice(p.endDate) >= today && daySlice(p.startDate) <= end21);
     });
     // 日历卡片：按有安排的日期展示（10月16日 周五 / 条数徽标 / 班组长 / 时间+计划名）
@@ -209,7 +209,7 @@ const PlansView = {
     function dash(v) { const s = String(v == null ? '' : v).trim(); return s || '-'; }
     // 行高亮：覆盖今天且未取消/归档的计划（进行中）
     function rowClass({ row }) {
-      const t = fmtDate(new Date());
+      const t = fmtDate(ServerTime.now());
       return (!['已取消', '已归档'].includes(row.status) && daySlice(row.startDate) <= t && daySlice(row.endDate) >= t) ? 'plan-ongoing' : '';
     }
     // 操作列：复制 / 执行 / 备注 / 取消
@@ -220,7 +220,7 @@ const PlansView = {
         delete body.teamSafetyMeasures;   // 周计划无此字段（历史误加已撤），复制也不带
         body.name = (row.name || '') + '（副本）'; body.status = '未执行';
         // 编号按规则重新生成，不连号复制：年月取复制当天，工作票走被复制记录那条类型线
-        const ym = PlanNo.ymOf(new Date());
+        const ym = PlanNo.ymOf(ServerTime.now());
         body.surveyNo = PlanNo.nextSurveyNo(list.value, ym);
         body.workTicketNo = PlanNo.nextTicketNo(list.value, ym, body.ticketType);
         await api.post('/api/workPlans', body);
@@ -515,7 +515,7 @@ const PlansView = {
     });
     function newHpId() { return 'hp' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
     function todayYmd() {
-      const d = new Date(); const p = n => String(n).padStart(2, '0');
+      const d = ServerTime.now(); const p = n => String(n).padStart(2, '0');
       return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
     }
     function scrollHp(id) {
@@ -1125,7 +1125,7 @@ const PlansView = {
       const cs = unitsByType('抄送单位'); if (cs.length) dlg.form.ccUnits = cs.slice(0, 2).map(u => u.name);
       // 编号自动生成：勘察 = 年月 + 当月最大流水 +1；工作票 = 年月 + 类型码 + 该类型最大流水 +1
       // 统计口径 = list（GET /api/workPlans 的全量存活记录，不受页签/筛选/分页影响）
-      const ym = PlanNo.ymOf(new Date());
+      const ym = PlanNo.ymOf(ServerTime.now());
       dlg.form.surveyNo = PlanNo.nextSurveyNo(list.value, ym);
       dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, ym, dlg.form.ticketType);
       dlg.ticketNoDirty = false;
@@ -1293,7 +1293,7 @@ const PlansView = {
     function onTicketTypeChange(v) {
       if (dlg.editingId || dlg.ticketNoDirty) return;
       const type = v || (dlg.form && dlg.form.ticketType);
-      dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, PlanNo.ymOf(new Date()), type);
+      dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, PlanNo.ymOf(ServerTime.now()), type);
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
@@ -2227,7 +2227,7 @@ const PlanDateTime = {
     const sync = { h: false, mi: false };   // 程序滚动期间不回读，避免自激
     const timers = { h: 0, mi: 0 };
     const pos = reactive({ top: 0, left: 0, width: 408 });
-    const now0 = new Date();
+    const now0 = ServerTime.now();
     const view = reactive({ y: now0.getFullYear(), m: now0.getMonth() + 1 });
     const sel = reactive({ y: 0, m: 0, d: 0, h: 0, mi: 0, has: false });
 
@@ -2266,7 +2266,7 @@ const PlanDateTime = {
       return list;
     });
     function isToday(c) {
-      const t = new Date();
+      const t = ServerTime.now();
       return c.y === t.getFullYear() && c.m === t.getMonth() + 1 && c.d === t.getDate();
     }
     function isSel(c) { return sel.has && sel.y === c.y && sel.m === c.m && sel.d === c.d; }
@@ -2354,7 +2354,7 @@ const PlanDateTime = {
       const p = parse(props.modelValue) || parse(props.defaultFrom);
       if (p) Object.assign(sel, p, { has: true });
       else Object.assign(sel, { y: 0, m: 0, d: 0, h: 0, mi: 0, has: false });
-      const t = new Date();
+      const t = ServerTime.now();
       view.y = p ? p.y : t.getFullYear();
       view.m = p ? p.m : t.getMonth() + 1;
       open.value = true;
@@ -2383,7 +2383,7 @@ const PlanDateTime = {
     function pickTime(key, v) {
       sel[key] = Number(v);
       if (!sel.has) {
-        const t = new Date();
+        const t = ServerTime.now();
         sel.y = t.getFullYear(); sel.m = t.getMonth() + 1; sel.d = t.getDate(); sel.has = true;
       }
     }
@@ -2394,7 +2394,7 @@ const PlanDateTime = {
       close();
     }
     function pickNow() {
-      const t = new Date();
+      const t = ServerTime.now();
       Object.assign(sel, { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate(), h: t.getHours(), mi: t.getMinutes(), has: true });
       view.y = sel.y; view.m = sel.m;
       confirm();

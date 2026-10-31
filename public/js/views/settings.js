@@ -5,6 +5,19 @@ const SettingsView = {
     const active = ref('annualPlans');
     const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', loginBgMode: 'cover', loginBgRotate: 0, weekStart: 1, welcome: { greeting: '', logoUrl: '' } });
     const savedName = ref('');
+    // 时间源：只展示服务器北京时间（不读本机时间），每秒刷新
+    const clock = reactive({ full: '', synced: false, offsetSec: 0, tz: '北京时间（UTC+8）' });
+    let clockTimer = 0;
+    function tickClock() {
+      const ST = window.ServerTime;
+      if (!ST) return;
+      const d = ST.now();
+      const p = n => String(n).padStart(2, '0');
+      clock.full = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+        p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+      clock.synced = !!ST.synced;
+      clock.offsetSec = Math.round((ST.offset || 0) / 1000);
+    }
     async function loadSite() {
       try {
         const s = await api.get('/api/settings');
@@ -185,8 +198,15 @@ const SettingsView = {
         ElementPlus.ElMessage.success('已删除'); loadUnits();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
-    onMounted(() => { loadSite(); loadUnits(); });
-    return { active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
+    onMounted(() => {
+      loadSite(); loadUnits();
+      tickClock();
+      clockTimer = setInterval(tickClock, 1000);
+      // 首屏若还没完成对时，对时完成后立即刷一次
+      if (window.ServerTime) ServerTime.sync().then(tickClock).catch(() => {});
+    });
+    onUnmounted(() => { if (clockTimer) clearInterval(clockTimer); });
+    return { clock, active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
   },
   template: `
   <div>
@@ -325,6 +345,32 @@ const SettingsView = {
         </el-card>
       </el-tab-pane>
       <el-tab-pane label="网站设置" name="site">
+        <el-card style="margin-bottom:16px" class="ts-card">
+          <template #header>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+              <b>时间源</b>
+              <el-tag :type="clock.synced ? 'success' : 'info'" effect="plain" size="small">
+                {{ clock.synced ? '已与服务器对时' : '对时中…' }}
+              </el-tag>
+            </div>
+          </template>
+          <div class="ts-now">
+            <span class="ts-now-val">{{ clock.full }}</span>
+            <span class="ts-now-tz">{{ clock.tz }}</span>
+          </div>
+          <div class="ts-tip">
+            时间基准：<b>后端服务器北京时间（UTC+8）</b>。计划时间、编号年月、到货日期、日志导出时间等一律以此为准，
+            <b>不读取客户端本地时间</b>，手机或电脑时间被改错、时区错乱都不会影响保存结果。
+          </div>
+          <div class="ts-tip">
+            <b>24 小时制</b>：时间选择器固定 00:00–23:59，不提供 12 小时制切换。
+            <span v-if="clock.synced && Math.abs(clock.offsetSec) >= 5" class="ts-warn">
+              本机时间与服务器相差 {{ Math.abs(clock.offsetSec) }} 秒，系统已自动校正显示。
+            </span>
+            <span v-else-if="clock.synced" class="ts-ok">本机时间与服务器一致。</span>
+          </div>
+        </el-card>
+
         <el-card style="margin-bottom:16px">
           <template #header><b>网站标题（最多 128 个字符）</b></template>
           <div style="color:var(--text-2);font-size:13px;line-height:1.8;margin-bottom:12px">这里保存的网站标题作为初始化的企业名称。其他标签的设置不会代替企业名称保存；填写后点击下方"保存"。</div>

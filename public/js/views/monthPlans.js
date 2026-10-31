@@ -128,10 +128,10 @@ const MonthPlansPanel = {
     const substations = ref([]);
     const units = ref([]);
     const leaderAccounts = ref([]);
-    const importYear = ref(String(new Date().getFullYear()));
+    const importYear = ref(String(ServerTime.year()));
 
     const yearOpts = computed(() => {
-      const y = new Date().getFullYear();
+      const y = ServerTime.year();
       return [y - 1, y, y + 1].map(String);
     });
     const uniq = arr => Array.from(new Set(arr.map(x => String(x == null ? '' : x).trim()).filter(Boolean)));

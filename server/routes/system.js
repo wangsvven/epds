@@ -41,13 +41,43 @@ app.get('/api/health', (req, res) => res.json({ ok: true, name: DB.settings.syst
 // favicon：避免浏览器默认请求 /favicon.ico 触发 404 控制台错误
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
+// ---------- 服务器时间（北京时间 UTC+8，唯一时间基准）----------
+// 不读服务器系统时区：用 UTC 毫秒 + 8 小时取「北京时间墙钟」，容器未设 TZ 也不会漂。
+const SERVER_TZ_OFFSET_MIN = 480;
+function serverClock() {
+  const ms = Date.now();
+  const t = new Date(ms + SERVER_TZ_OFFSET_MIN * 60000);
+  const p = n => String(n).padStart(2, '0');
+  return {
+    now: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()) + ' ' +
+         p(t.getUTCHours()) + ':' + p(t.getUTCMinutes()) + ':' + p(t.getUTCSeconds()),
+    date: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()),
+    year: t.getUTCFullYear(),
+    ts: ms,
+    tzOffsetMinutes: SERVER_TZ_OFFSET_MIN,
+    timeZone: 'Asia/Shanghai'
+  };
+}
+// 前端校准用：返回当前服务器时间与时间戳（无需登录，登录页/首屏即可用）
+app.get('/api/server-time', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(serverClock());
+});
+
 // ---------- 登录页公开配置（无需登录：登录页需在鉴权前取背景图 / 系统名） ----------
 app.get('/api/public-config', (req, res) => {
+  const clock = serverClock();
   res.json({
     systemName: DB.settings.systemName || '',
     companyName: DB.settings.companyName || '',
     loginBg: DB.settings.loginBg || DEFAULT_LOGIN_BG,
-    version: pkgVersion()
+    version: pkgVersion(),
+    // 时间基准：前端首屏即据此校准，避免依赖客户端本地时间
+    serverTime: clock.now,
+    serverDate: clock.date,
+    serverTs: clock.ts,
+    tzOffsetMinutes: clock.tzOffsetMinutes,
+    timeZone: clock.timeZone
   });
 });
 // 本地上传的登录页背景（无需登录；仅允许读取 data/uploads/login-bg 目录，防目录穿越）

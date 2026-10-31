@@ -32,7 +32,7 @@ const ArrivalStats = {
     }
     // 默认当前年度计划（名称含当前年份），没有则取第一个
     function pickDefaultPlan() {
-      const cur = plans.value.find(p => String(p.name || '').includes(String(new Date().getFullYear())));
+      const cur = plans.value.find(p => String(p.name || '').includes(String(ServerTime.year())));
       plan.value = cur ? cur.name : (plans.value[0] ? plans.value[0].name : '');
     }
     // 该计划下的全部工程名（含子项目）
@@ -137,8 +137,8 @@ const ArrivalStats = {
       const [, m, d] = String(v).split('-');
       return Number(m) + '月' + Number(d) + '日';
     }
-    function setToday() { arrivalDate.value = ymd(new Date()); page.value = 1; }
-    function setYesterday() { arrivalDate.value = ymd(new Date(Date.now() - 86400000)); page.value = 1; }
+    function setToday() { arrivalDate.value = ymd(ServerTime.now()); page.value = 1; }
+    function setYesterday() { arrivalDate.value = ymd(ServerTime.now(-1)); page.value = 1; }
 
     function onPlanChange() { page.value = 1; arrivalDate.value = ''; }
     function onOnlyDayChange() { page.value = 1; }
@@ -150,7 +150,7 @@ const ArrivalStats = {
     // 下载日志：全量事件导出为 Markdown 表格
     function downloadLog() {
       if (!allEvents.value.length) return;
-      const t = new Date();
+      const t = ServerTime.now();
       const stamp = ymd(t) + ' ' + pad2(t.getHours()) + ':' + pad2(t.getMinutes());
       const lines = [
         '# 到货日志（' + (plan.value || '') + '）',

@@ -152,7 +152,7 @@ const App = {
         ]);
         // ⑥ 成功：存 token 与登录时间（token 键名 erp_token 与 api.js 一致），其余成功路径与现行相同
         localStorage.setItem('erp_token', r.token);
-        localStorage.setItem('erp_last_login', new Date().toISOString());
+        localStorage.setItem('erp_last_login', ServerTime.now().toISOString());
         loginForm.password = ''; // 成功后也不在内存里留密码
         token.value = r.token; me.name = r.user.name; me.role = r.user.role;
         await fetchMe();
@@ -195,6 +195,8 @@ const App = {
       applyWeekStartToDayjs(WeekStart.value);
       // 登录页公开配置（无需登录）：背景图 + 系统名 / 企业名
       api.get('/api/public-config').then(c => {
+        // 时间基准：服务器北京时间（UTC+8）为唯一时间源，不使用客户端本地时间
+        if (window.ServerTime && c.serverTs) { ServerTime.applyTs(c.serverTs); ServerTime.start(); }
         const bg = c.loginBg || '/login-bg/valley.jpg';
         loginBg.value = bg;
         // 回退设置：仅当服务端未注入（值为 none）时才覆盖，避免覆盖正确的直出值造成闪跳
@@ -345,4 +347,12 @@ app.component('PlanDateTime', PlanDateTime);
 app.component('MonthPlansPanel', MonthPlansPanel);
 app.component('PlansView', PlansView);
 app.component('ActualConstructionView', ActualConstructionView);
-app.mount('#app');
+// 首屏先与服务器对时（最多等 600ms），避免用本机时钟算出错误的「今天/此刻」
+(function bootWithServerTime() {
+  const mount = () => app.mount('#app');
+  if (!window.ServerTime) return mount();
+  let done = false;
+  const once = () => { if (done) return; done = true; mount(); };
+  ServerTime.sync().then(() => { ServerTime.start(); once(); });
+  setTimeout(once, 600);
+})();
