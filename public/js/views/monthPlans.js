@@ -462,6 +462,12 @@ const MonthPlansPanel = {
         await load();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
+    // 操作列「更多」下拉 → 路由到已有动作
+    function onAct(row, cmd) {
+      if (cmd === 'copy') return copyMonth(row);
+      if (cmd === 'archive') return archivePlan(row);
+      if (cmd === 'delete') return removePlan(row);
+    }
     // 查看弹窗里的状态流转：二次确认后改状态并关窗
     const formStatus = computed(() => (dlg.form && dlg.form.status) || '未执行');
     async function flowFromView(status, tip) {
@@ -639,7 +645,7 @@ const MonthPlansPanel = {
       dlg, errors, derived, workTimeTouched, durationText, householdsText, timeInvalid, outageEndHint,
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
-      makeWeek, editRow, copyMonth, archivePlan, removePlan, formStatus, flowFromView, saveWith,
+      makeWeek, editRow, copyMonth, archivePlan, removePlan, onAct, formStatus, flowFromView, saveWith,
       exportXlsx, exporting, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
       MP_DEVICE_TYPES, MP_VOLTAGES, MP_WORK_TYPES, MP_GRID_RISKS, MP_RISK_LEVELS, MP_STATUS, MP_COLS
     };
@@ -659,15 +665,18 @@ const MonthPlansPanel = {
       <el-date-picker v-model="filters.startDate" type="date" placeholder="开始日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
       <el-date-picker v-model="filters.endDate" type="date" placeholder="结束日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
       <el-input v-model="filters.keyword" placeholder="关键词（项目/工作内容/检修设备）" clearable class="pf-input mp-kw" @input="page=1" />
-      <el-button v-if="canWrite('plans')" type="primary" size="small" @click="openAdd">新增计划</el-button>
-      <div class="pf-item mp-year">
-        <span class="pf-label">导入年份：</span>
-        <el-select v-model="importYear" size="small" class="mp-year-sel">
-          <el-option v-for="y in yearOpts" :key="y" :label="y" :value="y" />
-        </el-select>
+      <span class="pf-actions-sep" />
+      <div class="pf-actions">
+        <el-button v-if="canWrite('plans')" type="primary" size="small" @click="openAdd">新增计划</el-button>
+        <div class="pf-item mp-year">
+          <span class="pf-label">导入年份：</span>
+          <el-select v-model="importYear" size="small" class="mp-year-sel">
+            <el-option v-for="y in yearOpts" :key="y" :label="y" :value="y" />
+          </el-select>
+        </div>
+        <el-button v-if="canWrite('plans')" size="small" @click="pickImpFile">导入预览 xls</el-button>
+        <el-button size="small" :loading="exporting" title="按「月计划导出模板」生成（主网/配网两张子表），导出文件可直接再导入" @click="exportXlsx">导出 xlsx</el-button>
       </div>
-      <el-button v-if="canWrite('plans')" size="small" @click="pickImpFile">导入预览 xls</el-button>
-      <el-button size="small" :loading="exporting" title="按「月计划导出模板」生成（主网/配网两张子表），导出文件可直接再导入" @click="exportXlsx">导出 xlsx</el-button>
       <input ref="impInput" type="file" accept=".xlsx,.xls" style="display:none" @change="onImpFile" />
     </div>
 
@@ -697,15 +706,22 @@ const MonthPlansPanel = {
       <el-table-column prop="workType" label="检修类型" width="90" show-overflow-tooltip />
       <el-table-column prop="maintContent" label="检修内容" min-width="100" show-overflow-tooltip />
       <el-table-column prop="leader" label="班组长" width="78" show-overflow-tooltip />
-      <el-table-column label="操作" width="128" fixed="right">
+      <el-table-column label="操作" width="208" fixed="right">
         <template #default="{row}">
           <div class="mp-acts">
             <template v-if="canWrite('plans')">
-              <el-button link type="primary" size="small" @click="makeWeek(row)">新增周计划</el-button>
+              <el-button link type="primary" size="small" class="mp-act-lead" @click="makeWeek(row)">新增周计划</el-button>
               <el-button link type="primary" size="small" @click="editRow(row)">编辑</el-button>
-              <el-button link type="primary" size="small" @click="copyMonth(row)">复制</el-button>
-              <el-button v-if="row.status !== '已归档'" link type="warning" size="small" @click="archivePlan(row)">归档</el-button>
-              <el-button link type="danger" size="small" @click="removePlan(row)">删除</el-button>
+              <el-dropdown trigger="click" class="mp-act-more" @command="c => onAct(row, c)">
+                <el-button link type="primary" size="small">更多<svg class="mp-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="copy">复制</el-dropdown-item>
+                    <el-dropdown-item v-if="row.status !== '已归档'" command="archive">归档</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided class="mp-dd-danger">删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
             <el-button v-else link type="primary" size="small" @click="openView(row)">查看</el-button>
           </div>

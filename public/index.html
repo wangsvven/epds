@@ -918,6 +918,8 @@
   .plan-pager .el-button { margin-left:0; }
   /* ===== 月计划管理面板（检修口径） ===== */
   .mp-kw { width:200px; }
+  .pf-actions-sep { flex:1 1 auto; }
+  .pf-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-left:10px; padding-left:14px; border-left:1px solid var(--line); }
   .mp-year { gap:4px; }
   .mp-year-sel { width:92px; }
   .mp-time { display:inline-block; max-width:100%; white-space:nowrap; font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:-0.2px; color:var(--text-2); overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
@@ -929,8 +931,13 @@
   .mp-time2 { display:flex; flex-direction:column; gap:1px; line-height:1.45; font-variant-numeric:tabular-nums; font-size:11.5px; letter-spacing:-0.2px; }
   .mp-time2 .mp-t-d { color:var(--text-2); white-space:nowrap; }
   .mp-time2 .mp-t-h { color:var(--text-1); white-space:nowrap; }
-  .mp-acts { display:flex; align-items:center; flex-wrap:wrap; gap:0 10px; line-height:1.9; }
-  .mp-acts .el-button { margin-left:0; }
+  .mp-acts { display:flex; align-items:center; flex-wrap:wrap; gap:2px 14px; line-height:1.7; padding:4px 0; }
+  .mp-acts .el-button { margin-left:0; padding-left:0; padding-right:0; }
+  .mp-act-lead { font-weight:600; }
+  .mp-caret { width:11px; height:11px; margin-left:1px; vertical-align:-1px; }
+  .mp-act-more .el-button { padding-left:0; padding-right:0; }
+  .mp-dd-danger { color:#c62828 !important; }
+  html.dark .mp-dd-danger { color:#ff7b72 !important; }
   .mp-badge { flex:0 0 auto; font-size:11px; line-height:1.6; padding:0 7px; border-radius:10px; white-space:nowrap;
     color:var(--text-2); background:var(--surface-3); border:1px solid var(--line); margin-right:4px; }
   .mp-b-new { color:#0a66c2; background:rgba(10,102,194,.10); border-color:rgba(10,102,194,.32); }
@@ -1170,6 +1177,8 @@
     .plan-filters { gap:10px; }
     .pf-item, .pf-date { width:100%; }
     .pf-input, .pf-select, .pf-select-wide { flex:1 1 auto; width:auto; min-width:0; }
+    .pf-actions-sep { display:none; }
+    .pf-actions { width:100%; margin-left:0; padding-left:0; border-left:none; }
     .plan-pager { justify-content:space-between; }
     .pp-size { width:96px; }
     .mp-acts { flex-wrap:wrap; }
