@@ -870,11 +870,23 @@ const MonthPlansPanel = {
         <el-table-column prop="maintDevice" label="检修设备" min-width="150" show-overflow-tooltip />
         <el-table-column prop="voltage" label="电压等级" width="86" align="center" />
         <el-table-column prop="deviceType" label="设备类型" width="92" />
-        <el-table-column label="计划停电时间" width="190" class-name="pf-nowrap">
-          <template #default="{row}"><span class="mp-time">{{ fmtRange(row.outageStart, row.outageEnd) }}</span></template>
+        <el-table-column label="计划停电时间" width="118" class-name="mp-tcol">
+          <template #default="{row}">
+            <div class="mp-time2">
+              <span class="mp-t-d">{{ outageDay(row.outageStart, row.outageEnd) }}</span>
+              <span class="mp-t-h">{{ outageClock(row.outageStart, row.outageEnd) }}</span>
+            </div>
+          </template>
         </el-table-column>
-        <el-table-column prop="workTime" label="计划工作时间" min-width="170" show-overflow-tooltip />
-        <el-table-column label="导入判定" min-width="184">
+        <el-table-column label="计划工作时间" width="130" class-name="mp-tcol">
+          <template #default="{row}">
+            <div class="mp-time2">
+              <span class="mp-t-d">{{ workDay(row.workTime) }}</span>
+              <span class="mp-t-h">{{ workClock(row.workTime) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="导入判定" min-width="180">
           <template #default="{row}">
             <span :class="row.verdict === '新增' ? 'mp-v-new' : 'mp-v-dup'">{{ row.verdict }}</span>
           </template>
