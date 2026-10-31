@@ -1111,7 +1111,7 @@ const PlansView = {
       ElementPlus.ElMessage.success('已按项目进度填入杆塔、电缆完成量，其余请自行填写');
     }
     let unitsLoaded = false;
-    async function openAdd() {
+    async function openAdd(prefill) {
       if (!unitsLoaded) { await loadHazards(); unitsLoaded = true; }
       if (!teams.value.length) await loadMeta();   // 新实例/刚维护完班组后打开，也能取到最新施工班组
       dlg.editingId = null; dlg.form = emptyForm();
@@ -1119,6 +1119,13 @@ const PlansView = {
       dlg.form.planType = tab.value === 'month' ? '月计划' : '周计划';
       // 从项目详情跳转过来时，关联项目默认带入（避免新增后因项目筛选而"消失"）
       if (filters.projectScope.length) dlg.form.project = filters.projectScope[0];
+      // 预填（「新增周计划」从月计划带入）：先关联项目（带出地址/变电站/电压），再覆盖其余有值字段，不冲掉默认值
+      if (prefill) {
+        if (prefill.project) { dlg.form.project = prefill.project; onProjectSelect(prefill.project); }
+        Object.keys(prefill).forEach(k => {
+          if (k !== 'project' && prefill[k] !== '' && prefill[k] != null) dlg.form[k] = prefill[k];
+        });
+      }
       // 作业单位联动：分包与监理默认排序第一条，抄送默认排序前两条；建管/实施单位留空由用户自行编辑
       const fb = unitsByType('分包单位'); if (fb.length) dlg.form.subcontractors = [fb[0].name];
       const sj = unitsByType('监理单位'); if (sj.length) dlg.form.supervisor = sj[0].name;
@@ -1138,6 +1145,25 @@ const PlansView = {
       // 字段规范化（老数据补齐）
       ['subcontractors', 'ccUnits', 'chargePersons'].forEach(k => { if (!Array.isArray(dlg.form[k])) dlg.form[k] = []; });
       ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
+    }
+    // 月计划列表「新增周计划」：切到周计划管理页签，用月计划内容预填周计划表单
+    async function makeWeekFromMonth(mp) {
+      if (!mp) return;
+      tab.value = 'week';
+      const at = v => (String(v || '').length === 16 ? v + ':00' : String(v || ''));
+      await openAdd({
+        project: mp.project || '',
+        name: mp.projectName || mp.maintDevice || '',
+        team: mp.team || '',
+        leader: mp.leader || '',
+        voltage: mp.voltage || '',
+        workType: (mp.workType && WORK_TYPES.includes(mp.workType)) ? mp.workType : '',
+        content: mp.maintContent || '',
+        outageRange: mp.maintDevice || '',
+        startDate: at(mp.outageStart),
+        endDate: at(mp.outageEnd)
+      });
+      ElementPlus.ElMessage.success('已从月计划带入内容，确认后保存');
     }
     async function submit() {
       const f = dlg.form;
@@ -1297,7 +1323,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1336,7 +1362,7 @@ const PlansView = {
       </div>
 
       <!-- 月计划管理 / 已归档月计划：检修口径专用面板 -->
-      <month-plans-panel v-if="isMonthTab" :tab="tab" :project-scope="filters.projectScope" />
+      <month-plans-panel v-if="isMonthTab" :tab="tab" :project-scope="filters.projectScope" @make-week="makeWeekFromMonth" />
 
       <template v-else>
       <div class="plan-filters">

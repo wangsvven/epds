@@ -117,7 +117,9 @@ const MonthPlansPanel = {
     tab: { type: String, default: 'month' },              // month | archived
     projectScope: { type: Array, default: () => [] }      // 项目详情「查看月计划」带入的项目范围
   },
-  setup(props) {
+  // 「新增周计划」交给父组件（PlansPanel）打开周计划表单并带入本行内容
+  emits: ['make-week'],
+  setup(props, { emit }) {
     const { ref, reactive, computed, onMounted, watch } = Vue;
     const list = ref([]);
     const loading = ref(false);
@@ -206,6 +208,52 @@ const MonthPlansPanel = {
       const s = String(v == null ? '' : v).trim();
       return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s) ? s + ':00' : s;
     };
+
+    /* ---- 列表时间列：日期、时分分两行显示，日期段同月只写一次「月」，保证不截断 ---- */
+    const dayParts = v => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v == null ? '' : v).trim());
+      return m ? { y: m[1], m: Number(m[2]), d: Number(m[3]) } : null;
+    };
+    const mdText = p => p.m + '月' + p.d + '日';
+    // 日期段：同日→「11月1日」；同月→「11月1日-30日」；跨月→「11月1日-12月3日」
+    function compactDay(a, b) {
+      const s = dayParts(a), e = dayParts(b);
+      if (!s && !e) return '—';
+      if (!s || !e) return mdText(s || e);
+      if (s.m === e.m && s.d === e.d) return mdText(s);
+      if (s.m === e.m) return s.m + '月' + s.d + '日-' + e.d + '日';
+      return mdText(s) + '-' + mdText(e);
+    }
+    const clockText = v => String(v == null ? '' : v).trim().slice(11, 16);
+    function outageDay(a, b) { return compactDay(a, b); }
+    function outageClock(a, b) {
+      const s = clockText(a), e = clockText(b);
+      if (!s || !e) return s || e || '';
+      return s + '-' + e;
+    }
+    // 已入库的「11月1日-11月30日19:57-20:57」同样压缩日期段
+    const compactDayStr = d => {
+      const m = /^(\d{1,2})月(\d{1,2})日-(\d{1,2})月(\d{1,2})日$/.exec(String(d || '').trim());
+      if (!m) return d;
+      const [m1, d1, m2, d2] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+      if (m1 === m2 && d1 === d2) return m1 + '月' + d1 + '日';
+      if (m1 === m2) return m1 + '月' + d1 + '日-' + d2 + '日';
+      return d;
+    };
+    /* 计划工作时间是入库时的整串（如「11月1日-11月30日19:57-20:57」），按最后一个「日」切成日期段 + 时间段；
+       也兼容「2026-11-01 08:00」这种旧数据 */
+    function splitWork(v) {
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return { d: '—', h: '' };
+      const i = s.lastIndexOf('日');
+      if (i >= 0) return { d: compactDayStr(s.slice(0, i + 1)), h: s.slice(i + 1).trim() };
+      const m = /^(\d{4}-\d{2}-\d{2})[ T]?(\d{2}:\d{2})?/.exec(s);
+      if (m) return { d: compactDay(m[1], ''), h: m[2] || '' };
+      return { d: s, h: '' };
+    }
+    const workDay = v => splitWork(v).d;
+    const workClock = v => splitWork(v).h;
+
     const badgeClass = st => ({ '未执行': 'mp-b-new', '已执行': 'mp-b-run', '已结算': 'mp-b-done', '已归档': 'mp-b-arc', '已取消': 'mp-b-can' }[st] || 'mp-b-new');
 
     /* ---------------- 新增 / 编辑 / 查看 ---------------- */
@@ -233,6 +281,7 @@ const MonthPlansPanel = {
     function openEdit(row) {
       dlg.editingId = row.id; dlg.readonly = false;
       const f = blankForm();
+      f.id = row.id;                                          // 查看弹窗里的状态流转要用 id
       Object.keys(f).forEach(k => { if (row[k] !== undefined && row[k] !== null) f[k] = row[k]; });
       if (!f.projectName && row.project) f.projectName = row.project;   // 老记录没有 projectName 时兜底
       dlg.form = f;
@@ -352,6 +401,50 @@ const MonthPlansPanel = {
     function backToTodo(row) { return confirmDo('确认将该月计划退回未执行？', () => setStatus(row, '未执行', '已退回未执行')); }
     function cancelPlan(row) { return confirmDo('确认取消该月计划？', () => setStatus(row, '已取消', '已取消')); }
 
+    /* ---------------- 列表操作列：新增周计划 / 编辑 / 复刻 / 归档 / 删除 ---------------- */
+    const rowLabel = row => (row.maintDevice || row.name || '该月计划');
+    // 新增周计划：把本行交给父组件，由周计划表单带入后保存
+    function makeWeek(row) { emit('make-week', row); }
+    // 已归档的记录不再进编辑，改为只读查看
+    function editRow(row) { if (row.status === '已归档') openView(row); else openEdit(row); }
+    // 复刻：整条复制为新的月计划（未执行，停电时间不变）
+    async function copyMonth(row) {
+      try {
+        const body = JSON.parse(JSON.stringify(row));
+        delete body.id; delete body.createdAt;
+        body.status = '未执行';
+        await api.post('/api/workPlans', body);
+        ElementPlus.ElMessage.success('已复刻为新的月计划');
+        await load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    function archivePlan(row) {
+      return confirmDo('确认将「' + rowLabel(row) + '」归档？归档后可在「已归档月计划」中查看。',
+        () => setStatus(row, '已归档', '已归档'));
+    }
+    async function removePlan(row) {
+      try {
+        await ElementPlus.ElMessageBox.confirm('确认删除月计划「' + rowLabel(row) + '」？删除后不可恢复。', '提示',
+          { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        await api.del('/api/workPlans/' + row.id);
+        ElementPlus.ElMessage.success('已删除');
+        await load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    // 查看弹窗里的状态流转：二次确认后改状态并关窗
+    const formStatus = computed(() => (dlg.form && dlg.form.status) || '未执行');
+    async function flowFromView(status, tip) {
+      if (!dlg.form) return;
+      const label = dlg.form.maintDevice || dlg.form.name || '该月计划';
+      const verb = { '已执行': '标记为已执行', '已结算': '标记为已结算', '未执行': '退回未执行', '已取消': '取消' }[status] || '更新状态';
+      await confirmDo('确认将「' + label + '」' + verb + '？', async () => {
+        await setStatus(dlg.form, status, tip);
+        dlg.visible = false;
+      });
+    }
+
     /* ---------------- 导出（当前页签 + 当前筛选，22 列，可回灌） ---------------- */
     const blank = v => (v == null ? '' : String(v));
     const WIDE_COLS = ['检修设备', '检修内容', '影响用户和区域', '涉及重要电力用户名称', '备注'];
@@ -460,9 +553,11 @@ const MonthPlansPanel = {
       list, loading, filters, page, pageSize, importYear, yearOpts,
       areaOpts, maintUnitOpts, leaderOpts, workTypeOpts, deviceTypeOpts, voltageOpts, projectOpts,
       tabList, filtered, paged, maxPage, idxBase, fmtRange, badgeClass,
+      outageDay, outageClock, workDay, workClock,
       dlg, errors, derived, workTimeTouched, durationText, householdsText, timeInvalid, outageEndHint,
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
+      makeWeek, editRow, copyMonth, archivePlan, removePlan, formStatus, flowFromView,
       exportXlsx, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
       MP_DEVICE_TYPES, MP_VOLTAGES, MP_WORK_TYPES, MP_GRID_RISKS, MP_RISK_LEVELS, MP_STATUS, MP_COLS
     };
@@ -495,37 +590,45 @@ const MonthPlansPanel = {
     </div>
 
     <el-table :data="paged" v-loading="loading" class="plan-table mp-table" style="width:100%">
-      <el-table-column type="index" label="序号" width="50" align="center" :index="idxBase" />
-      <el-table-column prop="maintUnit" label="检修单位" width="92" show-overflow-tooltip />
+      <el-table-column type="index" label="序号" width="52" align="center" :index="idxBase" />
+      <el-table-column prop="maintUnit" label="检修单位" width="96" class-name="mp-wrapcell" />
       <el-table-column prop="projectName" label="涉及工程项目" min-width="104" show-overflow-tooltip />
-      <el-table-column prop="maintDevice" label="检修设备" min-width="104" show-overflow-tooltip />
-      <el-table-column prop="voltage" label="电压等级" width="76" align="center" />
-      <el-table-column prop="deviceType" label="设备类型" width="82" />
-      <el-table-column label="计划停电时间" width="178" class-name="pf-nowrap">
-        <template #default="{row}"><span class="mp-time">{{ fmtRange(row.outageStart, row.outageEnd) }}</span></template>
+      <el-table-column prop="maintDevice" label="检修设备" min-width="100" show-overflow-tooltip />
+      <el-table-column prop="voltage" label="电压等级" width="74" align="center" />
+      <el-table-column prop="deviceType" label="设备类型" width="78" />
+      <el-table-column label="计划停电时间" width="114" class-name="mp-tcol">
+        <template #default="{row}">
+          <div class="mp-time2">
+            <span class="mp-t-d">{{ outageDay(row.outageStart, row.outageEnd) }}</span>
+            <span class="mp-t-h">{{ outageClock(row.outageStart, row.outageEnd) }}</span>
+          </div>
+        </template>
       </el-table-column>
-      <el-table-column label="计划工作时间" min-width="194" show-overflow-tooltip>
-        <template #default="{row}"><span class="mp-time">{{ row.workTime || '—' }}</span></template>
+      <el-table-column label="计划工作时间" width="114" class-name="mp-tcol">
+        <template #default="{row}">
+          <div class="mp-time2">
+            <span class="mp-t-d">{{ workDay(row.workTime) }}</span>
+            <span class="mp-t-h">{{ workClock(row.workTime) }}</span>
+          </div>
+        </template>
       </el-table-column>
-      <el-table-column label="操作" width="260" fixed="right">
+      <el-table-column prop="workType" label="检修类型" width="90" show-overflow-tooltip />
+      <el-table-column prop="maintContent" label="检修内容" min-width="100" show-overflow-tooltip />
+      <el-table-column label="状态" width="78" align="center">
+        <template #default="{row}">
+          <span class="mp-badge" :class="[badgeClass(row.status), { 'mp-badge-clk': canWrite('plans') }]"
+            :title="canWrite('plans') ? '点击查看详情并流转状态' : row.status" @click="openView(row)">{{ row.status }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="128" fixed="right">
         <template #default="{row}">
           <div class="mp-acts">
-            <span class="mp-badge" :class="badgeClass(row.status)">{{ row.status }}</span>
             <template v-if="canWrite('plans')">
-              <template v-if="row.status === '未执行'">
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-button link type="warning" size="small" @click="markExecuted(row)">标记已执行</el-button>
-                <el-button link type="danger" size="small" @click="cancelPlan(row)">取消计划</el-button>
-              </template>
-              <template v-else-if="row.status === '已执行'">
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-button link type="warning" size="small" @click="markSettled(row)">标记已结算</el-button>
-                <el-button link type="warning" size="small" @click="backToTodo(row)">退回未执行</el-button>
-              </template>
-              <template v-else>
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-button link type="info" size="small" @click="openView(row)">查看</el-button>
-              </template>
+              <el-button link type="primary" size="small" @click="makeWeek(row)">新增周计划</el-button>
+              <el-button link type="primary" size="small" @click="editRow(row)">编辑</el-button>
+              <el-button link type="primary" size="small" @click="copyMonth(row)">复刻</el-button>
+              <el-button v-if="row.status !== '已归档'" link type="warning" size="small" @click="archivePlan(row)">归档</el-button>
+              <el-button link type="danger" size="small" @click="removePlan(row)">删除</el-button>
             </template>
             <el-button v-else link type="primary" size="small" @click="openView(row)">查看</el-button>
           </div>
@@ -658,8 +761,17 @@ const MonthPlansPanel = {
       </el-form>
       <template #footer>
         <div class="mp-foot">
-          <span class="mp-foot-tip">带 <b>*</b> 为必填项</span>
+          <span v-if="dlg.readonly && canWrite('plans') && dlg.form" class="mp-foot-tip">
+            <span class="mp-badge" :class="badgeClass(formStatus)">{{ formStatus }}</span>
+          </span>
+          <span v-else class="mp-foot-tip">带 <b>*</b> 为必填项</span>
           <div class="mp-foot-btns">
+            <template v-if="dlg.readonly && canWrite('plans') && dlg.form">
+              <el-button v-if="formStatus === '未执行'" size="small" type="warning" plain @click="flowFromView('已执行','已标记为已执行')">标记已执行</el-button>
+              <el-button v-if="formStatus === '未执行'" size="small" type="danger" plain @click="flowFromView('已取消','已取消')">取消计划</el-button>
+              <el-button v-if="formStatus === '已执行'" size="small" type="warning" plain @click="flowFromView('已结算','已标记为已结算')">标记已结算</el-button>
+              <el-button v-if="formStatus === '已执行'" size="small" @click="flowFromView('未执行','已退回未执行')">退回未执行</el-button>
+            </template>
             <el-button @click="dlg.visible=false">{{ dlg.readonly ? '关闭' : '取消' }}</el-button>
             <el-button v-if="!dlg.readonly" type="primary" :loading="dlg.busy" :disabled="timeInvalid" @click="submit">确定</el-button>
           </div>
