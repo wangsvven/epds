@@ -654,6 +654,44 @@ async function listOk(p, token) {
     return same + ' / ' + cross + ' / 96';
   });
 
+  await step('plans', '月计划模板：停电时间文本解析 + 导出（主网/配网两张子表、20 列）', async () => {
+    const p1 = monthCalc.parseOutageText('11月1日00:00-11月30日02:00', '2026');
+    need(p1 && p1.start === '2026-11-01 00:00:00' && p1.end === '2026-11-30 02:00:00', '连续停电解析错：' + JSON.stringify(p1));
+    const p2 = monthCalc.parseOutageText('11月11日08:00-16:00', '2026');
+    need(p2 && p2.start === '2026-11-11 08:00:00' && p2.end === '2026-11-11 16:00:00', '同日解析错：' + JSON.stringify(p2));
+    const p3 = monthCalc.parseOutageText('11月1日-11月30日19:27-21:27（白停夜送）', '2026');
+    need(p3 && p3.start === '2026-11-01 19:27:00' && p3.end === '2026-11-30 21:27:00', '白停夜送解析错：' + JSON.stringify(p3));
+    need(monthCalc.parseOutageText('乱写一段', '2026') === null, '无法识别时应返回 null');
+
+    const body = {
+      planType: '月计划', status: '未执行', name: '模板导出线', maintDevice: '10kV模板线01号杆',
+      deviceType: '配网支线', voltage: '10kV', workType: '配农网工程',
+      outageStart: '2026-11-03 00:00:00', outageEnd: '2026-11-05 02:00:00',
+      workTime: '11月3日-11月5日00:30-01:30', transformerCount: '5', outageHouseholds: '10', planNote: '模板回归'
+    };
+    const created = needOk(await api('POST', '/api/workPlans', { token, body }), '模板导出用月计划 POST');
+    try {
+      const res = await fetch(base + '/api/workPlans/month-plan.xlsx?ids=' + created.id + '&year=2026&month=11',
+        { headers: { Authorization: 'Bearer ' + token } });
+      need(res.ok, '导出接口应 200，实际 ' + res.status);
+      const buf = Buffer.from(await res.arrayBuffer());
+      need(buf.slice(0, 2).toString() === 'PK', '导出文件应为 xlsx（zip 头）');
+      const wb = xlsx.read(buf, { type: 'buffer' });
+      need(wb.SheetNames.join(',') === '主网,配网', '子表应为 主网/配网，实际 ' + wb.SheetNames.join(','));
+      const aoa = xlsx.utils.sheet_to_json(wb.Sheets['配网'], { header: 1, defval: '', raw: false });
+      need(String(aoa[0][0]).includes('配电设备检修计划（配网）'), '标题行不对：' + aoa[0][0]);
+      const head = (aoa[1] || []).map(v => String(v));
+      need(head[0] === '序号' && head[7] === '计划停电时间' && head[9] === '检修类型' && head[19] === '备注',
+        '表头 20 列不对：' + head.join('|'));
+      need(String(aoa[2][0]).includes('总体上按时间排序'), '说明行缺失：' + aoa[2][0]);
+      need(String(aoa[3][0]) === '1' && String(aoa[3][7]) === '11月3日00:00-11月5日02:00',
+        '数据行不对：' + JSON.stringify((aoa[3] || []).slice(0, 8)));
+      return '标题/20列表头/说明行/数据行 OK → ' + aoa[3][7];
+    } finally {
+      await api('DELETE', '/api/workPlans/' + created.id, { token });
+    }
+  });
+
   await step('plans', '月计划必填校验（4 项必填 + 结束不得早于开始）', async () => {
     const empty = monthCalc.validate({});
     need(empty.maintDevice === '请填写检修设备', '检修设备必填未拦下');

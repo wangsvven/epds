@@ -34,5 +34,22 @@ const api = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || '上传失败');
     return data;
+  },
+  // 文件下载：返回 { blob, name }，name 优先取后端 Content-Disposition
+  async download(u) {
+    const token = localStorage.getItem('erp_token');
+    const headers = {};
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const res = await fetch(u, { headers });
+    if (res.status === 401) { localStorage.removeItem('erp_token'); location.reload(); throw new Error('unauth'); }
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || '下载失败');
+    }
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd) || /filename="?([^";]+)"?/i.exec(cd);
+    let name = '';
+    if (m) { try { name = decodeURIComponent(m[1]); } catch (e) { name = m[1]; } }
+    return { blob: await res.blob(), name };
   }
 };

@@ -35,8 +35,8 @@ const MP_COLS = [
   { key: 'planNote', label: '备注' },
   { key: 'leader', label: '班组长' }
 ];
-/* 导入时必须存在的表头列（其余列缺失按默认值补） */
-const MP_IMPORT_REQUIRED = ['检修设备', '计划停电开始', '计划停电结束'];
+/* 导入表头识别：模板 20 列（含「计划停电时间」）与旧版导出（含「计划停电开始/结束」）都支持，
+   见 setup() 里的 MP_HEADER_MAP；缺列按默认值补。 */
 
 /* 纯函数（页面与冒烟共用，避免两处漂移） */
 const MonthPlanCalc = {
@@ -108,7 +108,26 @@ const MonthPlanCalc = {
     if (s && e && e < s) out.outageEnd = '计划停电结束时间不能早于开始时间';
     return out;
   },
-  keyOf(o) { return String((o && o.maintDevice) || '').trim() + '||' + String((o && o.outageStart) || '').trim(); }
+  keyOf(o) { return String((o && o.maintDevice) || '').trim() + '||' + String((o && o.outageStart) || '').trim(); },
+  /* 模板「计划停电时间」文本 → 起止时间（YYYY-MM-DD HH:mm:00）；year 由「导入年份」给。
+     支持：M月D日HH:mm-M月D日HH:mm（连续停电）、M月D日HH:mm-HH:mm（同日）、
+     M月D日-M月D日HH:mm-HH:mm（白停夜送/夜投，日期段+时间段）。无法识别返回 null。 */
+  parseOutageText(text, year) {
+    const raw = String(text == null ? '' : text).trim();
+    if (!raw) return null;
+    const y = Number(year) || (new Date()).getFullYear();
+    // 去掉「（白停夜送）」这类括注，统一分隔符与空白
+    const s = raw.replace(/[（(][^）)]*[）)]/g, '').replace(/\s+/g, '').replace(/[~～至—–]/g, '-');
+    const p2 = n => String(n).padStart(2, '0');
+    const mk = (m, d, hh, mm) => y + '-' + p2(m) + '-' + p2(d) + ' ' + p2(hh) + ':' + p2(mm) + ':00';
+    let m = /^(\d{1,2})月(\d{1,2})日(\d{1,2}):(\d{2})-(\d{1,2})月(\d{1,2})日(\d{1,2}):(\d{2})$/.exec(s);
+    if (m) return { start: mk(m[1], m[2], m[3], m[4]), end: mk(m[5], m[6], m[7], m[8]) };
+    m = /^(\d{1,2})月(\d{1,2})日(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(s);
+    if (m) return { start: mk(m[1], m[2], m[3], m[4]), end: mk(m[1], m[2], m[5], m[6]) };
+    m = /^(\d{1,2})月(\d{1,2})日-(\d{1,2})月(\d{1,2})日(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(s);
+    if (m) return { start: mk(m[1], m[2], m[5], m[6]), end: mk(m[3], m[4], m[7], m[8]) };
+    return null;
+  }
 };
 if (typeof window !== 'undefined') window.MonthPlanCalc = MonthPlanCalc;
 
@@ -455,19 +474,29 @@ const MonthPlansPanel = {
       });
     }
 
-    /* ---------------- 导出（当前页签 + 当前筛选，22 列，可回灌） ---------------- */
-    const blank = v => (v == null ? '' : String(v));
-    const WIDE_COLS = ['检修设备', '检修内容', '影响用户和区域', '涉及重要电力用户名称', '备注'];
-    function exportXlsx() {
+    /* ---------------- 导出（按「月计划导出模板」生成，服务端 ExcelJS 出样式） ---------------- */
+    const exporting = ref(false);
+    async function exportXlsx() {
       const rows = filtered.value;
-      const aoa = [MP_COLS.map(c => c.label)];
-      rows.forEach(p => aoa.push(MP_COLS.map(c => blank(p[c.key]))));
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws['!cols'] = MP_COLS.map(c => ({ wch: WIDE_COLS.includes(c.label) ? 26 : (['涉及工程项目', '计划工作时间'].includes(c.label) ? 24 : 16) }));
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, '月计划');
-      XLSX.writeFile(wb, '月计划导出.xlsx');
-      ElementPlus.ElMessage.success('已导出 ' + rows.length + ' 条');
+      if (!rows.length) { ElementPlus.ElMessage.warning('当前筛选没有可导出的月计划'); return; }
+      exporting.value = true;
+      try {
+        const ids = rows.map(r => r.id).filter(Boolean).join(',');
+        const firstDate = (rows.find(r => r.outageStart) || {}).outageStart || '';
+        const year = importYear.value || String(ServerTime.year());
+        const month = firstDate.slice(5, 7) ? String(Number(firstDate.slice(5, 7))) : '';
+        let url = '/api/workPlans/month-plan.xlsx?ids=' + encodeURIComponent(ids) + '&year=' + encodeURIComponent(year);
+        if (month) url += '&month=' + encodeURIComponent(month);
+        const { blob, name } = await api.download(url);
+        const a = document.createElement('a');
+        const href = URL.createObjectURL(blob);
+        a.href = href;
+        a.download = name || ('月计划-' + year + '.xlsx');
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 2000);
+        ElementPlus.ElMessage.success('已按模板导出 ' + rows.length + ' 条');
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { exporting.value = false; }
     }
 
     /* ---------------- 导入预览（浏览器解析 + 判重） ---------------- */
@@ -479,51 +508,94 @@ const MonthPlansPanel = {
     const cellText = v => String(v == null ? '' : v).trim();
     const MP_DEFAULTS = { workType: '配农网工程', gridRisk: '无', riskLevel: 'IV', importantUsers: '无' };
 
+    /* 表头 → 字段：同时认「月计划导出模板」的 20 列与旧版 22 列导出 */
+    const MP_HEADER_MAP = {
+      '运维单位': 'opsUnit', '检修单位': 'maintUnit', '关联项目': 'project',
+      '涉及工程项目': 'projectName', '检修设备': 'maintDevice', '电压等级': 'voltage',
+      '设备类型': 'deviceType', '计划工作时间': 'workTime', '检修类型': 'workType',
+      '检修内容': 'maintContent', '影响主要用户和区域': 'affectArea', '影响用户和区域': 'affectArea',
+      '停电涉及中压配变数': 'transformerCount', '停电时户数': 'outageHouseholds',
+      '涉及重要电力用户名称': 'importantUsers', '电网风险等级': 'gridRisk', '作业风险等级': 'riskLevel',
+      '近2月停电次数': 'outageCount2m', '本年度停电次数': 'outageCountYear', '备注': 'planNote',
+      '班组长': 'leader', '计划停电开始': 'outageStart', '计划停电结束': 'outageEnd'
+    };
+    // 模板第 3 行的红字填写说明，命中即跳过
+    const isNoteRow = cells => cells.some(c => /下拉单选|连续停电格式|检修设备名称|发电车需求|总体上按时间排序/.test(c));
+
     async function onImpFile(ev) {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = '';
       if (!file) return;
       if (file.size > 10 * 1024 * 1024) { ElementPlus.ElMessage.error('文件大小超过 10MB'); return; }
-      let aoa;
+
+      let book;
       try {
         const buf = await file.arrayBuffer();
-        const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+        book = XLSX.read(new Uint8Array(buf), { type: 'array' });
       } catch (e) {
         ElementPlus.ElMessage.error('文件解析失败：' + (e.message || '无法识别的表格'));
         return;
       }
-      const head = (aoa[0] || []).map(cellText);
-      const idx = {};
-      head.forEach((h, i) => { if (h && idx[h] === undefined) idx[h] = i; });
-      const miss = MP_IMPORT_REQUIRED.filter(n => idx[n] === undefined);
-      if (miss.length) {
-        ElementPlus.ElMessage.error('表头缺少列：' + miss.join('、') + '。至少需要：' + MP_IMPORT_REQUIRED.join('、'));
-        return;
-      }
+
       const parsed = [];
       const bad = [];
-      for (let i = 1; i < aoa.length; i++) {
-        const r = aoa[i];
-        if (!r) continue;
-        const o = { __row: i + 1 };
-        MP_COLS.forEach(c => {
-          o[c.key] = idx[c.label] === undefined ? (MP_DEFAULTS[c.key] || '') : cellText(r[idx[c.label]]);
-        });
-        o.areaStation = '';
-        if (!o.maintDevice && !o.outageStart) continue;                 // 空行
-        const lack = [];
-        if (!o.maintDevice) lack.push('检修设备');
-        if (!o.outageStart) lack.push('计划停电开始');
-        if (!o.outageEnd) lack.push('计划停电结束');
-        if (lack.length) { bad.push('第' + (i + 1) + '行缺少：' + lack.join('、')); parsed.push(o); continue; }
-        o.outageStart = normDT(o.outageStart); o.outageEnd = normDT(o.outageEnd);
-        if (!o.workTime) o.workTime = MonthPlanCalc.genWorkTime(o.outageStart, o.outageEnd);      // 文件未给则按联动补算
-        if (!String(o.outageHouseholds).trim()) o.outageHouseholds = MonthPlanCalc.households(o.transformerCount, o.outageStart, o.outageEnd);
-        const proj = projects.value.find(x => x.name === o.project);
-        if (proj && proj.substation) o.areaStation = proj.substation;
-        parsed.push(o);
+      let headerFound = false;
+
+      // 模板有「主网 / 配网」两张子表，逐表解析后合并
+      book.SheetNames.forEach(name => {
+        const aoa = XLSX.utils.sheet_to_json(book.Sheets[name], { header: 1, defval: '', raw: false });
+        if (!aoa.length) return;
+        // 表头行：前 10 行里命中表头名最多的一行（模板第 1 行是合并标题，第 2 行才是表头）
+        let hi = -1, best = 0;
+        for (let i = 0; i < Math.min(aoa.length, 10); i++) {
+          const cells = (aoa[i] || []).map(cellText);
+          const hit = cells.filter(c => MP_HEADER_MAP[c] || c === '计划停电时间').length;
+          if (hit > best) { best = hit; hi = i; }
+        }
+        if (hi < 0 || best < 4) return;                       // 非数据表（空白子表等）
+        headerFound = true;
+        const idx = {};
+        (aoa[hi] || []).map(cellText).forEach((h, i) => { if (h && idx[h] === undefined) idx[h] = i; });
+        if (idx['检修设备'] === undefined) return;
+        const timeCol = idx['计划停电时间'];
+
+        for (let i = hi + 1; i < aoa.length; i++) {
+          const r = aoa[i] || [];
+          const cells = r.map(cellText);
+          if (!cells.some(Boolean)) continue;
+          if (isNoteRow(cells)) continue;                      // 红字说明行
+          const o = { __row: i + 1, __sheet: name };
+          MP_COLS.forEach(c => { o[c.key] = MP_DEFAULTS[c.key] || ''; });
+          Object.keys(MP_HEADER_MAP).forEach(label => {
+            const ci = idx[label];
+            if (ci !== undefined) o[MP_HEADER_MAP[label]] = cellText(r[ci]);
+          });
+          o.areaStation = '';
+          if (!o.projectName && o.project) o.projectName = o.project;
+          if (!o.project && o.projectName) o.project = o.projectName;
+          // 时间：模板是「计划停电时间」合并文本，旧导出是开始/结束两列
+          if (timeCol !== undefined) {
+            const rt = MonthPlanCalc.parseOutageText(cellText(r[timeCol]), importYear.value);
+            if (rt) { o.outageStart = rt.start; o.outageEnd = rt.end; }
+          }
+          if (!o.maintDevice && !o.outageStart && !o.outageEnd) continue;   // 空行
+          const lack = [];
+          if (!o.maintDevice) lack.push('检修设备');
+          if (!o.outageStart) lack.push('计划停电时间');
+          if (!o.outageEnd) lack.push('计划停电结束');
+          if (lack.length) { bad.push(name + ' 第' + (i + 1) + '行缺少：' + lack.join('、')); parsed.push(o); continue; }
+          o.outageStart = normDT(o.outageStart); o.outageEnd = normDT(o.outageEnd);
+          if (!o.workTime) o.workTime = MonthPlanCalc.genWorkTime(o.outageStart, o.outageEnd);   // 未给则按联动补算
+          if (!String(o.outageHouseholds).trim()) o.outageHouseholds = MonthPlanCalc.households(o.transformerCount, o.outageStart, o.outageEnd);
+          const proj = projects.value.find(x => x.name === (o.project || o.projectName));
+          if (proj && proj.substation) o.areaStation = proj.substation;
+          parsed.push(o);
+        }
+      });
+
+      if (!headerFound) {
+        ElementPlus.ElMessage.error('没识别到表头：请用「导出 xlsx」下载的模板填写（表头需含检修设备、计划停电时间等列）');
+        return;
       }
       if (bad.length) {
         ElementPlus.ElMessage.error('文件有 ' + bad.length + ' 行数据不完整，未导入：' + bad.slice(0, 3).join('；') + (bad.length > 3 ? ' …' : ''));
@@ -568,7 +640,7 @@ const MonthPlansPanel = {
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
       makeWeek, editRow, copyMonth, archivePlan, removePlan, formStatus, flowFromView, saveWith,
-      exportXlsx, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
+      exportXlsx, exporting, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
       MP_DEVICE_TYPES, MP_VOLTAGES, MP_WORK_TYPES, MP_GRID_RISKS, MP_RISK_LEVELS, MP_STATUS, MP_COLS
     };
   },
@@ -595,7 +667,7 @@ const MonthPlansPanel = {
         </el-select>
       </div>
       <el-button v-if="canWrite('plans')" size="small" @click="pickImpFile">导入预览 xls</el-button>
-      <el-button size="small" @click="exportXlsx">导出 xlsx</el-button>
+      <el-button size="small" :loading="exporting" title="按「月计划导出模板」生成（主网/配网两张子表），导出文件可直接再导入" @click="exportXlsx">导出 xlsx</el-button>
       <input ref="impInput" type="file" accept=".xlsx,.xls" style="display:none" @change="onImpFile" />
     </div>
 
