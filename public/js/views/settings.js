@@ -5,8 +5,11 @@ const SettingsView = {
     const active = ref('annualPlans');
     const site = reactive({ companyName: '', icp: '', systemName: '', defaultSource: '甲供材料', allowSelfPurchase: true, loginBg: '', loginBgMode: 'cover', loginBgRotate: 0, weekStart: 1, welcome: { greeting: '', logoUrl: '' } });
     const savedName = ref('');
-    // 时间源：只展示服务器北京时间（不读本机时间），每秒刷新
-    const clock = reactive({ full: '', synced: false, offsetSec: 0, tz: '北京时间（UTC+8）' });
+    // 时间源：服务器北京时间（UTC+8）为基准，支持「自动 / 手动」两种模式
+    const clock = reactive({ full: '', synced: false, offsetSec: 0, tz: '北京时间（UTC+8）', manual: '' });
+    const timeAuto = ref(true);      // true = 自动（真实服务器时间）；false = 手动设定
+    const timeDirty = ref(false);    // 有未保存改动
+    const timeSaving = ref(false);
     let clockTimer = 0;
     function tickClock() {
       const ST = window.ServerTime;
@@ -17,6 +20,41 @@ const SettingsView = {
         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
       clock.synced = !!ST.synced;
       clock.offsetSec = Math.round((ST.offset || 0) / 1000);
+    }
+    function markTimeDirty() { timeDirty.value = true; }
+    // 读取当前时间源状态（模式 / 手动设定值）
+    async function loadTimeSource() {
+      const ST = window.ServerTime;
+      if (!ST) return;
+      const j = await ST.sync();
+      timeAuto.value = !(j && j.mode === 'manual');
+      clock.manual = (j && j.manual) || ST.ymdhm();
+      timeDirty.value = false;
+      tickClock();
+    }
+    function useRealTime() {
+      const ST = window.ServerTime;
+      const real = (ST && ST.realNow) ? String(ST.realNow).slice(0, 16) : (ST ? ST.ymdhm() : '');
+      clock.manual = real;
+      markTimeDirty();
+    }
+    async function saveTimeSource() {
+      timeSaving.value = true;
+      try {
+        const body = { timeMode: timeAuto.value ? 'auto' : 'manual' };
+        if (!timeAuto.value) {
+          if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(String(clock.manual || '').trim())) {
+            ElementPlus.ElMessage.warning('请选择完整的日期和时间');
+            return;
+          }
+          body.timeManual = clock.manual;
+        }
+        await api.put('/api/settings', body);
+        await loadTimeSource();
+        ElementPlus.ElMessage.success(timeAuto.value ? '已切换为自动时间（服务器北京时间）' : '已切换为手动时间');
+      } catch (e) {
+        ElementPlus.ElMessage.error(e.message || '保存失败');
+      } finally { timeSaving.value = false; }
     }
     async function loadSite() {
       try {
@@ -202,11 +240,10 @@ const SettingsView = {
       loadSite(); loadUnits();
       tickClock();
       clockTimer = setInterval(tickClock, 1000);
-      // 首屏若还没完成对时，对时完成后立即刷一次
-      if (window.ServerTime) ServerTime.sync().then(tickClock).catch(() => {});
+      loadTimeSource();
     });
     onUnmounted(() => { if (clockTimer) clearInterval(clockTimer); });
-    return { clock, active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
+    return { clock, timeAuto, timeDirty, timeSaving, markTimeDirty, useRealTime, saveTimeSource, loadTimeSource, active, site, savedName, loadSite, saveSite, saveWelcome, annualPlanCfg, substationCfg, teamCfg, UNIT_TYPES, units, unitDlg, unitsOf, openUnitAdd, openUnitEdit, submitUnit, removeUnit, LOGIN_BG_PRESETS, LOGIN_BG_MODES, LOGIN_BG_ROTATES, bgSaving, bgUploading, bgDeleting, previewStyle, previewRotClass, rotateBy, saveLoginBg, uploadLoginBg, deleteLoginBg, isLoginBgPreset, isLoginBgCustom };
   },
   template: `
   <div>
@@ -350,7 +387,7 @@ const SettingsView = {
             <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
               <b>时间源</b>
               <el-tag :type="clock.synced ? 'success' : 'info'" effect="plain" size="small">
-                {{ clock.synced ? '已与服务器对时' : '对时中…' }}
+                {{ !clock.synced ? '对时中…' : (timeAuto ? '自动 · 已与服务器对时' : '手动设定') }}
               </el-tag>
             </div>
           </template>
@@ -358,16 +395,34 @@ const SettingsView = {
             <span class="ts-now-val">{{ clock.full }}</span>
             <span class="ts-now-tz">{{ clock.tz }}</span>
           </div>
+
+          <div class="ts-row">
+            <span class="ts-lb">自动设定时间与日期</span>
+            <el-switch v-model="timeAuto" :disabled="!canWrite('settings')" @change="markTimeDirty" />
+          </div>
+          <div v-if="!timeAuto" class="ts-row">
+            <span class="ts-lb">日期和时间</span>
+            <plan-date-time v-model="clock.manual" class="ts-dt" :disabled="!canWrite('settings')"
+              @update:model-value="markTimeDirty" />
+            <el-button size="small" @click="useRealTime">使用当前服务器时间</el-button>
+          </div>
+
           <div class="ts-tip">
-            时间基准：<b>后端服务器北京时间（UTC+8）</b>。计划时间、编号年月、到货日期、日志导出时间等一律以此为准，
+            时间基准：<b>后端服务器北京时间（UTC+8）</b>。计划时间、编号年月、到货单据时间、到货动态等一律以此为准，
             <b>不读取客户端本地时间</b>，手机或电脑时间被改错、时区错乱都不会影响保存结果。
+            <template v-if="!timeAuto">手动模式下，新录入的资料按上面设定的时间记录。</template>
           </div>
           <div class="ts-tip">
             <b>24 小时制</b>：时间选择器固定 00:00–23:59，不提供 12 小时制切换。
-            <span v-if="clock.synced && Math.abs(clock.offsetSec) >= 5" class="ts-warn">
+            <span v-if="timeAuto && clock.synced && Math.abs(clock.offsetSec) >= 5" class="ts-warn">
               本机时间与服务器相差 {{ Math.abs(clock.offsetSec) }} 秒，系统已自动校正显示。
             </span>
-            <span v-else-if="clock.synced" class="ts-ok">本机时间与服务器一致。</span>
+            <span v-else-if="timeAuto && clock.synced" class="ts-ok">本机时间与服务器一致。</span>
+            <span v-else-if="!timeAuto" class="ts-warn">手动模式：新录入的时间按上方设定值记录。</span>
+          </div>
+          <div v-if="canWrite('settings') && timeDirty" class="ts-actions">
+            <el-button type="primary" size="small" :loading="timeSaving" @click="saveTimeSource">保存时间源</el-button>
+            <span class="ts-hint">有未保存的改动</span>
           </div>
         </el-card>
 

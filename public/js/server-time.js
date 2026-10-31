@@ -17,6 +17,9 @@
   var offset = 0;                   // 服务器时间 - 本机时间（毫秒）
   var synced = false;
   var timer = null;
+  var mode = 'auto';                // auto = 用真实服务器时间；manual = 全局设置里手工设定
+  var manualText = '';              // 手动模式下设定的时刻（YYYY-MM-DD HH:mm）
+  var realNowText = '';             // 真实服务器时间（不受手动偏移影响）
 
   // 必须用 class 继承：Date 不能通过 Date.call(this) 初始化内部槽
   class ServerDate extends Date {
@@ -56,7 +59,13 @@
     if (typeof fetch !== 'function') return Promise.resolve(null);
     return fetch('/api/server-time', { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) { return (j && applyTs(j.ts)) ? j : null; })
+      .then(function (j) {
+        if (!j) return null;
+        if (j.mode) mode = j.mode;
+        if (j.manual !== undefined) manualText = j.manual || '';
+        if (j.realNow) realNowText = j.realNow;
+        return applyTs(j.ts) ? j : null;
+      })
       .catch(function () { return null; });
   }
   // 起定期复核（幂等）
@@ -71,6 +80,9 @@
     sync: sync, start: start, applyTs: applyTs,
     get synced() { return synced; },
     get offset() { return offset; },
+    get mode() { return mode; },
+    get manual() { return manualText; },
+    get realNow() { return realNowText; },
     tzOffsetMinutes: TZ_MIN,
     timeZone: 'Asia/Shanghai',
     timeZoneLabel: '北京时间（UTC+8）'

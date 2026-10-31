@@ -360,7 +360,7 @@ async function listOk(p, token) {
     vm.runInContext(code, sandbox);
     return sandbox.window.MaterialNo;
   })();
-  // 领料单号定版格式：LL-YYYYMMDD-NNN（3 位当日流水）；无前缀写法只作为历史测试期格式参与排序解析
+  // 领料单号定版格式：LL-YYYYMMDD-NNNN（4 位当日流水，从 0001 起）；无前缀写法只作为历史测试期格式参与排序解析
   const ymd = off => { const d = new Date(Date.now() + (off || 0) * 86400000); const p = n => String(n).padStart(2, '0'); return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()); };
   const TODAY = ymd(0), YDAY = ymd(-1);
   let reqNoNew = '';
@@ -372,22 +372,22 @@ async function listOk(p, token) {
   const insertReq = async (reqNo) => {
     needOk(await api('POST', '/api/materialRequisitions', { token, body: { reqNo, projects: ['冒烟测试项目'], items: [], status: '待入库', createdAt: reqNo.slice(0, 8) } }), 'insert ' + reqNo);
   };
-  await step('materials', '领料单号定版：当日首单 LL-YYYYMMDD-001（无前缀/昨日单均不计入推导）', async () => {
+  await step('materials', '领料单号定版：当日首单 LL-YYYYMMDD-0001（4 位流水，无前缀/昨日单均不计入推导）', async () => {
     // 干扰项：历史无前缀写法（不匹配 LL-<今日>- 前缀）、昨日 LL- 单（日期不同）
     await insertReq(TODAY + '-005');
     await insertReq('LL-' + YDAY + '-005');
     const n1 = await mkReq(1);
-    need(/^LL-\d{8}-\d{3}$/.test(n1), '单号格式应为 LL-YYYYMMDD-NNN，实际 ' + n1);
-    need(n1 === 'LL-' + TODAY + '-001', '当日首单应为 LL-' + TODAY + '-001，实际 ' + n1);
+    need(/^LL-\d{8}-\d{4}$/.test(n1), '单号格式应为 LL-YYYYMMDD-NNNN，实际 ' + n1);
+    need(n1 === 'LL-' + TODAY + '-0001', '当日首单应为 LL-' + TODAY + '-0001，实际 ' + n1);
     const n2 = await mkReq(1);
-    need(n2 === 'LL-' + TODAY + '-002', '次单应为 LL-' + TODAY + '-002，实际 ' + n2);
+    need(n2 === 'LL-' + TODAY + '-0002', '次单应为 LL-' + TODAY + '-0002，实际 ' + n2);
     reqNoNew = n2;
     return n1 + ' → ' + n2 + '（已插入 ' + TODAY + '-005 与 LL-' + YDAY + '-005 作干扰）';
   });
-  await step('materials', '领料单号当日超 999 位数自然增长（不报错、不截断）', async () => {
-    await insertReq('LL-' + TODAY + '-999');
+  await step('materials', '领料单号当日超 9999 位数自然增长（不报错、不截断）', async () => {
+    await insertReq('LL-' + TODAY + '-9999');
     const n = await mkReq(1);
-    need(n === 'LL-' + TODAY + '-1000', '应自然增长为 LL-' + TODAY + '-1000，实际 ' + n);
+    need(n === 'LL-' + TODAY + '-10000', '应自然增长为 LL-' + TODAY + '-10000，实际 ' + n);
     return n;
   });
   await step('materials', '单号排序：日期升序 → 流水组（数值）→ 6 位时间组 → 无法识别', async () => {

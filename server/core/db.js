@@ -2,7 +2,7 @@
 /* 本地 JSON 存储：db.json 读写、空实例种子、旧数据模型迁移；DB 单例只在此文件持有。 */
 const fs = require('fs');
 const path = require('path');
-const { nowISO, repairUploadName } = require('./util');
+const { nowISO, repairUploadName, setClockOffset } = require('./util');
 // 材料到库状态计算（旧库迁移时刷新 status 用；该模块内部延迟取 DB，不会与本文件形成循环依赖）
 const { materialStatus } = require('./material-calc');
 
@@ -434,3 +434,10 @@ module.exports = {
 };
 
 migrateDB();
+
+/* 时间源：手动模式下把「手动时间 - 真实时间」的偏移注入 util，使后端写入的时间与前端显示一致 */
+(function applyClockOffset() {
+  const st = DB.settings || {};
+  const ts = Number(st.timeManualTs), setAt = Number(st.timeManualSetAt);
+  setClockOffset(st.timeMode === 'manual' && ts > 0 && setAt > 0 ? ts - setAt : 0);
+})();

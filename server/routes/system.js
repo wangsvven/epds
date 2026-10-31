@@ -17,11 +17,46 @@ const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB, DEFAULT_LOGIN_BG, LEGACY_LOGIN_BG_MAP, USER_GROUPS } = require('../core/db');
 const {
-  genId, nowISO, fmtNow, aliveFilter, parseCNDate, parseCSVBuffer, repairUploadName
+  genId, nowISO, fmtNow, aliveFilter, parseCNDate, parseCSVBuffer, repairUploadName,
+  bjStr, setClockOffset, getClockOffset
 } = require('../core/util');
 const {
   TOKENS, isAdmin, passwordStrong, userGroupOf, writeModulesOf
 } = require('../core/auth');
+
+/* ---------- 服务器时间（北京时间 UTC+8，唯一时间基准）：模块级，public 与 authed 路由共用 ---------- */
+// 不读服务器系统时区：用 UTC 毫秒 + 8 小时取「北京时间墙钟」，容器未设 TZ 也不会漂。
+const SERVER_TZ_OFFSET_MIN = 480;
+// 手动模式偏移：settings.timeManualTs（用户设定的北京墙钟 → UTC 毫秒）与 timeManualSetAt（设定时的真实时刻）之差
+function manualOffsetMs() {
+  const st = DB.settings || {};
+  if (st.timeMode !== 'manual') return 0;
+  const ts = Number(st.timeManualTs), setAt = Number(st.timeManualSetAt);
+  return (ts > 0 && setAt > 0) ? ts - setAt : 0;
+}
+function serverClock() {
+  const ms = Date.now() + getClockOffset();
+  const realMs = Date.now();
+  const t = new Date(ms + SERVER_TZ_OFFSET_MIN * 60000);
+  const tr = new Date(realMs + SERVER_TZ_OFFSET_MIN * 60000);
+  const p = n => String(n).padStart(2, '0');
+  const st = DB.settings || {};
+  return {
+    now: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()) + ' ' +
+         p(t.getUTCHours()) + ':' + p(t.getUTCMinutes()) + ':' + p(t.getUTCSeconds()),
+    date: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()),
+    year: t.getUTCFullYear(),
+    ts: ms,
+    mode: st.timeMode === 'manual' ? 'manual' : 'auto',
+    manual: st.timeMode === 'manual' ? (st.timeManual || '') : '',
+    // 真实服务器时间（不受手动偏移影响），供「使用当前服务器时间」按钮用
+    realNow: tr.getUTCFullYear() + '-' + p(tr.getUTCMonth() + 1) + '-' + p(tr.getUTCDate()) + ' ' +
+             p(tr.getUTCHours()) + ':' + p(tr.getUTCMinutes()) + ':' + p(tr.getUTCSeconds()),
+    tzOffsetMinutes: SERVER_TZ_OFFSET_MIN,
+    timeZone: 'Asia/Shanghai'
+  };
+}
+
 
 function registerPublic() {
 // ---------- 认证 ----------
@@ -41,29 +76,11 @@ app.get('/api/health', (req, res) => res.json({ ok: true, name: DB.settings.syst
 // favicon：避免浏览器默认请求 /favicon.ico 触发 404 控制台错误
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-// ---------- 服务器时间（北京时间 UTC+8，唯一时间基准）----------
-// 不读服务器系统时区：用 UTC 毫秒 + 8 小时取「北京时间墙钟」，容器未设 TZ 也不会漂。
-const SERVER_TZ_OFFSET_MIN = 480;
-function serverClock() {
-  const ms = Date.now();
-  const t = new Date(ms + SERVER_TZ_OFFSET_MIN * 60000);
-  const p = n => String(n).padStart(2, '0');
-  return {
-    now: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()) + ' ' +
-         p(t.getUTCHours()) + ':' + p(t.getUTCMinutes()) + ':' + p(t.getUTCSeconds()),
-    date: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()),
-    year: t.getUTCFullYear(),
-    ts: ms,
-    tzOffsetMinutes: SERVER_TZ_OFFSET_MIN,
-    timeZone: 'Asia/Shanghai'
-  };
-}
 // 前端校准用：返回当前服务器时间与时间戳（无需登录，登录页/首屏即可用）
 app.get('/api/server-time', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json(serverClock());
 });
-
 // ---------- 登录页公开配置（无需登录：登录页需在鉴权前取背景图 / 系统名） ----------
 app.get('/api/public-config', (req, res) => {
   const clock = serverClock();
@@ -341,7 +358,21 @@ app.post('/api/contacts/import', upload.single('file'), (req, res) => {
 // ---------- 设置 ----------
 app.get('/api/settings', (req, res) => res.json(DB.settings));
 app.put('/api/settings', (req, res) => {
-  DB.settings = { ...DB.settings, ...req.body };
+  const body = { ...(req.body || {}) };
+  // 时间源：手动模式允许把「日期和时间」设成指定时刻（北京墙钟），换算成 UTC 毫秒并记录设定时刻
+  if (body.timeMode === 'manual') {
+    const v = String(body.timeManual || '').trim() || bjStr();
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(v);
+    if (!m) return res.status(400).json({ error: '手动时间格式应为 YYYY-MM-DD HH:mm' });
+    body.timeManual = m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5];
+    body.timeManualTs = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], 0) - SERVER_TZ_OFFSET_MIN * 60000;
+    body.timeManualSetAt = Date.now();
+  } else if (body.timeMode === 'auto') {
+    body.timeManualTs = 0; body.timeManualSetAt = 0; body.timeManual = '';
+  }
+  DB.settings = { ...DB.settings, ...body };
+  // 立即把偏移注入后端时间函数，后续写入的 createdAt / 单号日期等同步走手动时间
+  setClockOffset(manualOffsetMs());
   saveDB();
   res.json(DB.settings);
 });

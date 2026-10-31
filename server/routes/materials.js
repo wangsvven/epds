@@ -6,7 +6,7 @@ const app = require('../core/app');
 const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
-const { genId, nowISO, aliveFilter, fmtNow } = require('../core/util');
+const { genId, nowISO, aliveFilter, fmtNow, bjDate } = require('../core/util');
 const { withGen, materialStatus, roundQty } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 
@@ -80,11 +80,18 @@ app.post('/api/materialOutbound/create', (req, res) => {
     if (qty > avail + 1e-9) return res.status(400).json({ error: '物料「' + m.description + '」本次出库 ' + qty + ' 超过可用库存 ' + avail });
     finalItems.push({ materialId: m.id, code: m.code || '', description: m.description || '', unit: m.unit || '', qty, returned: 0 });
   }
-  // 单号：OUT-YYYYMMDD-NNNNNN（按当日已有单据数递增）
+  // 单号：OUT-YYYYMMDD-NNNN（当日 4 位流水，从 0001 起；取已存在的最大流水 +1，含已删除记录，单号不回收）
   const dateTag = fmtNow().slice(0, 10).replace(/-/g, '');
-  const seq = DB.materialOutbound.filter(o => !o.deleted && String(o.outNo || '').startsWith('OUT-' + dateTag + '-')).length + 1;
+  const prefix = 'OUT-' + dateTag + '-';
+  let seq = 0;
+  for (const o of DB.materialOutbound) {
+    const no = o && o.outNo;
+    if (typeof no !== 'string' || no.indexOf(prefix) !== 0) continue;
+    const suf = no.slice(prefix.length);
+    if (/^\d+$/.test(suf)) { const n = parseInt(suf, 10); if (n > seq) seq = n; }
+  }
   const rec = {
-    id: genId('ob'), outNo: 'OUT-' + dateTag + '-' + String(seq).padStart(6, '0'),
+    id: genId('ob'), outNo: prefix + String(seq + 1).padStart(4, '0'),
     project, receiver, status: '有效', createdAt: fmtNow(),
     items: finalItems, returns: [], compensated: 0,
     deleted: false
@@ -359,16 +366,15 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
 });
 
 // ---------- 领料单（暂存清单 → 生成领料单 → 下载 Excel → 确认入库 / 作废） ----------
-// 单号规则 LL-YYYYMMDD-NNNN：NNNN 为当天 4 位补零流水号（从 0001 起，只增不减）
-// 流水号从已落库的领料单推导，不新增字段；Node 单线程下 create 处理函数（计算单号→入数组→saveDB）全程同步、无 await 让出，
-// 并发请求在 JS 层串行，后到者能看到前者记录并取 max+1，故同一秒并发也不会撞号；
-// 扫描含已作废/已删除记录，确保单号不回收复用；仅计 4 位新格式后缀，旧 6 位 HHMMSS 后缀不计入（避免开局被带成 120506 而非 0001）。
-// 领料单号：LL-YYYYMMDD-流水（3 位起、当日有效，如 LL-20261028-001）
-// 流水只统计同前缀（LL-当日YYYYMMDD- 且余下全为数字）的记录；历史单已由 migrate-reqno-20261028 全量重编为本格式，推导天然连续
+// 单号规则 LL-YYYYMMDD-NNNN：NNNN 为当天 4 位补零流水号（从 0001 起，只增不减），如 LL-20261028-0001。
+// 日期取「北京时间」（与服务器进程时区无关）；流水由已落库的领料单推导，不新增字段。
+// Node 单线程下 create 处理函数（算单号→入数组→saveDB）全程同步、无 await 让出，并发在 JS 层串行，
+// 后到者能看到前者记录并取 max+1，同一秒并发也不会撞号；扫描含已作废/已删除记录，单号不回收复用。
+// 历史单已由 scripts/migrate-no4-20261031.js 全量重编为本格式，推导天然连续。
 function reqNoNow() {
-  const d = new Date();
+  const d = bjDate();
   const p = n => String(n).padStart(2, '0');
-  const prefix = 'LL-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-';
+  const prefix = 'LL-' + d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + '-';
   let max = 0;
   for (const r of DB.materialRequisitions) {
     const no = r && r.reqNo;
@@ -376,8 +382,8 @@ function reqNoNow() {
     const suf = no.slice(prefix.length);
     if (/^\d+$/.test(suf)) { const n = parseInt(suf, 10); if (n > max) max = n; }
   }
-  // 超过 999 时位数自然增长（1000、1001…），不截断、不封顶
-  return prefix + String(max + 1).padStart(3, '0');
+  // 超过 9999 时位数自然增长（10000…），不截断、不封顶
+  return prefix + String(max + 1).padStart(4, '0');
 }
 // 从暂存的物料生成领料单；领料数量可任意填写（默认=可继续领料），但不能大于可继续领料
 // 请求体：{ items: [{ id, qty }] }（兼容旧 { ids: [...] } = 按可继续领料全量生成）

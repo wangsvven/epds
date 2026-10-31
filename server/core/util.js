@@ -22,17 +22,38 @@ function genId(prefix) {
 }
 function nowISO() { return new Date().toISOString(); }
 
-// 文档中心「上传时间」戳（本地时区，精确到分）
-function fmtNow() {
-  const d = new Date();
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+/* ---------- 时间基准：北京时间（UTC+8） ----------
+ * 所有「人读时间」（createdAt / confirmedAt / history.at / importedAt …）一律按东八区生成，
+ * 与服务器的系统时区无关（Docker 容器默认 UTC 也不会少 8 小时）。
+ * 用法：bjDate() 返回「北京墙钟」的 Date，取其 getUTC* 即为北京时间；
+ *       bjStr() 直接返回 'YYYY-MM-DD HH:mm[:ss]'。 */
+const BJ_OFFSET_MS = 8 * 3600 * 1000;
+/* 「全局设置 → 时间源」手动模式的偏移：手动设定时间时算出（手动时间 - 真实时间），
+ * 由 db 加载后与设置保存时注入；为 0 时即自动模式（用真实服务器时间）。
+ * 只影响「取当前时间」，格式化历史值（传了具体时间）不受影响。 */
+let _clockOffsetMs = 0;
+function setClockOffset(ms) { _clockOffsetMs = Number(ms) || 0; }
+function getClockOffset() { return _clockOffsetMs; }
+function bjDate(v) {
+  const hasArg = v !== undefined && v !== null;
+  const base = hasArg ? (v instanceof Date ? v.getTime() : Number(v)) : (Date.now() + _clockOffsetMs);
+  return new Date((isFinite(base) ? base : Date.now()) + BJ_OFFSET_MS);
 }
-// 工作票配置版本指纹显示用（本地时区，精确到秒）
+function bjStr(v, withSec) {
+  const d = bjDate(v);
+  const p = n => String(n).padStart(2, '0');
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' +
+         p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + (withSec ? ':' + p(d.getUTCSeconds()) : '');
+}
+
+// 单据/资料的时间戳（北京时间，精确到分）
+function fmtNow() { return bjStr(); }
+// 工作票配置版本指纹显示用（北京时间，精确到秒）
 function fmtStamp(d) {
   const p2 = n => String(n).padStart(2, '0');
-  return d.getFullYear() + '/' + p2(d.getMonth() + 1) + '/' + p2(d.getDate()) + ' ' +
-         p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+  const b = bjDate(d instanceof Date ? d : (d === undefined ? undefined : d));
+  return b.getUTCFullYear() + '/' + p2(b.getUTCMonth() + 1) + '/' + p2(b.getUTCDate()) + ' ' +
+         p2(b.getUTCHours()) + ':' + p2(b.getUTCMinutes()) + ':' + p2(b.getUTCSeconds());
 }
 
 function parseCNDate(s) {
@@ -161,7 +182,7 @@ function buildStoreZip(entries) {
 }
 
 module.exports = {
-  aliveFilter, repairUploadName, genId, nowISO, fmtNow, fmtStamp,
+  aliveFilter, repairUploadName, genId, nowISO, fmtNow, fmtStamp, bjDate, bjStr, BJ_OFFSET_MS, setClockOffset, getClockOffset,
   parseCNDate, parseCSVBuffer, decodeXmlEntities, unzipEntry, listZipEntries, extractDocxText,
   crc32, buildStoreZip
 };

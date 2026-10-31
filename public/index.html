@@ -1181,6 +1181,12 @@
   .ts-tip b { color:var(--text-1); font-weight:600; }
   .ts-warn { color:#c26a00; }
   .ts-ok { color:var(--text-3); }
+  .ts-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 0; border-top:1px solid var(--line); }
+  .ts-row:first-of-type { border-top:none; }
+  .ts-lb { flex:0 0 auto; min-width:132px; font-size:13.5px; color:var(--text-1); }
+  .ts-dt.pdt { width:230px; }
+  .ts-actions { display:flex; align-items:center; gap:10px; margin-top:12px; }
+  .ts-hint { font-size:12.5px; color:#c26a00; }
 
   /* ===== 日期时间选择器（计划开始/结束时间，对齐原系统） ===== */
   .pdt { position:relative; width:100%; }
@@ -1253,6 +1259,8 @@
     .pdt-band { top:108px; }
     .pdt-day { height:31px; font-size:12.5px; }
     .ts-now-val { font-size:19px; }
+    .ts-lb { min-width:0; flex:1 1 100%; font-size:13px; }
+    .ts-dt.pdt { width:100%; }
     .pdt-cal { padding:0 6px 8px; }
   }
   /* 入库核对徽标：紧凑描边徽标（深浅色通用） */
