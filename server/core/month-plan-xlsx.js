@@ -39,17 +39,25 @@ const NOTES = [
 // 设备类型里属于「主网」的口径；其余都进「配网」子表
 const MAIN_GRID_TYPES = ['变电站设备', '变电站设备（主网）', '主网线路', '发电设备'];
 
-/* 模板自带的 6 组下拉（原文件只在「主网」第 4 行设置了数据验证，这里对两张表整列放开，并并入库里的实际取值） */
+/* 罗马数字两套写法长得一样，模板只用 Unicode（Ⅰ-Ⅴ）。库里部分记录存了 ASCII（I-V），
+   导出时统一归一成 Unicode，避免「Ⅰ-Ⅳ 在下来里显示两遍」且让单元格值与下拉一致。 */
+const ROMAN = { I: 'Ⅰ', II: 'Ⅱ', III: 'Ⅲ', IV: 'Ⅳ', V: 'Ⅴ' };
+const normRisk = v => {
+  const s = String(v == null ? '' : v).trim().toUpperCase();
+  return ROMAN[s] || s;
+};
+
+/* 模板自带的 6 组下拉（原文件只在「主网」第 4 行设置了数据验证；这里严格按模板原列表，
+   并在 buildMonthPlanXlsx 里并入库里的实际取值，避免已有值被判非法；errorStyle=warning 仍可手填） */
 const TPL_VALIDATION = {
   B: ['变电运检中心', '输电运检中心', '自流井区供电中心', '大安区供电中心', '贡井区供电中心', '沿滩区供电中心',
     '国网荣县供电公司', '国网荣州供电公司', '国网富顺县供电公司', '国网四川超高压公司', '信通公司'],
-  F: ['220kV', '110kV', '35kV', '10kV', '6kV', '380V', '0.4kV'],
+  F: ['220kV', '110kV', '35kV', '10kV', '6kV', '380V'],
   G: ['变电站设备', '变电站设备（主网）', '变电站设备（配网）', '主网线路', '配网主线', '配网支线', '配变',
-    '低压总保', '重合闸', '保护装置', '发电设备', '其他', '不涉及'],
-  J: ['基建', '迁改', '大修', '技改', '消缺', '预试预检', '业扩工程', '农配网工程', '客户工程', '其他',
-    '配农网工程', '生产检修改造', '外部工程', '借工'],
-  P: ['无', '六级', '五级', '七级', '四级', '一级', '二级', '三级', '八级'],
-  Q: ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'I', 'II', 'III', 'IV', 'V']
+    '低压总保', '重合闸', '保护装置', '发电设备', '其他'],
+  J: ['基建', '迁改', '大修', '技改', '消缺', '预试预检', '业扩工程', '农配网工程', '客户工程', '其他'],
+  P: ['无', '六级', '五级', '七级', '四级'],
+  Q: ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ']
 };
 const uniq = arr => Array.from(new Set(arr.map(x => String(x == null ? '' : x).trim()).filter(Boolean)));
 
@@ -89,7 +97,7 @@ function rowValues(p, seq) {
     v('outageHouseholds'),
     v('importantUsers'),
     v('gridRisk'),
-    v('riskLevel'),
+    normRisk(v('riskLevel')),
     v('outageCount2m'),
     v('outageCountYear'),
     v('planNote')
@@ -193,7 +201,7 @@ async function buildMonthPlanXlsx(rows, meta) {
     G: uniq(TPL_VALIDATION.G.concat(list.map(r => r.deviceType))),
     J: uniq(TPL_VALIDATION.J.concat(list.map(r => r.workType))),
     P: uniq(TPL_VALIDATION.P.concat(list.map(r => r.gridRisk))),
-    Q: uniq(TPL_VALIDATION.Q.concat(list.map(r => r.riskLevel)))
+    Q: uniq(TPL_VALIDATION.Q.concat(list.map(r => normRisk(r.riskLevel))))
   };
   fillSheet(wb.addWorksheet('主网'), company + year + '年' + month + '月发输变配电设备检修计划（主网）', main, lists);
   fillSheet(wb.addWorksheet('配网'), company + year + '年' + month + '月配电设备检修计划（配网）', dist, lists);
