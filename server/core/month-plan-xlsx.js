@@ -37,7 +37,21 @@ const NOTES = [
   '发电车需求等需要说明的事项'
 ];
 // 设备类型里属于「主网」的口径；其余都进「配网」子表
-const MAIN_GRID_TYPES = ['变电站设备', '主网线路', '发电设备'];
+const MAIN_GRID_TYPES = ['变电站设备', '变电站设备（主网）', '主网线路', '发电设备'];
+
+/* 模板自带的 6 组下拉（原文件只在「主网」第 4 行设置了数据验证，这里对两张表整列放开，并并入库里的实际取值） */
+const TPL_VALIDATION = {
+  B: ['变电运检中心', '输电运检中心', '自流井区供电中心', '大安区供电中心', '贡井区供电中心', '沿滩区供电中心',
+    '国网荣县供电公司', '国网荣州供电公司', '国网富顺县供电公司', '国网四川超高压公司', '信通公司'],
+  F: ['220kV', '110kV', '35kV', '10kV', '6kV', '380V', '0.4kV'],
+  G: ['变电站设备', '变电站设备（主网）', '变电站设备（配网）', '主网线路', '配网主线', '配网支线', '配变',
+    '低压总保', '重合闸', '保护装置', '发电设备', '其他', '不涉及'],
+  J: ['基建', '迁改', '大修', '技改', '消缺', '预试预检', '业扩工程', '农配网工程', '客户工程', '其他',
+    '配农网工程', '生产检修改造', '外部工程', '借工'],
+  P: ['无', '六级', '五级', '七级', '四级', '一级', '二级', '三级', '八级'],
+  Q: ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'I', 'II', 'III', 'IV', 'V']
+};
+const uniq = arr => Array.from(new Set(arr.map(x => String(x == null ? '' : x).trim()).filter(Boolean)));
 
 /* 停电时间文本：连续停电格式 X月X日XX:XX-X月X日XX:XX；同日写 X月X日XX:XX-XX:XX */
 function outageText(start, end) {
@@ -89,9 +103,21 @@ const THIN = { style: 'thin', color: { argb: 'FF000000' } };
 const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
 const FONT_CN = '宋体';
 
-function fillSheet(ws, title, rows) {
+function fillSheet(ws, title, rows, lists) {
   ws.properties.defaultRowHeight = 20;
   for (let c = 1; c <= HEADERS.length; c++) ws.getColumn(c).width = px2w(WIDTH_PX[c - 1]);
+
+  // 下拉校验（与模板同口径）：第 4 行起整列放开，errorStyle=warning 允许填库里的其它值
+  const V = lists || TPL_VALIDATION;
+  Object.keys(V).forEach(col => {
+    const text = '"' + uniq(V[col]).join(',') + '"';
+    if (text.length > 255) return;                     // Excel 内联列表上限 255 字符，超了就不加，避免坏文件
+    ws.dataValidations.add(col + '4:' + col + '1000', {
+      type: 'list', allowBlank: true, formulae: [text],
+      showErrorMessage: true, errorStyle: 'warning', errorTitle: '可选值',
+      error: '建议从下拉中选择（也可手工填写模板里没有的值）'
+    });
+  });
 
   // 标题
   ws.mergeCells(1, 1, 1, HEADERS.length);
@@ -160,8 +186,17 @@ async function buildMonthPlanXlsx(rows, meta) {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Electric Power Data System';
   wb.created = new Date();
-  fillSheet(wb.addWorksheet('主网'), company + year + '年' + month + '月发输变配电设备检修计划（主网）', main);
-  fillSheet(wb.addWorksheet('配网'), company + year + '年' + month + '月配电设备检修计划（配网）', dist);
+  // 下拉选项 = 模板口径 ∪ 本次导出的实际取值，避免库里已有值被判成非法
+  const lists = {
+    B: uniq(TPL_VALIDATION.B.concat(list.map(r => r.opsUnit))),
+    F: uniq(TPL_VALIDATION.F.concat(list.map(r => r.voltage))),
+    G: uniq(TPL_VALIDATION.G.concat(list.map(r => r.deviceType))),
+    J: uniq(TPL_VALIDATION.J.concat(list.map(r => r.workType))),
+    P: uniq(TPL_VALIDATION.P.concat(list.map(r => r.gridRisk))),
+    Q: uniq(TPL_VALIDATION.Q.concat(list.map(r => r.riskLevel)))
+  };
+  fillSheet(wb.addWorksheet('主网'), company + year + '年' + month + '月发输变配电设备检修计划（主网）', main, lists);
+  fillSheet(wb.addWorksheet('配网'), company + year + '年' + month + '月配电设备检修计划（配网）', dist, lists);
   return wb.xlsx.writeBuffer();
 }
 
