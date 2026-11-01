@@ -131,6 +131,13 @@ const MonthPlanCalc = {
 };
 if (typeof window !== 'undefined') window.MonthPlanCalc = MonthPlanCalc;
 
+// 作业风险等级：ASCII 罗马数字（I/II/III/IV/V）→ Unicode（Ⅰ-Ⅴ），保证日志等文档展示与模板一致
+function normRisk(v) {
+  const s = String(v == null ? '' : v).trim().toUpperCase();
+  const map = { 'I': 'Ⅰ', 'II': 'Ⅱ', 'III': 'Ⅲ', 'IV': 'Ⅳ', 'V': 'Ⅴ' };
+  return map[s] || (v == null ? '' : String(v));
+}
+
 const MonthPlansPanel = {
   props: {
     tab: { type: String, default: 'month' },              // month | archived
@@ -514,6 +521,81 @@ const MonthPlansPanel = {
       finally { exporting.value = false; }
     }
 
+    /* ---------------- 归档导出：日志类型，Markdown 文档格式 ---------------- */
+    // 归档月计划不再用 xlsx 模板（模板是给「未执行」月计划导入/导出的），改出一份「检修月计划日志」md 文档。
+    const exportingLog = ref(false);
+    function downloadBlob(blob, filename) {
+      const a = document.createElement('a');
+      const href = URL.createObjectURL(blob);
+      a.href = href; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 2000);
+    }
+    function kvLine(label, val) {
+      const s = String(val == null ? '' : val).trim();
+      return '- **' + label + '**：' + (s ? s : '—');
+    }
+    async function exportLogMd() {
+      const rows = filtered.value;
+      if (!rows.length) { ElementPlus.ElMessage.warning('当前筛选没有可导出的归档月计划'); return; }
+      exportingLog.value = true;
+      try {
+        // 年份/月份、单位取首条有效记录；整文档按计划停电开始时间排序（filtered 已是）
+        const first = rows.find(r => r.outageStart) || rows[0];
+        const ym = String(first.outageStart || '').slice(0, 7);
+        const year = ym ? Number(ym.slice(0, 4)) : ServerTime.year();
+        const month = ym ? Number(ym.slice(5, 7)) : '';
+        const company = (rows.find(r => r.opsUnit) || {}).opsUnit || 'XX供电公司';
+        const L = [];
+        L.push('# ' + company + (year ? ' ' + year + '年' : '') + (month ? month + '月' : '') + ' 检修月计划日志');
+        L.push('');
+        L.push('> 本文档由「Electric Power Data System · 本地版」自动生成，汇总**已归档**状态的检修月计划，共 ' + rows.length + ' 项，按计划停电开始时间排序。');
+        L.push('');
+        L.push('---');
+        L.push('');
+        rows.forEach((p, i) => {
+          const hh = MonthPlanCalc.hours(p.outageStart, p.outageEnd);
+          L.push('## ' + (i + 1) + '. ' + (p.maintDevice || p.name || '（未命名计划）'));
+          L.push('');
+          L.push(kvLine('运维单位', p.opsUnit));
+          L.push(kvLine('检修单位', p.maintUnit));
+          L.push(kvLine('涉及工程项目', p.projectName || p.project));
+          L.push(kvLine('班组长', p.leader));
+          L.push(kvLine('电压等级', p.voltage));
+          L.push(kvLine('设备类型', p.deviceType));
+          L.push('');
+          L.push('**计划停电时间**：' + fmtRange(p.outageStart, p.outageEnd) + (hh ? '（停电时长 ' + hh + ' 小时）' : ''));
+          L.push(kvLine('计划工作时间', p.workTime));
+          const tc = String(p.transformerCount == null ? '' : p.transformerCount).trim();
+          L.push(kvLine('停电涉及中压配变数', tc ? tc + ' 台' : ''));
+          L.push(kvLine('停电时户数', p.outageHouseholds));
+          L.push('');
+          L.push(kvLine('检修类型', p.workType));
+          L.push(kvLine('检修内容', p.maintContent));
+          L.push('');
+          L.push(kvLine('电网风险等级', p.gridRisk));
+          L.push(kvLine('作业风险等级', normRisk(p.riskLevel)));
+          L.push(kvLine('影响用户和区域', p.affectArea));
+          L.push(kvLine('涉及重要电力用户', p.importantUsers));
+          if (String(p.outageCount2m || '').trim() || String(p.outageCountYear || '').trim()) {
+            L.push(kvLine('近2月停电次数', p.outageCount2m));
+            L.push(kvLine('本年度停电次数', p.outageCountYear));
+            L.push('');
+          }
+          L.push(kvLine('备注', p.planNote));
+          L.push('');
+          L.push('---');
+          L.push('');
+        });
+        const md = L.join('\n');
+        const blob = new Blob([md], { type: 'text/markdown; charset=utf-8' });
+        const fname = company + (year ? ' ' + year + '年' : '') + (month ? month + '月' : '') + ' 检修月计划日志.md';
+        downloadBlob(blob, fname);
+        ElementPlus.ElMessage.success('已导出 ' + rows.length + ' 条归档月计划日志');
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { exportingLog.value = false; }
+    }
+
     /* ---------------- 导入预览（浏览器解析 + 判重） ---------------- */
     const imp = reactive({ visible: false, busy: false, fileName: '', rows: [], err: '' });
     const impInput = ref(null);
@@ -655,7 +737,7 @@ const MonthPlansPanel = {
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
       makeWeek, editRow, copyMonth, archivePlan, unarchivePlan, removePlan, onAct, formStatus, flowFromView, saveWith,
-      exportXlsx, exporting, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
+      exportXlsx, exporting, exportLogMd, exportingLog, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
       MP_DEVICE_TYPES, MP_VOLTAGES, MP_WORK_TYPES, MP_GRID_RISKS, MP_RISK_LEVELS, MP_STATUS, MP_COLS
     };
   },
@@ -677,14 +759,15 @@ const MonthPlansPanel = {
       <span class="pf-actions-sep" />
       <div class="pf-actions">
         <el-button v-if="canWrite('plans') && !isArchived" type="primary" size="small" @click="openAdd">新增计划</el-button>
-        <div class="pf-item mp-year">
+        <div class="pf-item mp-year" v-if="!isArchived">
           <span class="pf-label">导入年份：</span>
           <el-select v-model="importYear" size="small" class="mp-year-sel">
             <el-option v-for="y in yearOpts" :key="y" :label="y" :value="y" />
           </el-select>
         </div>
         <el-button v-if="canWrite('plans') && !isArchived" size="small" @click="pickImpFile">导入预览 xls</el-button>
-        <el-button size="small" :loading="exporting" title="按「月计划导出模板」生成（主网/配网两张子表），导出文件可直接再导入" @click="exportXlsx">导出 xlsx</el-button>
+        <el-button v-if="!isArchived" size="small" :loading="exporting" title="按「月计划导出模板」生成（主网/配网两张子表），导出文件可直接再导入" @click="exportXlsx">导出 xlsx</el-button>
+        <el-button v-else size="small" :loading="exportingLog" title="按日志格式导出 Markdown 文档（汇总已归档月计划）" @click="exportLogMd">导出日志(md)</el-button>
       </div>
       <input ref="impInput" type="file" accept=".xlsx,.xls" style="display:none" @change="onImpFile" />
     </div>
