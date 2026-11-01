@@ -223,8 +223,9 @@ const PlansView = {
     // 表格展示：日期 MM-DD HH:mm，空值显示 -
     function fmtDT(v) { if (!v) return '-'; const s = String(v); return s.length > 10 ? s.slice(5, 16) : s.slice(5); }
     function dash(v) { const s = String(v == null ? '' : v).trim(); return s || '-'; }
-    // 行高亮：覆盖今天且未取消/归档的计划（进行中）
+    // 行高亮：已取消整行置灰（与已归档一致）；覆盖今天且未取消/归档的计划（进行中）
     function rowClass({ row }) {
+      if (row.status === '已取消') return 'plan-row-canceled';
       const t = fmtDate(ServerTime.now());
       return (!['已取消', '已归档'].includes(row.status) && daySlice(row.startDate) <= t && daySlice(row.endDate) >= t) ? 'plan-ongoing' : '';
     }

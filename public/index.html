@@ -416,6 +416,9 @@
     }
   /* 计划管理：进行中（覆盖今天）的计划行淡黄高亮 */
   .el-table tr.plan-ongoing td.el-table__cell { background:var(--warn-bg) !important; }
+  /* 已取消周计划：整行置灰淡化，与已归档月计划风格一致 */
+  .el-table tr.plan-row-canceled > td.el-table__cell { background-color:rgba(128,128,128,.07) !important; color:var(--text-3) !important; }
+  .el-table tr.plan-row-canceled:hover > td.el-table__cell { background-color:rgba(128,128,128,.12) !important; }
 
   /* ===== iPhone / 移动端适配 ===== */
   /* 抽屉遮罩：仅移动端显示 */
