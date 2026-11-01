@@ -185,6 +185,22 @@ const PlansView = {
       return true;
     }));
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
+    // 空状态文案：状态类页签（已执行/已结算/已取消）给针对性引导，避免只显示通用的「暂无数据」
+    const isFiltered = computed(() => !!(filters.startDate || filters.endDate || filters.name || filters.content || filters.noProject || filters.team || filters.leader || filters.ticketType || (filters.projectScope && filters.projectScope.length)));
+    const EMPTY_HINT = {
+      executed: { none: '暂无已执行计划', filtered: '当前筛选条件下没有已执行计划' },
+      settled: { none: '暂无已结算零星计划', filtered: '当前筛选条件下没有已结算零星计划' },
+      canceled: { none: '暂无已取消周计划', filtered: '当前筛选条件下没有已取消周计划' },
+      week: { none: '暂无周计划', filtered: '当前筛选条件下没有周计划' },
+      month: { none: '暂无月计划', filtered: '当前筛选条件下没有月计划' }
+    };
+    const emptyTitle = computed(() => { const h = EMPTY_HINT[tab.value]; return h ? (isFiltered.value ? h.filtered : h.none) : (isFiltered.value ? '当前筛选条件下没有匹配的计划' : '暂无数据'); });
+    const emptyTip = computed(() => {
+      if (tab.value === 'executed') return isFiltered.value ? '执行后的计划会归集到这里，可放宽上方筛选条件再查看' : '在「周计划管理 / 月计划管理」中点计划「执行」后会归集到这里；月计划执行后还可「标记已结算」';
+      if (tab.value === 'settled') return '由「已执行」的月计划点「标记已结算」后归集到这里';
+      if (tab.value === 'canceled') return '在计划上点「取消」后会归集到这里，可「恢复」回到周计划管理';
+      return isFiltered.value ? '可调整或重置上方筛选条件' : '';
+    });
     // 日计划日历概览：未来 21 天内的有效计划（跨日计划按覆盖日期展示）
     const daySlice = v => String(v || '').slice(0, 10);
     const upcoming = computed(() => {
@@ -1323,7 +1339,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1395,7 +1411,7 @@ const PlansView = {
       <div class="plan-toolbar">
         <el-button v-if="canWrite('plans')" type="primary" size="small" @click="openAdd">新增</el-button>
         <el-button v-if="canWrite('plans')" size="small" @click="importPlans">导入 xlsx</el-button>
-        <el-button size="small" @click="exportPlans">导出 xlsx</el-button>
+        <el-button size="small" :disabled="filtered.length === 0" :title="filtered.length === 0 ? '当前没有可导出的计划' : '导出当前页签筛选后的计划为 xlsx'" @click="exportPlans">导出 xlsx</el-button>
       </div>
 
       <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
@@ -1444,7 +1460,8 @@ const PlansView = {
               <path d="M11 38l7-21a5 5 0 0 1 4.7-3.4h18.6A5 5 0 0 1 46 17l7 21" />
               <path d="M11 38h11l2.5 5h15L42 38h11" />
             </svg>
-            <span>暂无数据</span>
+            <span>{{ emptyTitle }}</span>
+            <span v-if="emptyTip" class="plan-empty-tip">{{ emptyTip }}</span>
           </div>
         </template>
       </el-table>
@@ -1481,11 +1498,13 @@ const PlansView = {
 
       <div class="plan-pager">
         <span class="pp-total">共 {{ filtered.length }} 条，第 {{ page }} 页</span>
-        <el-select v-model="pageSize" size="small" class="pp-size" @change="page=1">
-          <el-option v-for="s in [20, 50, 100]" :key="s" :label="s + ' 条/页'" :value="s" />
-        </el-select>
-        <el-button size="small" :disabled="page <= 1" @click="page = page - 1">上一页</el-button>
-        <el-button size="small" :disabled="page >= Math.max(1, Math.ceil(filtered.length / pageSize))" @click="page = page + 1">下一页</el-button>
+        <template v-if="filtered.length">
+          <el-select v-model="pageSize" size="small" class="pp-size" @change="page=1">
+            <el-option v-for="s in [20, 50, 100]" :key="s" :label="s + ' 条/页'" :value="s" />
+          </el-select>
+          <el-button size="small" :disabled="page <= 1" @click="page = page - 1">上一页</el-button>
+          <el-button size="small" :disabled="page >= Math.max(1, Math.ceil(filtered.length / pageSize))" @click="page = page + 1">下一页</el-button>
+        </template>
       </div>
       </template>
     </div>
