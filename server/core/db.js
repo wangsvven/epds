@@ -5,6 +5,8 @@ const path = require('path');
 const { nowISO, repairUploadName, setClockOffset } = require('./util');
 // 材料到库状态计算（旧库迁移时刷新 status 用；该模块内部延迟取 DB，不会与本文件形成循环依赖）
 const { materialStatus } = require('./material-calc');
+// 版本化数据迁移注册表（不 require db，无循环依赖；由 runDataMigrations 传入 DB）
+const { MIGRATIONS } = require('./migrations');
 
 // ===== 数据模型 =====
 // 业务私有集合统一采用逻辑删除（deleted 标记）
@@ -138,6 +140,44 @@ function loadDB() {
 let DB = loadDB();
 
 // ---------- 旧数据模型迁移 ----------
+/* ---------- 版本化数据迁移：由 core/migrations 注册表驱动，每次启动执行未应用项 ----------
+ * 说明：注册表在 core/migrations.js；这里只负责「找未应用项 → 备份 → 依次执行 → 记录」。
+ * 已应用项记入 DB.appliedMigrations；被阻断的记入 DB.migrationsBlocked（避免反复执行/备份）。
+ * 备份落在 data/db.json.before-migrate-<stamp>（卷内，Docker 重建不丢）。 */
+function runDataMigrations() {
+  if (!Array.isArray(DB.appliedMigrations)) DB.appliedMigrations = [];
+  const applied = new Set(DB.appliedMigrations);
+  const blockedAll = DB.migrationsBlocked || {};
+  const pending = MIGRATIONS.filter(m => !applied.has(m.id) && !blockedAll[m.id] && (!m.needs || m.needs(DB)));
+  if (!pending.length) return;
+  // 有迁移要跑：先整体备份
+  try {
+    const p2 = n => String(n).padStart(2, '0');
+    const d = new Date(Date.now() + 8 * 3600 * 1000);
+    const stamp = d.getUTCFullYear() + p2(d.getUTCMonth() + 1) + p2(d.getUTCDate()) + '-' + p2(d.getUTCHours()) + p2(d.getUTCMinutes()) + p2(d.getUTCSeconds());
+    fs.copyFileSync(DB_PATH, path.join(DATA_DIR, 'db.json.before-migrate-' + stamp));
+  } catch (e) {
+    console.warn('[migrate] 备份失败，本次跳过数据迁移：' + e.message);
+    return;
+  }
+  const done = [];
+  for (const m of pending) {
+    try {
+      const ok = m.run ? m.run(DB) : true;
+      if (ok === false) {
+        (DB.migrationsBlocked = DB.migrationsBlocked || {})[m.id] = new Date().toISOString();
+        console.warn('[migrate] 已跳过（需人工处理）：' + m.id + ' ' + (m.desc || ''));
+        continue;
+      }
+      DB.appliedMigrations.push(m.id);
+      done.push(m.id);
+    } catch (e) {
+      console.warn('[migrate] 迁移失败：' + m.id + ' - ' + e.message);
+    }
+  }
+  if (done.length) console.log('[migrate] 已应用数据迁移：' + done.join(' | '));
+}
+
 function migrateDB() {
   // 作业计划集合保障（老库无此集合时初始化）
   if (!Array.isArray(DB.workPlans)) DB.workPlans = [];
@@ -418,6 +458,8 @@ function migrateDB() {
     });
     DB.batchCascadeV1 = true;
   }
+  // 版本化数据迁移：执行未应用的迁移（含历史流水号 4 位等）
+  runDataMigrations();
   saveDB();
 }
 
