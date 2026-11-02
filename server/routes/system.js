@@ -273,7 +273,7 @@ app.get('/api/workers/export', (req, res) => {
 });
 
 // ---------- 外部通讯录：导入/导出（同样须在通用 CRUD 之前注册） ----------
-// 字段：部门 dept / 姓名 name / 职务 post / 手机 phone / 移动短号 shortNo
+// 字段：部门 dept / 姓名 name / 职务 post / 手机 phone / 移动短号 shortNo / 备注 remark
 // 兼容旧字段：unit → 部门、remark → 备注
 const CONTACT_HEADER_MAP = {
   '部门': 'dept', '单位': 'dept', '姓名': 'name', '职务': 'post',
@@ -283,9 +283,9 @@ const CONTACT_HEADER_MAP = {
 function contactDept(c) { return c.dept || c.unit || ''; }
 
 app.get('/api/contacts/export', (req, res) => {
-  const header = ['部门', '姓名', '职务', '手机', '移动短号'];
+  const header = ['部门', '姓名', '职务', '手机', '移动短号', '备注'];
   const rows = DB.contacts.filter(aliveFilter()).map(c => [
-    contactDept(c), c.name || '', c.post || '', c.phone || '', c.shortNo || ''
+    contactDept(c), c.name || '', c.post || '', c.phone || '', c.shortNo || '', c.remark || ''
   ]);
   const wb = xlsx.utils.book_new();
   // sheet 名固定为「员工」，导出文件可直接再次导入
@@ -323,7 +323,8 @@ app.post('/api/contacts/import', upload.single('file'), (req, res) => {
         break;
       }
     }
-    const fields = ['dept', 'name', 'post', 'phone', 'shortNo'];
+    // 无表头时按位置解析：部门/姓名/职务/手机/移动短号/备注（旧 5 列文件备注自动为空）
+    const fields = ['dept', 'name', 'post', 'phone', 'shortNo', 'remark'];
     if (!idxMap) { idxMap = {}; fields.forEach((f, i) => { idxMap[f] = i; }); }
 
     const errors = [];
@@ -331,10 +332,10 @@ app.post('/api/contacts/import', upload.single('file'), (req, res) => {
     rows.forEach((r, i) => {
       if (i <= headerIdx) return;
       const get = f => String((idxMap[f] !== undefined && r[idxMap[f]] !== undefined) ? r[idxMap[f]] : '').trim();
-      const dept = get('dept'), name = get('name'), post = get('post'), phone = get('phone'), shortNo = get('shortNo');
-      if (!dept && !name && !post && !phone && !shortNo) return; // 空行
+      const dept = get('dept'), name = get('name'), post = get('post'), phone = get('phone'), shortNo = get('shortNo'), remark = get('remark');
+      if (!dept && !name && !post && !phone && !shortNo && !remark) return; // 空行
       if (!name) { errors.push(`第${i + 1}行：姓名为空`); return; }
-      parsed.push({ dept, name, post, phone, shortNo });
+      parsed.push({ dept, name, post, phone, shortNo, remark });
     });
     if (errors.length) {
       return res.status(400).json({ error: `存在错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处` : ''}` });
@@ -346,7 +347,7 @@ app.post('/api/contacts/import', upload.single('file'), (req, res) => {
     DB.contacts = [];
     const added = parsed.map(p => ({
       id: genId('c'), createdAt: nowISO(),
-      dept: p.dept, name: p.name, post: p.post, phone: p.phone, shortNo: p.shortNo,
+      dept: p.dept, name: p.name, post: p.post, phone: p.phone, shortNo: p.shortNo, remark: p.remark,
       deleted: false
     }));
     DB.contacts.push(...added);
