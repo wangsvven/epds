@@ -17,8 +17,18 @@ const CrudView = {
       if (props.config.refs) {
         for (const [field, cfg] of Object.entries(props.config.refs)) {
           try {
-            const data = await api.get(cfg.endpoint);
-            refOptions[field] = data.map(d => ({ label: d[cfg.label], value: d[cfg.value] }));
+            let data = await api.get(cfg.endpoint);
+            if (!Array.isArray(data)) data = (data && Array.isArray(data.data)) ? data.data : [];
+            // 可选的过滤（如：只取「用户组=班组长 且 状态=启用」的账号）
+            if (typeof cfg.filter === 'function') data = data.filter(cfg.filter);
+            const seen = new Set();
+            refOptions[field] = data
+              .map(d => ({ label: d[cfg.label], value: d[cfg.value] }))
+              .filter(o => {
+                const v = o.value;
+                if (v === undefined || v === null || v === '' || seen.has(v)) return false;
+                seen.add(v); return true;
+              });
           } catch (e) { refOptions[field] = []; }
         }
       }
@@ -126,14 +136,20 @@ const substationCfg = {
 };
 const teamCfg = {
   endpoint: 'teams', title: '班组管理', dialogTitle: '班组管理',
+  // 班组长下拉候选：登录账号中「用户组=班组长」且「状态=启用」的姓名（按姓名去重，与计划管理同源）
+  refs: {
+    leader: { endpoint: '/api/users', label: 'name', value: 'name', filter: u => !!u && u.userGroup === '班组长' && u.status === '启用' }
+  },
   columns: [
     { key: 'name', label: '班组名称' },
+    { key: 'leader', label: '班组长', width: 130 },
     { key: 'showOnDeploy', label: '当前部署展示', width: 140 },
     { key: 'inWorkerList', label: '是否列入作业人员名单', width: 190 },
     { key: 'sort', label: '排序', width: 90 }
   ],
   formFields: [
     { key: 'name', label: '班组名称', required: true, placeholder: '如：一班、机械施工' },
+    { key: 'leader', label: '班组长', type: 'select' },
     { key: 'showOnDeploy', label: '当前部署展示', type: 'select', default: '展示', options: [{ label: '展示', value: '展示' }, { label: '隐藏', value: '隐藏' }] },
     { key: 'inWorkerList', label: '是否列入作业人员名单', type: 'select', default: '列入', options: [{ label: '列入', value: '列入' }, { label: '不列入', value: '不列入' }] },
     { key: 'sort', label: '排序', type: 'number', default: 0 }
