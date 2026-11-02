@@ -7,7 +7,7 @@ const ContactsPanel = {
     const list = ref([]);
     const loading = ref(false);
     const filters = reactive({ dept: '', name: '' });
-    const dlg = reactive({ visible: false, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '' });
+    const dlg = reactive({ visible: false, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '', remark: '' });
     const fileInput = ref(null);
 
     const filtered = computed(() => list.value.filter(c => {
@@ -24,13 +24,13 @@ const ContactsPanel = {
       finally { loading.value = false; }
     }
     function openAdd() {
-      Object.assign(dlg, { visible: true, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '' });
+      Object.assign(dlg, { visible: true, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '', remark: '' });
     }
     function openEdit(row) {
       Object.assign(dlg, {
         visible: true, editing: true, busy: false, id: row.id,
         dept: row.dept || row.unit || '', name: row.name || '', post: row.post || '',
-        phone: row.phone || '', shortNo: row.shortNo || ''
+        phone: row.phone || '', shortNo: row.shortNo || '', remark: row.remark || ''
       });
     }
     async function submit() {
@@ -40,7 +40,8 @@ const ContactsPanel = {
       try {
         const payload = {
           dept: (dlg.dept || '').trim(), name,
-          post: (dlg.post || '').trim(), phone: (dlg.phone || '').trim(), shortNo: (dlg.shortNo || '').trim()
+          post: (dlg.post || '').trim(), phone: (dlg.phone || '').trim(), shortNo: (dlg.shortNo || '').trim(),
+          remark: (dlg.remark || '').trim()
         };
         if (dlg.editing) await api.put('/api/contacts/' + dlg.id, payload);
         else await api.post('/api/contacts', payload);
@@ -102,10 +103,10 @@ const ContactsPanel = {
     <div class="ct-toolbar">
       <el-button v-if="canWrite('users')" type="primary" size="small" @click="openAdd">新增</el-button>
       <el-button v-if="canWrite('users')" size="small" @click="triggerImport">导入</el-button>
-      <span class="ct-hint">导入会覆盖现有外部通讯录；建议先导出备份。支持含「员工」sheet 的 xls/xlsx，新标准表头为部门、姓名、职务、手机、移动短号。</span>
       <el-button size="small" :disabled="!list.length" @click="doExport">导出</el-button>
       <input ref="fileInput" type="file" accept=".xls,.xlsx,.csv" style="display:none" @change="onFileChange" />
     </div>
+    <div class="ct-hint-line">支持含「员工」sheet 的 xls/xlsx；标准表头：部门、姓名、职务、手机、移动短号、备注。导入会覆盖现有通讯录，建议先导出备份。</div>
 
     <div class="wv-filters">
       <el-input v-model="filters.dept" placeholder="按部门筛选" clearable style="width:180px" />
@@ -114,12 +115,13 @@ const ContactsPanel = {
     </div>
 
     <el-table class="flat-table" :data="filtered" v-loading="loading" style="width:100%" empty-text="暂无数据">
-      <el-table-column label="部门" min-width="200"><template #default="{row}">{{ deptOf(row) }}</template></el-table-column>
-      <el-table-column prop="name" label="姓名" min-width="140" />
-      <el-table-column prop="post" label="职务" min-width="160" />
-      <el-table-column prop="phone" label="手机" min-width="160" />
-      <el-table-column prop="shortNo" label="移动短号" min-width="140" />
-      <el-table-column label="操作" width="150">
+      <el-table-column label="部门" min-width="150"><template #default="{row}">{{ deptOf(row) }}</template></el-table-column>
+      <el-table-column prop="name" label="姓名" min-width="96" />
+      <el-table-column prop="post" label="职务" min-width="116" />
+      <el-table-column prop="phone" label="手机" min-width="124" />
+      <el-table-column prop="shortNo" label="移动短号" min-width="104" />
+      <el-table-column prop="remark" label="备注" min-width="280" class-name="ct-remark-cell" />
+      <el-table-column label="操作" width="132">
         <template #default="{row}">
           <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
           <el-button v-if="canWrite('users')" link type="danger" size="small" @click="remove(row)">删除</el-button>
@@ -127,22 +129,37 @@ const ContactsPanel = {
       </el-table-column>
     </el-table>
 
-    <el-dialog :title="dlg.editing ? '编辑通讯录' : '新增通讯录'" v-model="dlg.visible" width="560px" label-position="top">
+    <el-dialog :title="dlg.editing ? '编辑通讯录' : '新增通讯录'" v-model="dlg.visible" width="min(640px, 94%)" label-position="top">
       <el-form :model="dlg" label-position="top">
-        <el-form-item label="部门">
-          <el-input v-model="dlg.dept" placeholder="如：公司领导、办公室" maxlength="60" />
-        </el-form-item>
-        <el-form-item label="姓名" required>
-          <el-input v-model="dlg.name" placeholder="姓名" maxlength="40" />
-        </el-form-item>
-        <el-form-item label="职务">
-          <el-input v-model="dlg.post" placeholder="选填" maxlength="40" />
-        </el-form-item>
-        <el-form-item label="手机">
-          <el-input v-model="dlg.phone" placeholder="选填" maxlength="20" />
-        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="部门">
+              <el-input v-model="dlg.dept" placeholder="如：公司领导、办公室" maxlength="60" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="姓名" required>
+              <el-input v-model="dlg.name" placeholder="姓名" maxlength="40" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="职务">
+              <el-input v-model="dlg.post" placeholder="选填" maxlength="40" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="手机">
+              <el-input v-model="dlg.phone" placeholder="选填" maxlength="20" />
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-form-item label="移动短号">
           <el-input v-model="dlg.shortNo" placeholder="选填" maxlength="20" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="dlg.remark" type="textarea" :rows="3" placeholder="选填，可填写负责片区、村社等" maxlength="200" show-word-limit />
         </el-form-item>
       </el-form>
       <template #footer>
