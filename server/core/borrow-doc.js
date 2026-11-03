@@ -63,7 +63,7 @@ function buildPlan(rec) {
   if (content) lines.push(content);
   const need = Number(r.techCount) || 0, work = Number(r.workerCount) || 0, veh = Number(r.vehicleCount) || 0;
   if (need || work || veh) {
-    lines.push('技工' + num(need) + '人次、民工' + num(work) + '人次、工程车' + num(veh) + '辆次');
+    lines.push('技工' + num(need) + '人次、民工' + num(work) + '人次、车辆' + num(veh) + '辆次');
   }
   plan['工作内容及用工需求'] = { text: lines.join('\n') };
 
