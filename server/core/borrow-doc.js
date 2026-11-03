@@ -37,14 +37,28 @@ function textOf(frag) {
   return raw.replace(/\s+/g, '');
 }
 
-/* 记录 → 各标签应填的值。未列出的标签（班组名称/外协单位/审批签字）保持空白。 */
+/* 日期格式：抬头「2026年 11 月 03 日」、用工时间「2026.11.03」（与参考版式一致） */
+function fmtDateCn(v) {
+  const m = String(v == null ? '' : v).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return str(v);
+  return m[1] + '年 ' + String(m[2]).padStart(2, '0') + ' 月 ' + String(m[3]).padStart(2, '0') + ' 日';
+}
+function fmtDateDot(v) {
+  const m = String(v == null ? '' : v).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return str(v);
+  return m[1] + '.' + String(m[2]).padStart(2, '0') + '.' + String(m[3]).padStart(2, '0');
+}
+
+/* 记录 → 各标签应填的值。未列出的标签（外协单位/各级审批签字）保持空白。 */
 function buildPlan(rec) {
   const r = rec || {};
   const plan = {};
 
   plan['项目类型'] = { align: 'center', text: str(r.projectType) };
   plan['项目名称'] = { align: 'center', text: str(r.projectName) };
-  plan['用工时间'] = { align: 'center', text: str(r.workDate) };
+  // 班组名称 ← 往来单位（软件里的“往来单位”即本表的班组/借出方）
+  plan['班组名称'] = { align: 'center', text: str(r.unit) };
+  plan['用工时间'] = { align: 'center', text: fmtDateDot(r.workDate) };
 
   // 工作内容 + 用工需求（数量并入同一格，末行追加需求行）
   const lines = [];
@@ -52,7 +66,7 @@ function buildPlan(rec) {
   if (content) lines.push(content);
   const need = Number(r.techCount) || 0, work = Number(r.workerCount) || 0, veh = Number(r.vehicleCount) || 0;
   if (need || work || veh) {
-    lines.push('用工需求：技工 ' + num(need) + ' 人次、民工 ' + num(work) + ' 人次、车辆 ' + num(veh) + ' 辆次');
+    lines.push('技工' + num(need) + '人次、民工' + num(work) + '人次、车辆' + num(veh) + '辆次');
   }
   plan['工作内容及用工需求'] = { align: 'left', text: lines.join('\n') };
 
@@ -139,9 +153,8 @@ function tuneDatePPr(pPr) {
 /* 抬头「    年    月    日」→ 按申请日期填 */
 function fillDateLine(xml, rec) {
   const d = str(rec && rec.applyDate) || str(rec && rec.workDate);
-  const m = d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (!m) return xml;
-  const text = m[1] + '  年  ' + Number(m[2]) + '  月  ' + Number(m[3]) + '  日';
+  if (!/^\d{4}-\d{1,2}-\d{1,2}/.test(d)) return xml;
+  const text = fmtDateCn(d);
   return xml.replace(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g, p => {
     if (textOf(p) !== '年月日') return p;
     const pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
