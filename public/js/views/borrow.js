@@ -240,7 +240,7 @@ const BorrowView = {
 
     <template v-if="tab === 'detail'">
       <div class="ct-toolbar">
-        <el-button v-if="canWrite('borrow')" type="primary" size="small" @click="openAdd">新增</el-button>
+        <el-button v-if="canWrite('borrow')" type="primary" size="small" @click="openAdd">新增借工</el-button>
       </div>
 
       <div class="wv-filters">
@@ -256,32 +256,30 @@ const BorrowView = {
         <el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="用工起" end-placeholder="用工止" style="width:250px" />
         <el-input v-model="filters.keyword" placeholder="项目名称 / 工作内容" clearable style="width:200px" />
         <el-button @click="reset">重置</el-button>
+        <span style="margin-left:auto;font-size:13px;color:var(--text-3)">共 {{ filtered.length }} 条</span>
       </div>
 
       <el-table :data="filtered" v-loading="loading" border stripe style="width:100%" empty-text="暂无数据">
-        <el-table-column prop="workDate" label="用工日期" width="110" />
-        <el-table-column prop="unit" label="往来单位" min-width="140" show-overflow-tooltip />
-        <el-table-column label="方向" width="100">
+        <el-table-column type="index" label="序号" width="60" align="center" />
+        <el-table-column label="日期" width="100">
+          <template #default="{ row }">{{ (row.workDate || '').replace(/-/g, '.') }}</template>
+        </el-table-column>
+        <el-table-column label="方向" width="96">
           <template #default="{ row }">
             <el-tag size="small" :type="row.direction === '我方借入' ? 'warning' : ''">{{ row.direction || '-' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="projectType" label="项目类型" width="130" />
-        <el-table-column prop="projectName" label="项目名称" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="techCount" label="技工（人次）" width="96" align="center" />
-        <el-table-column prop="workerCount" label="民工（人次）" width="96" align="center" />
-        <el-table-column prop="vehicleCount" label="车辆（辆次）" width="96" align="center" />
-        <el-table-column label="签单状态" width="100">
+        <el-table-column prop="unit" label="往来单位" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="techCount" label="技工（人次）" width="104" align="center" />
+        <el-table-column prop="workerCount" label="民工（人次）" width="104" align="center" />
+        <el-table-column prop="vehicleCount" label="车辆（辆次）" width="104" align="center" />
+        <el-table-column prop="workContent" label="工作内容" min-width="160" show-overflow-tooltip />
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.signStatus === '已签单' ? 'success' : 'info'">{{ row.signStatus || '未签单' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="230" fixed="right">
-          <template #default="{ row }">
-            <div v-if="canWrite('borrow')" style="display:flex;flex-wrap:wrap;gap:2px 10px">
-              <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <div v-if="canWrite('borrow')" class="bw-acts">
               <el-button link type="warning" size="small" @click="generate(row)">{{ hasGen(row) ? '重新生成' : '生成借工单' }}</el-button>
-              <el-button link type="primary" size="small" @click="openEvidences(row)">佐证</el-button>
+              <el-button link type="primary" size="small" @click="openEvidences(row)">佐证（{{ (row.evidences || []).length }}）</el-button>
+              <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
               <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
             </div>
             <span v-else style="color:var(--text-3)">-</span>

@@ -547,6 +547,9 @@
   .wv-alert-text { font-size:13px; line-height:1.85; color:var(--text-2); }
   .wv-section { font-size:13.5px; color:var(--text-1); margin:18px 0 10px; }
   .wv-filters { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  /* 借工明细操作列：按钮一行排布（去掉 EP 相邻按钮默认左边距，改用 gap） */
+  .bw-acts { display:flex; flex-wrap:wrap; gap:2px 10px; }
+  .bw-acts .el-button + .el-button { margin-left:0; }
   .wv-del-btn { background:var(--surface) !important; border-color:var(--danger-text) !important; color:var(--danger-text) !important; }
   .wv-del-btn:hover { background:var(--danger-bg) !important; }
   /* 表头整条浅灰底、无竖分隔线（对齐截图） */
