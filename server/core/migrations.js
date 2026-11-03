@@ -85,6 +85,36 @@ const MIGRATIONS = [
       return true;
     }
   }
+  ,
+  {
+    id: '20261103-borrow-v2',
+    desc: '借工明细模型升级：旧 fromTeam/toTeam/reason/headcount/startDate/status → 新 unit/direction/workContent/techCount/workDate/signStatus 等',
+    needs(DB) {
+      return (Array.isArray(DB.borrowWorks) ? DB.borrowWorks : []).some(r => r && r.signStatus === undefined);
+    },
+    run(DB) {
+      const list = Array.isArray(DB.borrowWorks) ? DB.borrowWorks : [];
+      list.forEach(r => {
+        if (!r || r.signStatus !== undefined) return; // 已有新字段：整条跳过，不重复覆盖
+        r.techCount = Number(r.headcount) || 0;
+        r.workerCount = 0;
+        r.vehicleCount = 0;
+        r.workContent = r.reason || '';
+        r.applyDate = r.startDate || '';
+        r.workDate = r.startDate || '';
+        r.signStatus = (r.status === '已归还') ? '已签单' : '未签单';
+        r.unit = r.toTeam || '';
+        r.externalUnit = '';
+        r.direction = '我方借出';
+        r.projectType = '';
+        r.projectName = '';
+        r.remark = '';
+        r.evidences = [];
+        r.generatedFiles = [];
+      });
+      return true;
+    }
+  }
   // ↓ 以后新增数据迁移：在此追加 { id, desc, needs?, run } 即可，随版本升级自动执行。
 ];
 
