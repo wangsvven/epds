@@ -1228,14 +1228,21 @@ async function listOk(p, token) {
     need(dl2.status === 404, '删除后下载应 404，实际 ' + dl2.status);
     return '空槽保留 XXXX（仅 4.5 1 处）/ 运维空值置空 / 工作地点整段不输出 / 编号拼法 / 工作内容按小组拼 / 4.3 与通用风险逐行成段 / 接地线并入通用风险（N+1 编号 + 分别在/逐行/验明…）/ 日期 2026-10-19 / 记录人 ' + recName + ' / 重复生成原地覆盖（1 条）/ 删除后清空';
   });
-  await step('plans', '借工 新增 → 详情', async () => {
+  await step('plans', '借工 新增 → 详情（新模型字段）', async () => {
     const d = needOk(await api('POST', '/api/borrowWorks', {
-      token, body: { team: '冒烟班组', direction: '借出', reason: '冒烟测试', people: 2, status: '待审批' }
+      token, body: { unit: '冒烟供电所', direction: '我方借出', workContent: '冒烟测试', techCount: 2, signStatus: '未签单' }
     }), 'borrowWorks POST');
     need(d && d.id, '响应缺少 id');
     const one = needOk(await api('GET', '/api/borrowWorks/' + d.id, { token }), 'borrowWorks detail');
-    need(one.team === '冒烟班组', 'detail.team 不匹配');
-    return 'id=' + d.id;
+    need(one.unit === '冒烟供电所' && one.direction === '我方借出' && one.techCount === 2, 'detail 新字段不匹配');
+    return 'id=' + d.id + ' unit=' + one.unit + ' tech=' + one.techCount;
+  });
+  await step('plans', '借工 校验：非法计数/枚举 → 400', async () => {
+    const r1 = await api('POST', '/api/borrowWorks', { token, body: { unit: 'X', direction: '我方借出', techCount: -1 } });
+    const r2 = await api('POST', '/api/borrowWorks', { token, body: { unit: 'X', direction: '乱写' } });
+    const r3 = await api('POST', '/api/borrowWorks', { token, body: { unit: 'X', direction: '我方借出', signStatus: '乱写' } });
+    need(r1.status === 400 && r2.status === 400 && r3.status === 400, '期望 400，实际 ' + [r1.status, r2.status, r3.status].join('/'));
+    return '计数-1 400 / 方向非法 400 / 签单状态非法 400';
   });
 
   /* ---------- completion ---------- */
