@@ -557,6 +557,9 @@ const PlansView = {
     // 4.4 班组应采取的安全措施：取自勘察单模板侧标准内容（整行一条；分组时默认归属「全组」）。
     // 与周计划无关——周计划没有对应字段，不得从任何计划字段取值。
     const SV_TEAM_MEASURES_DEFAULT = '所有下户表计负荷侧空开出线，分别用绝缘胶布将线头包裹严实，并悬挂“禁止合闸，线路有人工作”标识牌一块。';
+    // 配电第二种工作票：4.4 运维人员措施按规则带入「无」；4.4 班组措施留空（不分小组=待填写，
+    // 分小组=每条选择一个小组），不套用上面的模板标准文案。
+    const SURVEY_P2_OPS_MEASURES = '无';
     function surveySeed(plan) {
       const p = plan || {};
       const s = v => String(v == null ? '' : v).trim();
@@ -578,8 +581,10 @@ const PlansView = {
         retainedLive: isP2 ? SURVEY_P2_RETAINED : '',
         ticketSecond: isP2,
         ticketType: s(p.ticketType),
-        // 4.4 班组措施：模板侧标准文案（周计划无此字段，不从计划取值）
-        teamMeasures: SV_TEAM_MEASURES_DEFAULT,
+        // 4.4 班组措施：二票留空（不分小组=待填写、分组=逐行选小组）；其余票种用模板侧标准文案
+        teamMeasures: isP2 ? '' : SV_TEAM_MEASURES_DEFAULT,
+        // 4.4 运维人员措施：二票按规则带入「无」；其余留空待填写
+        opsMeasures: isP2 ? SURVEY_P2_OPS_MEASURES : '',
         surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
       };
     }
@@ -813,16 +818,18 @@ const PlansView = {
     }
     // 徽标：只表达「该字段当前值的来源」，实时按「当前值 vs 来源值」比对计算，不落库。
     //   四种文案（仅这四种）：周计划自动带入 / 规则自动带入 / 人工填写 / 待填写
-    //   判定：当前值非空且 === 来源值 → 该来源对应的自动带入（A 类→周计划自动带入，B 类→规则自动带入）
+    //   判定：当前值为空 → 待填写（如二票 4.4 班组措施）
+    //         当前值非空且 === 来源值 → 该来源对应的自动带入（A 类→周计划自动带入，B 类→规则自动带入）
     //         当前值非空但 ≠ 来源值（含本无来源）→ 人工填写
-    //         当前值为空 → 来源有值（被人工清掉）= 人工填写；来源也为空 = 待填写
     //   来源值（seed）在打开时按计划/规则算一次，保存动作不改它 → 保存前后、重开前后徽标一致
     //   作业分组是模板外的纯控制项，不挂任何徽标；小组卡内字段同样不挂
-    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'retainedLive', 'surveyDate', 'teamMeasures', 'envDesc', 'surveyUnit'];
+    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'retainedLive', 'surveyDate', 'teamMeasures', 'opsMeasures', 'envDesc', 'surveyUnit'];
     // B 类（固定文案 / 规则算出）→「规则自动带入」；其余带入字段是 A 类（抄周计划字段）→「周计划自动带入」
     const SV_RULE_FIELDS = ['envDesc', 'surveyDate', 'teamMeasures', 'surveyUnit'];
-    // 配电第二种工作票额外把 4.1/4.2 计为「规则自动带入」
-    const SV_RULE_FIELDS_P2 = SV_RULE_FIELDS.concat(['outageScope', 'retainedLive']);
+    // 配电第二种工作票额外把 4.1/4.2/4.4 运维措施计为「规则自动带入」；
+    // 其 4.4 班组措施留空，不再算规则带入（空值自动落「待填写」）
+    const SV_RULE_FIELDS_P2 = SV_RULE_FIELDS.filter(k => k !== 'teamMeasures')
+      .concat(['outageScope', 'retainedLive', 'opsMeasures']);
     const SV_BADGE_FIELDS = [
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
@@ -845,13 +852,14 @@ const PlansView = {
       SV_BADGE_FIELDS.forEach(k => {
         const cur = str(f[k]);
         const src = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
-        if (cur && src && cur === src) {
+        if (!cur) {
+          // 内容为空一律「待填写」（二票 4.4 班组措施即为此态；不再因种子有值误标「人工填写」）
+          out[k] = { text: '待填写', cls: 'todo' };
+        } else if (src && cur === src) {
           const ruleFields = seed.ticketSecond ? SV_RULE_FIELDS_P2 : SV_RULE_FIELDS;
           out[k] = { text: ruleFields.indexOf(k) > -1 ? '规则自动带入' : '周计划自动带入', cls: 'auto' };
-        } else if (cur || src) {
-          out[k] = { text: '人工填写', cls: 'manual' };
         } else {
-          out[k] = { text: '待填写', cls: 'todo' };
+          out[k] = { text: '人工填写', cls: 'manual' };
         }
       });
       return out;
@@ -927,7 +935,7 @@ const PlansView = {
           surveyUnit: seed.surveyUnit, team: seed.team, surveyNo: seed.surveyNo, dualName: '',
           workLocation: '', workTask: seed.workTask,
           outageScope: seed.outageScope, retainedLive: seed.retainedLive, groups: [],
-          envDesc: seed.envDesc, opsMeasures: '', teamMeasures: seed.teamMeasures, ground10: '', ground04: '',
+          envDesc: seed.envDesc, opsMeasures: seed.opsMeasures || '', teamMeasures: seed.teamMeasures, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
           surveyDate: seed.surveyDate || todayYmd(), hazardPoints: seedHazardPoints(seed.ticketSecond ? SURVEY_P2_HAZARDS : null)
         };

@@ -1080,7 +1080,7 @@ async function listOk(p, token) {
     need(r404.status === 404, '计划不存在应 404，实际 ' + r404.status);
     return 'createdAt 稳定 ' + createdAt + '；分组/小组往返一致、非法分组回落、groups 截断到 3、4.3 环境描述+危险点往返、4.4 两组措施+接地线+勘察日期往返、scopes 清洗/截断、非法日期 400、必填 400、超 50 条截断、完整编号往返、workLocation 置空';
   });
-  await step('plans', '周计划无「班组应采取的安全措施」字段（撤掉历史误加）→ 新建计划保存体/落库均无该键 → 4.4 班组措施固定取模板标准文案', async () => {
+  await step('plans', '周计划无「班组应采取的安全措施」字段（撤掉历史误加）→ 新建计划保存体/落库均无该键 → 4.4 班组措施：二票留空、其余取模板标准文案', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'public/js/views/plans.js'), 'utf8');
     // ① 周计划表单不再有该字段（含其 placeholder）
     need(src.indexOf('label="班组应采取的安全措施"') < 0, '周计划表单不应再有「班组应采取的安全措施」字段');
@@ -1088,7 +1088,10 @@ async function listOk(p, token) {
     need((src.match(/delete body\.teamSafetyMeasures/g) || []).length >= 2, '计划保存/复制两条写入路径都应剔除 teamSafetyMeasures');
     // ③ 勘察带入不再读计划该字段，固定取模板标准文案
     need(!/p\.teamSafetyMeasures/.test(src), 'surveySeed 不应再读 plan.teamSafetyMeasures');
-    need(/teamMeasures:\s*SV_TEAM_MEASURES_DEFAULT/.test(src), '4.4 班组措施应固定取模板标准文案');
+    // 二票：4.4 班组措施留空（不分小组=待填写、分组=每条选小组）；其余票种仍固定取模板标准文案
+    need(/teamMeasures:\s*isP2\s*\?\s*''\s*:\s*SV_TEAM_MEASURES_DEFAULT/.test(src), '4.4 班组措施：二票留空、其余取模板标准文案');
+    // 二票：4.4 运维措施按规则带入「无」
+    need(/opsMeasures:\s*isP2\s*\?\s*SURVEY_P2_OPS_MEASURES/.test(src), '4.4 运维措施：二票规则带入「无」');
     // ④ 接口侧：不带该键新建 → 落库对象里没有这个属性
     const pNo = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟无班组措施计划', planType: '周计划' } }), 'plan POST 无班组措施');
     need(!('teamSafetyMeasures' in pNo), '新建计划落库不应带 teamSafetyMeasures：' + JSON.stringify(pNo.teamSafetyMeasures));
@@ -1097,7 +1100,7 @@ async function listOk(p, token) {
       token, body: { name: '冒烟假值计划', planType: '周计划', teamSafetyMeasures: '假值：不应带入' }
     }), 'plan POST 假值');
     need(pFake.teamSafetyMeasures === '假值：不应带入', '存量历史值应留在库里不动（不删不迁移）');
-    return '表单无该字段、保存体剔除该键、落库无该键、带入固定标准文案、存量值保留不迁移';
+    return '表单无该字段、保存体剔除该键、落库无该键、二票 4.4 班组留空/运维「无」、其余沿用标准文案、存量值保留不迁移';
   });
   await step('plans', '生成资料：无 survey → 400 → 生成勘察记录 docx（空槽保留 XXXX / 接地线并入通用风险 / 多行逐段）→ 再生成 +1 → 下载 PK → 删除后文件同消/404', async () => {
     const me = needOk(await api('GET', '/api/me', { token }), 'me');
