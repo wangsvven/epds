@@ -9,17 +9,13 @@
  *   业务管理部门分管负责人 | ___   业务管理部门负责人 | ___   业务分管领导 | ___   备 注 | ___
  *
  * 填法（按位置，不做占位符替换）：逐行扫描，命中标签的格取其**右侧相邻格**写入值；
- * 抬头「年 月 日」按申请日期填。未映射的格（班组名称 / 外协单位 / 各级审批签字）保持空白供手写。
- * 排版：短值居中；长文本（工作内容、备注）左对齐 + 左右内缩，多行用 <w:br/> 断行；
- * 沿用模板原字体（Songti SC Regular 13pt=sz26）与单元格垂直居中。 */
+ * 抬头「年 月 日」按申请日期填。未映射的格（外协单位 / 各级审批签字）保持空白供手写。
+ *
+ * 格式原则：**只填数据，不改格式**——字体/字号/加粗/对齐/行距/缩进/垂直居中/列宽全部沿用模板预设
+ * （文字套用该格段落自带的 rPr，等同于在 Word 里往空格里打字）；仅日期段的缩进与右对齐按表格边界调整。 */
 const { listZipEntries, buildStoreZip, decodeXmlEntities } = require('./util');
 
 const DOC_ENTRY = 'word/document.xml';
-/* 填入值的统一字体：宋体 13pt（sz=26 半磅）、黑色 —— 模板里各空值格残留格式不一
- * （「项目名称」格残留 28pt、部分格缺垂直居中），填值一律按此归一，避免同一张表字号跳变。 */
-const FALLBACK_RPR = '<w:rPr><w:rFonts w:ascii="Songti SC Regular" w:eastAsia="Songti SC Regular" '
-  + 'w:hAnsi="Songti SC Regular" w:cs="Songti SC Regular" w:hint="eastAsia"/>'
-  + '<w:color w:val="000000"/><w:kern w:val="0"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>';
 
 function str(v) { return String(v == null ? '' : v).trim(); }
 function num(v) { const n = Number(v); return String(Number.isFinite(n) && n > 0 ? Math.round(n) : 0); }
@@ -54,11 +50,11 @@ function buildPlan(rec) {
   const r = rec || {};
   const plan = {};
 
-  plan['项目类型'] = { align: 'center', text: str(r.projectType) };
-  plan['项目名称'] = { align: 'center', text: str(r.projectName) };
+  plan['项目类型'] = { text: str(r.projectType) };
+  plan['项目名称'] = { text: str(r.projectName) };
   // 班组名称 ← 往来单位（软件里的“往来单位”即本表的班组/借出方）
-  plan['班组名称'] = { align: 'center', text: str(r.unit) };
-  plan['用工时间'] = { align: 'center', text: fmtDateDot(r.workDate) };
+  plan['班组名称'] = { text: str(r.unit) };
+  plan['用工时间'] = { text: fmtDateDot(r.workDate) };
 
   // 工作内容 + 用工需求（数量并入同一格，末行追加需求行）
   const lines = [];
@@ -68,11 +64,11 @@ function buildPlan(rec) {
   if (need || work || veh) {
     lines.push('技工' + num(need) + '人次、民工' + num(work) + '人次、车辆' + num(veh) + '辆次');
   }
-  plan['工作内容及用工需求'] = { align: 'left', text: lines.join('\n') };
+  plan['工作内容及用工需求'] = { text: lines.join('\n') };
 
   // 备注：借工方向并入（模板无方向行）
   const remark = [str(r.direction), str(r.remark)].filter(Boolean).join('；');
-  plan['备注'] = { align: 'left', text: remark };
+  plan['备注'] = { text: remark };
 
   return plan;
 }
@@ -80,45 +76,29 @@ function buildPlan(rec) {
 function runXml(text, rPr) {
   const body = String(text).replace(/\r\n?/g, '\n').split('\n')
     .map(xmlEscape).join('</w:t><w:br/><w:t xml:space="preserve">');
-  return '<w:r>' + (rPr || FALLBACK_RPR) + '<w:t xml:space="preserve">' + body + '</w:t></w:r>';
+  return '<w:r>' + (rPr || '') + '<w:t xml:space="preserve">' + body + '</w:t></w:r>';
 }
 
-// 段落属性微调：统一字体、对齐方式、长文本左右内缩（去掉模板首行缩进，避免续行错位）
-function tunePPr(pPr, align, multi) {
-  let p = pPr || '<w:pPr></w:pPr>';
-  p = /<w:rPr>[\s\S]*?<\/w:rPr>/.test(p)
-    ? p.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, FALLBACK_RPR)
-    : p.replace(/<\/w:pPr>$/, FALLBACK_RPR + '</w:pPr>');
-  const jc = align === 'left' ? '<w:jc w:val="left"/>' : '<w:jc w:val="center"/>';
-  p = /<w:jc\b[^>]*\/>/.test(p) ? p.replace(/<w:jc\b[^>]*\/>/, jc) : p.replace(/<\/w:pPr>$/, jc + '</w:pPr>');
-  if (align === 'left') {
-    const ind = '<w:ind w:left="113" w:right="113"/>';
-    p = /<w:ind\b[^>]*\/>/.test(p) ? p.replace(/<w:ind\b[^>]*\/>/, ind) : p.replace(/<\/w:pPr>$/, ind + '</w:pPr>');
+/* 取模板为该段落/单元格预设的字体：优先已有 run 的 rPr，否则用段落标记上的 rPr
+ * （Word 里在空格里输入文字，就是套用这个预设字体）——保证“只填数据、不改格式”。 */
+function presetRPr(frag) {
+  const runs = frag.match(/<w:r(?:\s[^>]*)?>[\s\S]*?<\/w:r>/);
+  if (runs) {
+    const r = (runs[0].match(/<w:rPr>[\s\S]*?<\/w:rPr>/) || [''])[0];
+    if (r) return r;
   }
-  // 多行内容：模板的固定行距（624/906 twips，为手写留白）会让折行间距过大，改 1.5 倍自动行距
-  if (multi) {
-    const sp = '<w:spacing w:line="360" w:lineRule="auto"/>';
-    p = /<w:spacing\b[^>]*\/>/.test(p) ? p.replace(/<w:spacing\b[^>]*\/>/, sp) : p.replace(/<\/w:pPr>$/, sp + '</w:pPr>');
-  }
-  return p;
+  const pPr = (frag.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
+  return (pPr.match(/<w:rPr>[\s\S]*?<\/w:rPr>/) || [''])[0];
 }
 
-/* 单元格属性补垂直居中（模板部分空值格缺 vAlign，填值后会顶端对齐） */
-function tuneTcPr(tcPr) {
-  if (!tcPr) return '';
-  return /<w:vAlign\b[^>]*\/>/.test(tcPr)
-    ? tcPr.replace(/<w:vAlign\b[^>]*\/>/, '<w:vAlign w:val="center"/>')
-    : tcPr.replace(/<\/w:tcPr>$/, '<w:vAlign w:val="center"/></w:tcPr>');
-}
-
-/* 用新内容重建一个单元格：保留 tcPr（列宽/边框/合并）与段落行距，字体/对齐/垂直居中归一 */
-function buildCell(cellXml, text, align) {
-  const tcPr = tuneTcPr((cellXml.match(/<w:tcPr>[\s\S]*?<\/w:tcPr>/) || [''])[0]);
+/* 用新内容重建一个单元格：tcPr（列宽/边框/合并/垂直对齐）与 pPr（字体/字号/对齐/行距/缩进）
+ * 全部**原样保留**，只写入文字；多行用 <w:br/> 断开。 */
+function buildCell(cellXml, text) {
+  const tcPr = (cellXml.match(/<w:tcPr>[\s\S]*?<\/w:tcPr>/) || [''])[0];
   const pMatch = cellXml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/);
   const pPr = pMatch ? (pMatch[0].match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0] : '';
-  const body = str(text) ? runXml(str(text), FALLBACK_RPR) : '';
-  const multi = String(text).indexOf('\n') >= 0;
-  return '<w:tc>' + tcPr + '<w:p>' + tunePPr(pPr, align, multi) + body + '</w:p></w:tc>';
+  const body = str(text) ? runXml(str(text), presetRPr(cellXml)) : '';
+  return '<w:tc>' + tcPr + '<w:p>' + pPr + body + '</w:p></w:tc>';
 }
 
 /* 逐行填表：命中标签格 → 写右侧相邻格 */
@@ -129,7 +109,7 @@ function fillRow(rowXml, plan) {
   const out = cells.slice();
   for (let i = 0; i < cells.length - 1; i++) {
     const spec = plan[textOf(cells[i])];
-    if (spec && str(spec.text)) out[i + 1] = buildCell(cells[i + 1], spec.text, spec.align);
+    if (spec && str(spec.text)) out[i + 1] = buildCell(cells[i + 1], spec.text);
   }
   const first = rowXml.indexOf('<w:tc>');
   const lastEnd = rowXml.lastIndexOf('</w:tc>') + '</w:tc>'.length;
@@ -151,36 +131,22 @@ function tableBand(xml) {
   return { left, right };
 }
 
-/* 抬头段落属性：统一字体 + 按表格左右边界缩进 + 对齐方式 */
-function tuneHeadPPr(pPr, align, band) {
-  let p = pPr || '<w:pPr></w:pPr>';
-  p = /<w:rPr>[\s\S]*?<\/w:rPr>/.test(p)
-    ? p.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, FALLBACK_RPR)
-    : p.replace(/<\/w:pPr>$/, FALLBACK_RPR + '</w:pPr>');
-  const ind = '<w:ind w:left="' + band.left + '" w:right="' + band.right + '"/>';
-  p = /<w:ind\b[^>]*\/>/.test(p) ? p.replace(/<w:ind\b[^>]*\/>/, ind) : p.replace(/<\/w:pPr>$/, ind + '</w:pPr>');
-  const jc = '<w:jc w:val="' + align + '"/>';
-  p = /<w:jc\b[^>]*\/>/.test(p) ? p.replace(/<w:jc\b[^>]*\/>/, jc) : p.replace(/<\/w:pPr>$/, jc + '</w:pPr>');
-  return p;
-}
-
-/* 抬头处理：标题居中于表格上方、日期右对齐于表格右边界（模板页边距为 0，日期原本会贴到纸边） */
+/* 抬头处理：**标题段原样不动**（表头字体/字号/加粗一律保留模板原样）；
+ * 只把「年 月 日」那一段填成日期，并把该段按表格右边界右对齐（位置调整，不改字体与行距）。 */
 function fillHeadLines(xml, rec) {
   const band = tableBand(xml);
   const d = str(rec && rec.applyDate) || str(rec && rec.workDate);
   const dateText = /^\d{4}-\d{1,2}-\d{1,2}/.test(d) ? fmtDateCn(d) : '';
+  if (!dateText) return xml;
   return xml.replace(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g, p => {
-    const t = textOf(p);
-    if (t === '用工申请审批表') {
-      const pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
-      return '<w:p>' + tuneHeadPPr(pPr, 'center', band) + runXml('用工申请审批表', FALLBACK_RPR) + '</w:p>';
-    }
-    if (t === '年月日') {
-      const pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
-      const body = dateText ? runXml(dateText, FALLBACK_RPR) : '';
-      return '<w:p>' + tuneHeadPPr(pPr, 'right', band) + body + '</w:p>';
-    }
-    return p;
+    if (textOf(p) !== '年月日') return p;
+    let pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
+    // 仅改缩进（对准表格左右边界）与对齐（右对齐），其余属性（字体/字号/行距）保持模板原样
+    const ind = '<w:ind w:left="' + band.left + '" w:right="' + band.right + '"/>';
+    pPr = /<w:ind\b[^>]*\/>/.test(pPr) ? pPr.replace(/<w:ind\b[^>]*\/>/, ind) : pPr.replace(/<\/w:pPr>$/, ind + '</w:pPr>');
+    const jc = '<w:jc w:val="right"/>';
+    pPr = /<w:jc\b[^>]*\/>/.test(pPr) ? pPr.replace(/<w:jc\b[^>]*\/>/, jc) : pPr.replace(/<\/w:pPr>$/, jc + '</w:pPr>');
+    return '<w:p>' + pPr + runXml(dateText, presetRPr(p)) + '</w:p>';
   });
 }
 
