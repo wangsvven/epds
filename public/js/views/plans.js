@@ -831,8 +831,9 @@ const PlansView = {
     const svTicketType = computed(() => String((surveyDlg.seed && surveyDlg.seed.ticketType) || ''));
     const svSecondTicket = computed(() => svTicketType.value === TICKET_SECOND);
     const svLowTicket = computed(() => svTicketType.value === TICKET_LOW);
-    // 二票、低压票都不分小组（隐藏作业分组与所有分组相关 UI）
-    const svNoGroup = computed(() => svSecondTicket.value || svLowTicket.value);
+    // 只有低压票不分小组（隐藏作业分组与所有分组相关 UI）；
+    // 二票可分组：分2/3个小组时，4.4 班组措施逐行可选所属小组（见 sx-lines）
+    const svNoGroup = computed(() => svLowTicket.value);
     // 10kV 接地线：二票（不停电）、低压票都不需要；0.4kV 接地线只在二票隐藏
     const svHideGround10 = computed(() => svSecondTicket.value || svLowTicket.value);
     const svHideGround04 = computed(() => svSecondTicket.value);
