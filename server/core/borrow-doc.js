@@ -50,7 +50,8 @@ function buildPlan(rec) {
   const r = rec || {};
   const plan = {};
 
-  plan['项目类型'] = { text: str(r.projectType) };
+  // 项目类型：模板该格原本是左对齐（其它短值格均为居中），参考版式里是居中，这里显式居中
+  plan['项目类型'] = { text: str(r.projectType), align: 'center' };
   plan['项目名称'] = { text: str(r.projectName) };
   // 班组名称 ← 往来单位（软件里的“往来单位”即本表的班组/借出方）
   plan['班组名称'] = { text: str(r.unit) };
@@ -62,7 +63,7 @@ function buildPlan(rec) {
   if (content) lines.push(content);
   const need = Number(r.techCount) || 0, work = Number(r.workerCount) || 0, veh = Number(r.vehicleCount) || 0;
   if (need || work || veh) {
-    lines.push('技工' + num(need) + '人次、民工' + num(work) + '人次、车辆' + num(veh) + '辆次');
+    lines.push('技工' + num(need) + '人次、民工' + num(work) + '人次、工程车' + num(veh) + '辆次');
   }
   plan['工作内容及用工需求'] = { text: lines.join('\n') };
 
@@ -92,11 +93,17 @@ function presetRPr(frag) {
 }
 
 /* 用新内容重建一个单元格：tcPr（列宽/边框/合并/垂直对齐）与 pPr（字体/字号/对齐/行距/缩进）
- * 全部**原样保留**，只写入文字；多行用 <w:br/> 断开。 */
-function buildCell(cellXml, text) {
+ * 全部**原样保留**，只写入文字；多行用 <w:br/> 断开。
+ * 仅当调用方显式给了 align（如参考版式要求居中而模板是左对齐）时才覆盖 jc，其余属性一律不动。 */
+function buildCell(cellXml, text, align) {
   const tcPr = (cellXml.match(/<w:tcPr>[\s\S]*?<\/w:tcPr>/) || [''])[0];
   const pMatch = cellXml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/);
-  const pPr = pMatch ? (pMatch[0].match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0] : '';
+  let pPr = pMatch ? (pMatch[0].match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0] : '';
+  if (align && str(text)) {
+    const jc = '<w:jc w:val="' + align + '"/>';
+    pPr = !pPr ? '<w:pPr>' + jc + '</w:pPr>'
+      : /<w:jc\b[^>]*\/>/.test(pPr) ? pPr.replace(/<w:jc\b[^>]*\/>/, jc) : pPr.replace(/<\/w:pPr>$/, jc + '</w:pPr>');
+  }
   const body = str(text) ? runXml(str(text), presetRPr(cellXml)) : '';
   return '<w:tc>' + tcPr + '<w:p>' + pPr + body + '</w:p></w:tc>';
 }
@@ -109,7 +116,7 @@ function fillRow(rowXml, plan) {
   const out = cells.slice();
   for (let i = 0; i < cells.length - 1; i++) {
     const spec = plan[textOf(cells[i])];
-    if (spec && str(spec.text)) out[i + 1] = buildCell(cells[i + 1], spec.text);
+    if (spec && str(spec.text)) out[i + 1] = buildCell(cells[i + 1], spec.text, spec.align);
   }
   const first = rowXml.indexOf('<w:tc>');
   const lastEnd = rowXml.lastIndexOf('</w:tc>') + '</w:tc>'.length;
