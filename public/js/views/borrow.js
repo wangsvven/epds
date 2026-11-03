@@ -16,9 +16,7 @@ const BorrowView = {
     const EVIDENCE_MAX = 5;
 
     const dlg = reactive({ visible: false, editing: false, busy: false, id: '', form: {} });
-    const evDlg = reactive({ visible: false, recordId: '', busy: false, thumbs: {} });
-    const genDlg = reactive({ visible: false, recordId: '' });
-    const evInput = ref(null);
+    const evDlg = reactive({ visible: false, recordId: '', busy: false, thumbs: {} });    const evInput = ref(null);
 
     // 当天（优先取服务器北京时间；不可用时回落本地日期）
     function todayStr() {
@@ -165,39 +163,24 @@ const BorrowView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
-    /* ---------------- 生成借工单 ---------------- */
-    const genRecord = computed(() => list.value.find(x => x.id === genDlg.recordId) || null);
-    const genFiles = computed(() => (genRecord.value && Array.isArray(genRecord.value.generatedFiles)) ? genRecord.value.generatedFiles : []);
+    /* ---------------- 生成借工单（生成后直接下载，不再弹二级窗） ---------------- */
     function hasGen(row) { return !!(row && Array.isArray(row.generatedFiles) && row.generatedFiles.some(x => x && x.category === '借工单')); }
+    async function downloadFile(recordId, f) {
+      const { blob, name } = await api.download('/api/borrowWorks/' + recordId + '/generated/' + f.id + '/download');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name || f.name || '借工单.docx';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(a.href);
+    }
     async function generate(row) {
       if (!row || !row.id) return;
       try {
         const item = await api.post('/api/borrowWorks/' + row.id + '/borrowForm/generate');
         const fresh = await api.get('/api/borrowWorks/' + row.id);
         Object.assign(row, fresh);
-        genDlg.recordId = row.id; genDlg.visible = true;
-        ElementPlus.ElMessage.success(item && item.updated ? '已重新生成借工单' : '已生成借工单');
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
-    }
-    async function downloadGen(f) {
-      const row = genRecord.value; if (!row) return;
-      try {
-        const { blob, name } = await api.download('/api/borrowWorks/' + row.id + '/generated/' + f.id + '/download');
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob); a.download = name || f.name || '借工单.docx';
-        document.body.appendChild(a); a.click(); a.remove();
-        URL.revokeObjectURL(a.href);
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
-    }
-    async function removeGen(f) {
-      const row = genRecord.value; if (!row) return;
-      try { await ElementPlus.ElMessageBox.confirm('确认删除生成资料「' + f.name + '」？删除后文件不可恢复。', '删除生成资料', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }); }
-      catch (e) { return; }
-      try {
-        await api.del('/api/borrowWorks/' + row.id + '/generated/' + f.id);
-        const fresh = await api.get('/api/borrowWorks/' + row.id);
-        Object.assign(row, fresh);
-        ElementPlus.ElMessage.success('已删除');
+        const f = (row.generatedFiles || []).find(x => x && x.category === '借工单');
+        if (f) await downloadFile(row.id, f);
+        ElementPlus.ElMessage.success(item && item.updated ? '已重新生成并下载' : '已生成并下载');
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
@@ -227,7 +210,7 @@ const BorrowView = {
       DIRECTIONS, PROJECT_TYPES, SIGN_STATUS, EVIDENCE_MAX,
       filtered, reset, dlg, openAdd, openEdit, submit, remove,
       evDlg, evInput, evRecord, evFiles, openEvidences, onEvidenceFile, previewEvidence, removeEvidence, revokeThumbs,
-      genDlg, genRecord, genFiles, hasGen, generate, downloadGen, removeGen,
+      hasGen, generate,
       balanceRows, fmtTime
     };
   },
@@ -414,26 +397,6 @@ const BorrowView = {
         </div>
       </div>
       <el-empty v-else description="暂无佐证" :image-size="64" />
-    </el-dialog>
-
-    <!-- 生成资料弹窗 -->
-    <el-dialog v-model="genDlg.visible" title="生成资料" width="min(720px, 94%)">
-      <div style="margin-bottom:12px">
-        <el-button v-if="canWrite('borrow') && genDlg.recordId" size="small" type="primary" @click="generate(genRecord)">重新生成</el-button>
-      </div>
-      <el-table :data="genFiles" size="small" border empty-text="暂无生成资料" style="width:100%">
-        <el-table-column prop="category" label="资料类别" width="140" />
-        <el-table-column prop="name" label="文件名称" min-width="220" show-overflow-tooltip />
-        <el-table-column label="创建时间" width="160">
-          <template #default="{ row }"><span style="color:var(--text-2)">{{ fmtTime(row.uploadedAt) }}</span></template>
-        </el-table-column>
-        <el-table-column label="操作" width="120">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="downloadGen(row)">下载</el-button>
-            <el-button v-if="canWrite('borrow')" link type="danger" size="small" @click="removeGen(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
     </el-dialog>
   </div>`
 };
