@@ -495,6 +495,7 @@ const PlansView = {
     // 「配电：配电第二种工作票」专用默认值：不停电作业 —— 4.1/4.2 按规则带入（徽标显示「规则自动带入」），
     // 4.3 只预置这 4 条危险点（同样按标题精确匹配危险点库）
     const TICKET_SECOND = '配电：配电第二种工作票';
+    const TICKET_LOW = '配电：低压工作票';
     const SURVEY_P2_OUTAGE = '不停电';
     const SURVEY_P2_RETAINED = '工作范围内所有线路均带电';
     const SURVEY_P2_HAZARDS = ['物体打击风险', '工器具是否合格风险', '施工区域外来人员进入风险', '使用改装挖吊一体机施工'];
@@ -576,6 +577,7 @@ const PlansView = {
         // 4.2：仅配电第二种工作票按规则带入；其余留空（不在停电范围的部位现场勘察时手填）
         retainedLive: isP2 ? SURVEY_P2_RETAINED : '',
         ticketSecond: isP2,
+        ticketType: s(p.ticketType),
         // 4.4 班组措施：模板侧标准文案（周计划无此字段，不从计划取值）
         teamMeasures: SV_TEAM_MEASURES_DEFAULT,
         surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
@@ -595,7 +597,7 @@ const PlansView = {
       const g = surveyDlg.form && surveyDlg.form.grouping;
       return g === '分2个小组' ? 2 : g === '分3个小组' ? 3 : 0;
     });
-    const svGrouped = computed(() => !svSecondTicket.value && svGroupCount.value > 0);
+    const svGrouped = computed(() => !svNoGroup.value && svGroupCount.value > 0);
     // 危险点归属选项：不分小组只有「全组」；分 N 组时额外给出 1..N 小组
     const hpScopeOpts = computed(() => {
       const n = svGroupCount.value;
@@ -821,7 +823,14 @@ const PlansView = {
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
     ];
     // 配电第二种工作票：不停电作业 —— 勘察单不需要接地线位置
-    const svSecondTicket = computed(() => !!(surveyDlg.seed && surveyDlg.seed.ticketSecond));
+    const svTicketType = computed(() => String((surveyDlg.seed && surveyDlg.seed.ticketType) || ''));
+    const svSecondTicket = computed(() => svTicketType.value === TICKET_SECOND);
+    const svLowTicket = computed(() => svTicketType.value === TICKET_LOW);
+    // 二票、低压票都不分小组（隐藏作业分组与所有分组相关 UI）
+    const svNoGroup = computed(() => svSecondTicket.value || svLowTicket.value);
+    // 10kV 接地线：二票（不停电）、低压票都不需要；0.4kV 接地线只在二票隐藏
+    const svHideGround10 = computed(() => svSecondTicket.value || svLowTicket.value);
+    const svHideGround04 = computed(() => svSecondTicket.value);
     const svBadges = computed(() => {
       const f = surveyDlg.form; const seed = surveyDlg.seed || {};
       if (!f) return {};
@@ -1356,7 +1365,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1966,7 +1975,7 @@ const PlansView = {
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
           <!-- 作业分组：配电第二种工作票（不停电作业）不分小组，整项隐藏 -->
-          <el-form-item v-if="!svSecondTicket" label="作业分组">
+          <el-form-item v-if="!svNoGroup" label="作业分组">
             <el-select v-model="surveyDlg.form.grouping" style="width:220px" @change="onGroupingChange">
               <el-option v-for="g in SURVEY_GROUPING_OPTS" :key="g" :label="g" :value="g" />
             </el-select>
@@ -2154,8 +2163,7 @@ const PlansView = {
             </div>
           </el-form-item>
 
-          <!-- 接地线：配电第二种工作票（不停电作业）不需要，整段隐藏 -->
-          <template v-if="!svSecondTicket">
+          <template v-if="!svHideGround10">
           <el-form-item>
             <template #label>
               <span class="sv-lab">10kV 接地线位置（每行一个）<span v-if="svGrouped" class="sv-chip sv-split">每条选择一个小组</span><span v-else-if="svBadges.ground10" class="sv-chip" :class="'sv-' + svBadges.ground10.cls">{{ svBadges.ground10.text }}</span></span>
@@ -2174,7 +2182,9 @@ const PlansView = {
               </div>
             </div>
           </el-form-item>
+          </template>
 
+          <template v-if="!svHideGround04">
           <el-form-item>
             <template #label>
               <span class="sv-lab">0.4kV 接地线位置（每行一个）<span v-if="svGrouped" class="sv-chip sv-split">每条选择一个小组</span><span v-else-if="svBadges.ground04" class="sv-chip" :class="'sv-' + svBadges.ground04.cls">{{ svBadges.ground04.text }}</span></span>
