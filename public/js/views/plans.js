@@ -2170,7 +2170,7 @@ const PlansView = {
               <span class="sv-lab">4.4 班组应采取的安全措施<span v-if="svGrouped" class="sv-chip sv-split">每条选择一个小组</span><span v-else-if="svBadges.teamMeasures" class="sv-chip" :class="'sv-' + svBadges.teamMeasures.cls">{{ svBadges.teamMeasures.text }}</span></span>
             </template>
             <div class="sx-block">
-              <el-input v-model="surveyDlg.form.teamMeasures" type="textarea" :rows="4" placeholder="每行一条措施；分组时可在下方逐行设置所属小组" @input="v => onScopeTextInput('teamMeasures', 'teamMeasureScopes', v)" />
+              <el-input v-model="surveyDlg.form.teamMeasures" type="textarea" :rows="4" :placeholder="svGrouped ? '每行一条措施；分组时可在下方逐行设置所属小组' : ''" @input="v => onScopeTextInput('teamMeasures', 'teamMeasureScopes', v)" />
               <div v-if="svGrouped && sxLines(surveyDlg.form.teamMeasures).length" class="sx-lines">
                 <div class="sx-lines-head">逐行设置所属小组（共 {{ sxLines(surveyDlg.form.teamMeasures).length }} 条）</div>
                 <div v-for="(ln, i) in sxLines(surveyDlg.form.teamMeasures)" :key="'tm-' + i" class="sx-line">
