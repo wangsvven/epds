@@ -610,6 +610,11 @@ const PlansView = {
       const s = String(v == null ? '' : v).trim();
       return ['全组', '1小组', '2小组', '3小组'].indexOf(s) > -1 ? s : SURVEY_HP_SCOPE_ALL;
     }
+    // 逐行归属取值：未指定的保持空（下拉显示占位「所属小组」），交给人工选
+    function sxScopeOf(v) {
+      const s = String(v == null ? '' : v).trim();
+      return ['全组', '1小组', '2小组', '3小组'].indexOf(s) > -1 ? s : '';
+    }
     // ---- 逐行归属（4.4 班组措施 / 10kV / 0.4kV 接地线）：文本非空行 ↔ scopes 按序对齐 ----
     const SX_SCOPE_FIELDS = [
       { text: 'teamMeasures', sc: 'teamMeasureScopes' },
@@ -649,7 +654,7 @@ const PlansView = {
       const freeNew = lines.map((_, i) => i).filter(i => map[i] === undefined);
       const freeOld = oldLines.map((_, i) => i).filter(i => !usedOld[i]);
       freeNew.forEach((ni, k) => { if (k < freeOld.length) map[ni] = freeOld[k]; });
-      f[scKey] = lines.map((_, i) => (map[i] === undefined ? SURVEY_HP_SCOPE_ALL : hpScopeOf(oldScopes[map[i]])));
+      f[scKey] = lines.map((_, i) => (map[i] === undefined ? '' : sxScopeOf(oldScopes[map[i]])));
       sxPrev[textKey] = lines.slice();
     }
     // 文本框输入：用事件值算行（不依赖 v-model 更新时序）
@@ -666,7 +671,7 @@ const PlansView = {
         const lines = sxLines(f[text]);
         const arr = Array.isArray(f[sc]) ? f[sc] : [];
         const out = [];
-        for (let i = 0; i < lines.length; i++) out.push(hpScopeOf(arr[i]));
+        for (let i = 0; i < lines.length; i++) out.push(sxScopeOf(arr[i]));
         f[sc] = out;
         sxPrev[text] = lines;
       });
@@ -875,6 +880,13 @@ const PlansView = {
       const mergedTask = savedLoc
         ? (savedTask ? savedLoc + '\n' + savedTask : savedLoc)
         : savedTask;   // 已保存原样，不回落计划内容（带入只发生在首次创建）
+      // 已保存但危险点为空的记录：按票种补默认危险点（二票 4 条 / 其余 7 条），
+      // 作为打开时的基线（不算「未保存修改」），用户点保存时一并落库。
+      let savedHazards = (saved && Array.isArray(saved.hazardPoints)) ? saved.hazardPoints : [];
+      if (saved && !savedHazards.length) {
+        await ensureHazards();
+        savedHazards = seedHazardPoints(seed.ticketSecond ? SURVEY_P2_HAZARDS : null);
+      }
       if (saved) {
         surveyDlg.form = {
           grouping: SURVEY_GROUPING_OPTS.indexOf(saved.grouping) > -1 ? saved.grouping : '不分小组',
@@ -898,7 +910,7 @@ const PlansView = {
           ground04Scopes: Array.isArray(saved.ground04Scopes) ? saved.ground04Scopes.slice() : [],
           // 勘察日期：已保存原样（空就是空，不回落今天——「今天」只用于首次创建）
           surveyDate: str(saved.surveyDate),
-          hazardPoints: (Array.isArray(saved.hazardPoints) ? saved.hazardPoints : []).map(h => ({
+          hazardPoints: savedHazards.map(h => ({
             id: h.id || newHpId(),
             hazardId: h.hazardId || '',
             title: h.title || '',
@@ -2155,7 +2167,7 @@ const PlansView = {
                 <div v-for="(ln, i) in sxLines(surveyDlg.form.teamMeasures)" :key="'tm-' + i" class="sx-line">
                   <span class="sx-line-no">{{ i + 1 }}.</span>
                   <span class="sx-line-txt" :title="ln">{{ ln }}</span>
-                  <el-select v-model="surveyDlg.form.teamMeasureScopes[i]" size="small" class="sx-line-scope">
+                  <el-select v-model="surveyDlg.form.teamMeasureScopes[i]" size="small" class="sx-line-scope" placeholder="所属小组">
                     <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
                   </el-select>
                 </div>
@@ -2175,7 +2187,7 @@ const PlansView = {
                 <div v-for="(ln, i) in sxLines(surveyDlg.form.ground10)" :key="'g10-' + i" class="sx-line">
                   <span class="sx-line-no">{{ i + 1 }}.</span>
                   <span class="sx-line-txt" :title="ln">{{ ln }}</span>
-                  <el-select v-model="surveyDlg.form.ground10Scopes[i]" size="small" class="sx-line-scope">
+                  <el-select v-model="surveyDlg.form.ground10Scopes[i]" size="small" class="sx-line-scope" placeholder="所属小组">
                     <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
                   </el-select>
                 </div>
@@ -2196,7 +2208,7 @@ const PlansView = {
                 <div v-for="(ln, i) in sxLines(surveyDlg.form.ground04)" :key="'g04-' + i" class="sx-line">
                   <span class="sx-line-no">{{ i + 1 }}.</span>
                   <span class="sx-line-txt" :title="ln">{{ ln }}</span>
-                  <el-select v-model="surveyDlg.form.ground04Scopes[i]" size="small" class="sx-line-scope">
+                  <el-select v-model="surveyDlg.form.ground04Scopes[i]" size="small" class="sx-line-scope" placeholder="所属小组">
                     <el-option v-for="s in hpScopeOpts" :key="s" :label="s" :value="s" />
                   </el-select>
                 </div>
