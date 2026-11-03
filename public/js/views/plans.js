@@ -492,6 +492,12 @@ const PlansView = {
       '高空坠落风险', '倒杆伤害风险', '物体打击风险', '超出作业范围误登杆风险',
       '工器具是否合格风险', '触电伤害风险', '施工区域外来人员进入风险'
     ];
+    // 「配电：配电第二种工作票」专用默认值：不停电作业 —— 4.1/4.2 按规则带入（徽标显示「规则自动带入」），
+    // 4.3 只预置这 4 条危险点（同样按标题精确匹配危险点库）
+    const TICKET_SECOND = '配电：配电第二种工作票';
+    const SURVEY_P2_OUTAGE = '不停电';
+    const SURVEY_P2_RETAINED = '工作范围内所有线路均带电';
+    const SURVEY_P2_HAZARDS = ['物体打击风险', '工器具是否合格风险', '施工区域外来人员进入风险', '使用改装挖吊一体机施工'];
     const SURVEY_HP_SCOPE_ALL = '全组';
     const surveyDlg = reactive({
       visible: false, form: null, seed: null,
@@ -558,13 +564,18 @@ const PlansView = {
       // 编号：编辑器里存的就是拼好的完整编号（部门+编号）；已带部门前缀不重复拼，部门为空则裸号
       if (team && no && no.indexOf(team) !== 0) no = team + no;
       const day = s(p.startDate).slice(0, 10);
+      const isP2 = s(p.ticketType) === TICKET_SECOND;
       return {
         team: team,
         surveyNo: no,
         // 4.3 环境描述：首个默认文案只在「首次创建」时带入（见 openSurveyEditor），可改可清空
         envDesc: SV_ENV_DESC_DEFAULT,
         workTask: s(p.content),
-        outageScope: s(p.outageRange),
+        // 4.1：配电第二种工作票按规则带入「不停电」；其余仍抄周计划的停电范围
+        outageScope: isP2 ? SURVEY_P2_OUTAGE : s(p.outageRange),
+        // 4.2：仅配电第二种工作票按规则带入；其余留空（不在停电范围的部位现场勘察时手填）
+        retainedLive: isP2 ? SURVEY_P2_RETAINED : '',
+        ticketSecond: isP2,
         // 4.4 班组措施：模板侧标准文案（周计划无此字段，不从计划取值）
         teamMeasures: SV_TEAM_MEASURES_DEFAULT,
         surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
@@ -660,10 +671,10 @@ const PlansView = {
     }
     // 首次创建时预置标准危险点：标题精确匹配库记录（hazard 字段），命中即取库 id/标题/措施
     const hpSeedStat = { hits: 0, miss: [] };
-    function seedHazardPoints() {
+    function seedHazardPoints(titles) {
       const out = [];
       hpSeedStat.hits = 0; hpSeedStat.miss = [];
-      SURVEY_STD_HAZARDS.forEach(t => {
+      (titles && titles.length ? titles : SURVEY_STD_HAZARDS).forEach(t => {
         const h = hazardLibrary.value.find(x => String(x.hazard == null ? '' : x.hazard).trim() === t);
         if (!h) { hpSeedStat.miss.push(t); return; }
         hpSeedStat.hits++;
@@ -800,9 +811,11 @@ const PlansView = {
     //         当前值为空 → 来源有值（被人工清掉）= 人工填写；来源也为空 = 待填写
     //   来源值（seed）在打开时按计划/规则算一次，保存动作不改它 → 保存前后、重开前后徽标一致
     //   作业分组是模板外的纯控制项，不挂任何徽标；小组卡内字段同样不挂
-    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'surveyDate', 'teamMeasures', 'envDesc', 'surveyUnit'];
+    const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'retainedLive', 'surveyDate', 'teamMeasures', 'envDesc', 'surveyUnit'];
     // B 类（固定文案 / 规则算出）→「规则自动带入」；其余带入字段是 A 类（抄周计划字段）→「周计划自动带入」
     const SV_RULE_FIELDS = ['envDesc', 'surveyDate', 'teamMeasures', 'surveyUnit'];
+    // 配电第二种工作票额外把 4.1/4.2 计为「规则自动带入」
+    const SV_RULE_FIELDS_P2 = SV_RULE_FIELDS.concat(['outageScope', 'retainedLive']);
     const SV_BADGE_FIELDS = [
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
@@ -816,7 +829,8 @@ const PlansView = {
         const cur = str(f[k]);
         const src = SV_SEED_FIELDS.indexOf(k) > -1 ? str(seed[k]) : '';
         if (cur && src && cur === src) {
-          out[k] = { text: SV_RULE_FIELDS.indexOf(k) > -1 ? '规则自动带入' : '周计划自动带入', cls: 'auto' };
+          const ruleFields = seed.ticketSecond ? SV_RULE_FIELDS_P2 : SV_RULE_FIELDS;
+          out[k] = { text: ruleFields.indexOf(k) > -1 ? '规则自动带入' : '周计划自动带入', cls: 'auto' };
         } else if (cur || src) {
           out[k] = { text: '人工填写', cls: 'manual' };
         } else {
@@ -888,10 +902,10 @@ const PlansView = {
           grouping: '不分小组',
           surveyUnit: seed.surveyUnit, team: seed.team, surveyNo: seed.surveyNo, dualName: '',
           workLocation: '', workTask: seed.workTask,
-          outageScope: seed.outageScope, retainedLive: '', groups: [],
+          outageScope: seed.outageScope, retainedLive: seed.retainedLive, groups: [],
           envDesc: seed.envDesc, opsMeasures: '', teamMeasures: seed.teamMeasures, ground10: '', ground04: '',
           teamMeasureScopes: [], ground10Scopes: [], ground04Scopes: [],
-          surveyDate: seed.surveyDate || todayYmd(), hazardPoints: seedHazardPoints()
+          surveyDate: seed.surveyDate || todayYmd(), hazardPoints: seedHazardPoints(seed.ticketSecond ? SURVEY_P2_HAZARDS : null)
         };
       }
       Object.keys(hpOpen).forEach(k => { delete hpOpen[k]; });   // 每次打开一律折叠
