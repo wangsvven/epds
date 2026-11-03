@@ -595,7 +595,7 @@ const PlansView = {
       const g = surveyDlg.form && surveyDlg.form.grouping;
       return g === '分2个小组' ? 2 : g === '分3个小组' ? 3 : 0;
     });
-    const svGrouped = computed(() => svGroupCount.value > 0);
+    const svGrouped = computed(() => !svSecondTicket.value && svGroupCount.value > 0);
     // 危险点归属选项：不分小组只有「全组」；分 N 组时额外给出 1..N 小组
     const hpScopeOpts = computed(() => {
       const n = svGroupCount.value;
@@ -1965,7 +1965,8 @@ const PlansView = {
       <div v-if="surveyDlg.banner.text" class="sv-banner" :class="'sv-banner-' + surveyDlg.banner.type">{{ surveyDlg.banner.text }}</div>
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
-          <el-form-item label="作业分组">
+          <!-- 作业分组：配电第二种工作票（不停电作业）不分小组，整项隐藏 -->
+          <el-form-item v-if="!svSecondTicket" label="作业分组">
             <el-select v-model="surveyDlg.form.grouping" style="width:220px" @change="onGroupingChange">
               <el-option v-for="g in SURVEY_GROUPING_OPTS" :key="g" :label="g" :value="g" />
             </el-select>
