@@ -102,7 +102,7 @@ const App = {
       { key: 'projects', label: '项目列表', sub: '工程项目台账 · 进度与资料', comp: 'ProjectsView' },
       { key: 'materials', label: '材料台账', sub: '材料明细 · 领料出库与库存', comp: 'MaterialsView' },
       { key: 'plans', label: '计划管理', sub: '周计划 / 月计划 / 当日施工量', comp: 'PlansView' },
-      { key: 'borrow', label: '借工管理', sub: '借工登记与用工台账', comp: 'CrudView', cfg: borrowCfg },
+      { key: 'borrow', label: '借工管理', sub: '借工登记与用工台账', comp: 'BorrowView' },
       { key: 'completion', label: '竣工资料（开发中）', sub: '竣工资料归档', comp: 'CrudView', cfg: completionCfg },
       { key: 'actualWorks', label: '工程实际施工量', comp: 'ActualConstructionView', hideTitle: true },
       { key: 'documents', label: '文档中心', comp: 'DocumentsView', hideTitle: true },
@@ -327,6 +327,7 @@ const lp = (typeof ElementPlusLocaleZhCn !== 'undefined') ? { locale: ElementPlu
 app.use(ElementPlus, lp);
 app.component('FunnelIcon', FunnelIcon);
 app.component('CrudView', CrudView);
+app.component('BorrowView', BorrowView);
 app.component('ProjectsView', ProjectsView);
 app.component('DocumentsView', DocumentsView);
 app.component('MaterialsView', MaterialsView);

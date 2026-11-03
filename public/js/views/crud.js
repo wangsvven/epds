@@ -1,5 +1,5 @@
 /* ========== views/crud ========== */
-/* 通用 CRUD 视图 CrudView 与其配置驱动部分：annualPlanCfg / substationCfg / teamCfg / borrowCfg / completionCfg。 */
+/* 通用 CRUD 视图 CrudView 与其配置驱动部分：annualPlanCfg / substationCfg / teamCfg / completionCfg。 */
 /* ---------------- 通用 CRUD 视图（覆盖项目/计划/借工/竣工资料/用户/领料单/导入批次/出库） ---------------- */
 const CrudView = {
   props: {
@@ -156,20 +156,7 @@ const teamCfg = {
   ]
 };
 
-/* 项目/计划/借工/竣工资料 配置 */
-const borrowCfg = {
-  endpoint: 'borrowWorks', title: '借工',
-  columns: [
-    { key: 'fromTeam', label: '借出班组' }, { key: 'toTeam', label: '借入班组' }, { key: 'reason', label: '事由' },
-    { key: 'headcount', label: '人数', width: 80 }, { key: 'startDate', label: '开始', width: 120 }, { key: 'endDate', label: '结束', width: 120 },
-    { key: 'status', label: '状态', tag: true, width: 100 }
-  ],
-  formFields: [
-    { key: 'fromTeam', label: '借出班组' }, { key: 'toTeam', label: '借入班组' }, { key: 'reason', label: '事由', type: 'textarea' },
-    { key: 'headcount', label: '人数', type: 'number' }, { key: 'startDate', label: '开始日期' }, { key: 'endDate', label: '结束日期' },
-    { key: 'status', label: '状态', type: 'select', options: [{ label: '进行中', value: '进行中' }, { label: '已归还', value: '已归还' }] }
-  ]
-};
+/* 项目/计划/竣工资料 配置 */
 const completionCfg = {
   endpoint: 'completionDocuments', title: '竣工资料',
   columns: [
