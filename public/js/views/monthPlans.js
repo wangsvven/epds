@@ -798,7 +798,7 @@ const MonthPlansPanel = {
       <el-table-column prop="workType" label="检修类型" width="90" show-overflow-tooltip />
       <el-table-column prop="maintContent" label="检修内容" min-width="100" show-overflow-tooltip />
       <el-table-column prop="leader" label="班组长" width="78" show-overflow-tooltip />
-      <el-table-column label="操作" width="208" fixed="right">
+      <el-table-column label="操作" width="208">
         <template #default="{row}">
           <div class="mp-acts">
             <template v-if="canWrite('plans')">

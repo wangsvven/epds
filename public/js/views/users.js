@@ -452,7 +452,7 @@ const AccountsPanel = {
       <el-table-column label="用户组" width="110">
         <template #default="{ row }"><el-tag :type="groupTag(row.userGroup)" size="small">{{ row.userGroup }}</el-tag></template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="200">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
           <el-button v-if="canAdmin()" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>

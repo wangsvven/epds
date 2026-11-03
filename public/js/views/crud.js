@@ -90,7 +90,7 @@ const CrudView = {
           <span v-else>{{ row[col.key] }}</span>
         </template>
       </el-table-column>
-      <el-table-column v-if="canWrite(cfgModule())" label="操作" width="150" fixed="right">
+      <el-table-column v-if="canWrite(cfgModule())" label="操作" width="150">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>

@@ -573,7 +573,7 @@ const MaterialsView = {
           </div></template>
           <template #default="{row}"><span :style="chipStyle(statusColors[row.status] || 'var(--text-3)') + 'cursor:pointer'" title="点击查看关联领料单" @click="openRelated(row)">{{ row.status }}</span></template>
         </el-table-column>
-        <el-table-column v-if="canWrite('materials')" label="操作" width="98" align="center" fixed="right">
+        <el-table-column v-if="canWrite('materials')" label="操作" width="98" align="center">
           <template #default="{row}">
             <div class="mat-acts">
               <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
@@ -674,7 +674,7 @@ const MaterialsView = {
           <el-table-column label="状态" width="110">
             <template #default="{row}"><el-tag size="small" :type="relStatusType(row.status)">{{ row.status }}</el-tag></template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="120">
             <template #default="{row}">
               <el-button link type="primary" size="small" @click="relDownload(row)">下载</el-button>
               <el-button v-if="row.status !== '已作废'" link type="danger" size="small" @click="relVoid(row)">作 废</el-button>
@@ -1003,7 +1003,7 @@ const Requisitions = {
       <el-table-column label="状态" width="100">
         <template #default="{row}"><el-tag size="small" :type="statusType(row.status)">{{ row.status }}</el-tag></template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="200">
         <template #default="{row}">
           <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
           <el-button v-if="row.status==='待入库' && canWrite('materials')" link type="primary" size="small" @click="openConfirm(row)">确认入库</el-button>
@@ -1189,7 +1189,7 @@ const Imports = {
       <el-table-column label="备注" min-width="100">
         <template #default="{row}">{{ row.remark || '—' }}</template>
       </el-table-column>
-      <el-table-column v-if="canAdmin()" label="操作" width="90" fixed="right">
+      <el-table-column v-if="canAdmin()" label="操作" width="90">
         <template #default="{row}">
           <el-button link type="danger" size="small" @click="removeBatch(row)">删除</el-button>
         </template>
@@ -1533,7 +1533,7 @@ const Outbounds = {
               <template #default="{row}"><el-tag size="small" :type="row.status === '有效' ? 'success' : 'info'">{{ row.status }}</el-tag></template>
             </el-table-column>
             <el-table-column prop="createdAt" label="登记时间" width="160" />
-            <el-table-column label="操作" width="230" fixed="right">
+            <el-table-column label="操作" width="230">
               <template #default="{row}">
                 <el-button link type="primary" size="small" @click="openOrder(row)">查看</el-button>
                 <el-button v-if="row.status === '有效' && canWrite('materials')" link type="primary" size="small" @click="openReturn(row)">登记归还</el-button>

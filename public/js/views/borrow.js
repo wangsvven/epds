@@ -257,7 +257,7 @@ const BorrowView = {
         <el-table-column prop="workerCount" label="民工（人次）" width="104" align="center" />
         <el-table-column prop="vehicleCount" label="车辆（辆次）" width="104" align="center" />
         <el-table-column prop="workContent" label="工作内容" min-width="160" show-overflow-tooltip />
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" width="250">
           <template #default="{ row }">
             <div v-if="canWrite('borrow')" class="bw-acts">
               <el-button link type="warning" size="small" @click="generate(row)">{{ hasGen(row) ? '重新生成' : '生成借工单' }}</el-button>

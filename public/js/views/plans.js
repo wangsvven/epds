@@ -1473,7 +1473,7 @@ const PlansView = {
         <el-table-column prop="station" label="变电站/线路" min-width="100" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
         <el-table-column prop="chargePerson" label="工作负责人" width="92" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
         <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="144" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column label="操作" width="184" fixed="right">
+        <el-table-column label="操作" width="184">
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">
