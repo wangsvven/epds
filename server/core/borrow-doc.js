@@ -1,10 +1,10 @@
 /* ========== core/borrow-doc ========== */
-/* 借工单 docx 生成：把借工记录按 13 个槽位顺序填进模板的 XXXX（零依赖，复用 core/util 的 zip 实现）。
- * 占位约定与 core/survey-doc 一致：模板 word/document.xml 内 13 处 XXXX，按顺序替换；多行值用段内
+/* 借工单 docx 生成：把借工记录按 12 个槽位顺序填进模板的 XXXX（零依赖，复用 core/util 的 zip 实现）。
+ * 占位约定与 core/survey-doc 一致：模板 word/document.xml 内 12 处 XXXX，按顺序替换；多行值用段内
  * <w:br/> 断开（适配表格单元格）。与勘察模板不同：空值填空白（这是打印用的成品单据，不留 XXXX）。 */
 const { listZipEntries, buildStoreZip } = require('./util');
 
-const SLOT_COUNT = 13;
+const SLOT_COUNT = 12;
 const DOC_ENTRY = 'word/document.xml';
 
 function str(v) { return String(v == null ? '' : v).trim(); }
@@ -26,17 +26,16 @@ function borrowSlots(rec) {
   return [
     str(r.unit),            // 1  往来单位
     str(r.direction),       // 2  方向
-    str(r.externalUnit),    // 3  外协单位
-    str(r.projectType),     // 4  项目类型
-    str(r.projectName),     // 5  项目名称
-    str(r.workContent),     // 6  工作内容
-    str(r.applyDate),       // 7  申请日期
-    str(r.workDate),        // 8  用工日期
-    n(r.techCount),         // 9  技工
-    n(r.workerCount),       // 10 民工
-    n(r.vehicleCount),      // 11 车辆
-    str(r.signStatus),      // 12 签单状态
-    str(r.remark)           // 13 备注
+    str(r.projectType),     // 3  项目类型
+    str(r.projectName),     // 4  项目名称
+    str(r.workContent),     // 5  工作内容
+    str(r.applyDate),       // 6  申请日期
+    str(r.workDate),        // 7  用工日期
+    n(r.techCount),         // 8  技工（人次）
+    n(r.workerCount),       // 9  民工（人次）
+    n(r.vehicleCount),      // 10 车辆（辆次）
+    str(r.signStatus),      // 11 签单状态
+    str(r.remark)           // 12 备注
   ];
 }
 

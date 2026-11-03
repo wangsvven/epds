@@ -104,7 +104,6 @@ const MIGRATIONS = [
         r.workDate = r.startDate || '';
         r.signStatus = (r.status === '已归还') ? '已签单' : '未签单';
         r.unit = r.toTeam || '';
-        r.externalUnit = '';
         r.direction = '我方借出';
         r.projectType = '';
         r.projectName = '';

@@ -8,11 +8,10 @@ const BorrowView = {
     const filters = reactive({ unit: '', direction: '', signStatus: '', dateRange: null, keyword: '' });
     const subOpts = ref([]);        // 属地供电所
     const unitOpts = ref([]);       // 兄弟单位（单位维护）
-    const extUnitOpts = ref([]);    // 外协单位（单位维护）
     const allUnitOpts = computed(() => [...new Set([...subOpts.value, ...unitOpts.value])]);
 
     const DIRECTIONS = ['我方借出', '我方借入'];
-    const PROJECT_TYPES = ['抢险抢修', '配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程'];
+    const PROJECT_TYPES = ['抢险抢修', '运维检修', '运维值班', '相互往来'];
     const SIGN_STATUS = ['未签单', '已签单'];
     const EVIDENCE_MAX = 5;
 
@@ -30,7 +29,7 @@ const BorrowView = {
     }
     function newForm() {
       return {
-        unit: '', direction: '我方借出', externalUnit: '', projectType: '',
+        unit: '', direction: '我方借出', projectType: '',
         projectName: '', workContent: '', applyDate: todayStr(), workDate: todayStr(),
         techCount: 0, workerCount: 0, vehicleCount: 0, signStatus: '未签单', remark: ''
       };
@@ -53,7 +52,6 @@ const BorrowView = {
         ]);
         subOpts.value = [...new Set(names(subs))];
         unitOpts.value = [...new Set(names(units))];
-        extUnitOpts.value = unitOpts.value;
       } catch (e) {}
     }
 
@@ -80,7 +78,7 @@ const BorrowView = {
     function openEdit(row) {
       dlg.id = row.id; dlg.editing = true;
       dlg.form = {
-        unit: row.unit || '', direction: row.direction || '我方借出', externalUnit: row.externalUnit || '',
+        unit: row.unit || '', direction: row.direction || '我方借出',
         projectType: row.projectType || '', projectName: row.projectName || '', workContent: row.workContent || '',
         applyDate: row.applyDate || '', workDate: row.workDate || '',
         techCount: Number(row.techCount) || 0, workerCount: Number(row.workerCount) || 0, vehicleCount: Number(row.vehicleCount) || 0,
@@ -95,7 +93,7 @@ const BorrowView = {
       dlg.busy = true;
       try {
         const payload = {
-          unit: f.unit, direction: f.direction, externalUnit: f.externalUnit || '',
+          unit: f.unit, direction: f.direction,
           projectType: f.projectType || '', projectName: (f.projectName || '').trim(),
           workContent: (f.workContent || '').trim(), applyDate: f.applyDate || '', workDate: f.workDate || '',
           techCount: Number(f.techCount) || 0, workerCount: Number(f.workerCount) || 0, vehicleCount: Number(f.vehicleCount) || 0,
@@ -225,7 +223,7 @@ const BorrowView = {
     onUnmounted(() => revokeThumbs());
 
     return {
-      list, loading, tab, filters, subOpts, unitOpts, extUnitOpts, allUnitOpts,
+      list, loading, tab, filters, subOpts, unitOpts, allUnitOpts,
       DIRECTIONS, PROJECT_TYPES, SIGN_STATUS, EVIDENCE_MAX,
       filtered, reset, dlg, openAdd, openEdit, submit, remove,
       evDlg, evInput, evRecord, evFiles, openEvidences, onEvidenceFile, previewEvidence, removeEvidence, revokeThumbs,
@@ -268,12 +266,11 @@ const BorrowView = {
             <el-tag size="small" :type="row.direction === '我方借入' ? 'warning' : ''">{{ row.direction || '-' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="externalUnit" label="外协单位" min-width="120" show-overflow-tooltip />
         <el-table-column prop="projectType" label="项目类型" width="130" />
         <el-table-column prop="projectName" label="项目名称" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="techCount" label="技工" width="70" align="center" />
-        <el-table-column prop="workerCount" label="民工" width="70" align="center" />
-        <el-table-column prop="vehicleCount" label="车辆" width="70" align="center" />
+        <el-table-column prop="techCount" label="技工（人次）" width="96" align="center" />
+        <el-table-column prop="workerCount" label="民工（人次）" width="96" align="center" />
+        <el-table-column prop="vehicleCount" label="车辆（辆次）" width="96" align="center" />
         <el-table-column label="签单状态" width="100">
           <template #default="{ row }">
             <el-tag size="small" :type="row.signStatus === '已签单' ? 'success' : 'info'">{{ row.signStatus || '未签单' }}</el-tag>
@@ -334,23 +331,18 @@ const BorrowView = {
         </el-row>
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
-            <el-form-item label="外协单位">
-              <el-select v-model="dlg.form.externalUnit" filterable clearable placeholder="请选择" style="width:100%">
-                <el-option v-for="u in extUnitOpts" :key="u" :label="u" :value="u" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :sm="12">
             <el-form-item label="项目类型">
               <el-select v-model="dlg.form.projectType" clearable placeholder="请选择" style="width:100%">
                 <el-option v-for="t in PROJECT_TYPES" :key="t" :label="t" :value="t" />
               </el-select>
             </el-form-item>
           </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="项目名称">
+              <el-input v-model="dlg.form.projectName" maxlength="100" placeholder="选填" />
+            </el-form-item>
+          </el-col>
         </el-row>
-        <el-form-item label="项目名称">
-          <el-input v-model="dlg.form.projectName" maxlength="100" placeholder="选填" />
-        </el-form-item>
         <el-form-item label="工作内容">
           <el-input v-model="dlg.form.workContent" type="textarea" :rows="3" placeholder="选填" />
         </el-form-item>
@@ -368,17 +360,17 @@ const BorrowView = {
         </el-row>
         <el-row :gutter="16">
           <el-col :xs="8" :sm="8">
-            <el-form-item label="技工">
+            <el-form-item label="技工（人次）">
               <el-input-number v-model="dlg.form.techCount" :min="0" :step="1" :precision="0" style="width:100%" />
             </el-form-item>
           </el-col>
           <el-col :xs="8" :sm="8">
-            <el-form-item label="民工">
+            <el-form-item label="民工（人次）">
               <el-input-number v-model="dlg.form.workerCount" :min="0" :step="1" :precision="0" style="width:100%" />
             </el-form-item>
           </el-col>
           <el-col :xs="8" :sm="8">
-            <el-form-item label="车辆">
+            <el-form-item label="车辆（辆次）">
               <el-input-number v-model="dlg.form.vehicleCount" :min="0" :step="1" :precision="0" style="width:100%" />
             </el-form-item>
           </el-col>

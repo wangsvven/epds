@@ -750,7 +750,7 @@ const BORROW_GEN_CATEGORY = '借工单';
 const BORROW_GEN_FILE_NAME = '借工单.docx';
 const BORROW_TEMPLATE_REL = 'assets/借工单模板.docx';
 const BORROW_DIRECTIONS = ['我方借出', '我方借入'];
-const BORROW_PROJECT_TYPES = ['抢险抢修', '配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程'];
+const BORROW_PROJECT_TYPES = ['抢险抢修', '运维检修', '运维值班', '相互往来'];
 const BORROW_SIGN_STATUS = ['未签单', '已签单'];
 
 function findBorrow(id) {
