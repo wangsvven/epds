@@ -136,29 +136,51 @@ function fillRow(rowXml, plan) {
   return rowXml.slice(0, first) + out.join('') + rowXml.slice(lastEnd);
 }
 
-/* 抬头日期段落：模板用「首行缩进 + 一串空格」排版，填值后改为右对齐（去缩进、留右边距），
- * 避免长日期被缩进顶到换行 */
-function tuneDatePPr(pPr) {
+/* 表格在页面上的水平位置（模板里表格是绝对定位的 tblpX / tblW，页边距多为 0）。
+ * 抬头段落（标题、日期）按同一条带状区域对齐：左边界=表格左边，右边界=表格右边。 */
+function tableBand(xml) {
+  const sect = (xml.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/) || [''])[0];
+  const pageW = parseInt((sect.match(/<w:pgSz w:w="(\d+)"/) || [])[1] || '11900', 10);
+  const marR = parseInt((sect.match(/<w:pgMar[^>]*w:right="(\d+)"/) || [])[1] || '0', 10);
+  const marL = parseInt((sect.match(/<w:pgMar[^>]*w:left="(\d+)"/) || [])[1] || '0', 10);
+  const tblPr = (xml.match(/<w:tblPr>[\s\S]*?<\/w:tblPr>/) || [''])[0];
+  const tblX = parseInt((tblPr.match(/w:tblpX="(-?\d+)"/) || [])[1] || '0', 10);
+  const tblW = parseInt((tblPr.match(/<w:tblW w:w="(\d+)"/) || [])[1] || '0', 10);
+  const left = Math.max(0, tblX - marL);                       // 段落左缩进
+  const right = Math.max(0, (pageW - marR) - (tblX + tblW));   // 段落右缩进
+  return { left, right };
+}
+
+/* 抬头段落属性：统一字体 + 按表格左右边界缩进 + 对齐方式 */
+function tuneHeadPPr(pPr, align, band) {
   let p = pPr || '<w:pPr></w:pPr>';
   p = /<w:rPr>[\s\S]*?<\/w:rPr>/.test(p)
     ? p.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, FALLBACK_RPR)
     : p.replace(/<\/w:pPr>$/, FALLBACK_RPR + '</w:pPr>');
-  p = /<w:ind\b[^>]*\/>/.test(p)
-    ? p.replace(/<w:ind\b[^>]*\/>/, '<w:ind w:right="400"/>')
-    : p.replace(/<\/w:pPr>$/, '<w:ind w:right="400"/></w:pPr>');
-  p = /<w:jc\b[^>]*\/>/.test(p) ? p.replace(/<w:jc\b[^>]*\/>/, '<w:jc w:val="right"/>') : p.replace(/<\/w:pPr>$/, '<w:jc w:val="right"/></w:pPr>');
+  const ind = '<w:ind w:left="' + band.left + '" w:right="' + band.right + '"/>';
+  p = /<w:ind\b[^>]*\/>/.test(p) ? p.replace(/<w:ind\b[^>]*\/>/, ind) : p.replace(/<\/w:pPr>$/, ind + '</w:pPr>');
+  const jc = '<w:jc w:val="' + align + '"/>';
+  p = /<w:jc\b[^>]*\/>/.test(p) ? p.replace(/<w:jc\b[^>]*\/>/, jc) : p.replace(/<\/w:pPr>$/, jc + '</w:pPr>');
   return p;
 }
 
-/* 抬头「    年    月    日」→ 按申请日期填 */
-function fillDateLine(xml, rec) {
+/* 抬头处理：标题居中于表格上方、日期右对齐于表格右边界（模板页边距为 0，日期原本会贴到纸边） */
+function fillHeadLines(xml, rec) {
+  const band = tableBand(xml);
   const d = str(rec && rec.applyDate) || str(rec && rec.workDate);
-  if (!/^\d{4}-\d{1,2}-\d{1,2}/.test(d)) return xml;
-  const text = fmtDateCn(d);
+  const dateText = /^\d{4}-\d{1,2}-\d{1,2}/.test(d) ? fmtDateCn(d) : '';
   return xml.replace(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g, p => {
-    if (textOf(p) !== '年月日') return p;
-    const pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
-    return '<w:p>' + tuneDatePPr(pPr) + runXml(text, FALLBACK_RPR) + '</w:p>';
+    const t = textOf(p);
+    if (t === '用工申请审批表') {
+      const pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
+      return '<w:p>' + tuneHeadPPr(pPr, 'center', band) + runXml('用工申请审批表', FALLBACK_RPR) + '</w:p>';
+    }
+    if (t === '年月日') {
+      const pPr = (p.match(/<w:pPr>[\s\S]*?<\/w:pPr>/) || [''])[0];
+      const body = dateText ? runXml(dateText, FALLBACK_RPR) : '';
+      return '<w:p>' + tuneHeadPPr(pPr, 'right', band) + body + '</w:p>';
+    }
+    return p;
   });
 }
 
@@ -174,7 +196,7 @@ function buildBorrowDocx(templateBuf, rec) {
   if (!/<w:tbl>/.test(xml)) throw new Error('模板缺少表格（应为《用工申请审批表》）');
 
   xml = xml.replace(/<w:tr(?:\s[^>]*)?>[\s\S]*?<\/w:tr>/g, row => fillRow(row, plan));
-  xml = fillDateLine(xml, rec || {});
+  xml = fillHeadLines(xml, rec || {});
 
   const filled = Object.keys(plan).filter(k => str(plan[k].text)).length;
   const out = entries.slice();
