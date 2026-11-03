@@ -6,8 +6,10 @@ const BorrowView = {
     const loading = ref(false);
     const tab = ref('detail');
     const filters = reactive({ unit: '', direction: '', signStatus: '', dateRange: null, keyword: '' });
-    const unitOpts = ref([]);       // 往来单位：属地供电所 ∪ 单位维护
-    const extUnitOpts = ref([]);    // 外协单位：单位维护
+    const subOpts = ref([]);        // 属地供电所
+    const unitOpts = ref([]);       // 兄弟单位（单位维护）
+    const extUnitOpts = ref([]);    // 外协单位（单位维护）
+    const allUnitOpts = computed(() => [...new Set([...subOpts.value, ...unitOpts.value])]);
 
     const DIRECTIONS = ['我方借出', '我方借入'];
     const PROJECT_TYPES = ['抢险抢修', '配农网工程', '生产检修改造', '外部工程', '业扩工程', '迁改工程'];
@@ -19,10 +21,17 @@ const BorrowView = {
     const genDlg = reactive({ visible: false, recordId: '' });
     const evInput = ref(null);
 
+    // 当天（优先取服务器北京时间；不可用时回落本地日期）
+    function todayStr() {
+      try { if (typeof ServerTime !== 'undefined' && ServerTime.ymd) return ServerTime.ymd(); } catch (e) {}
+      const d = new Date();
+      const p = n => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    }
     function newForm() {
       return {
         unit: '', direction: '我方借出', externalUnit: '', projectType: '',
-        projectName: '', workContent: '', applyDate: '', workDate: '',
+        projectName: '', workContent: '', applyDate: todayStr(), workDate: todayStr(),
         techCount: 0, workerCount: 0, vehicleCount: 0, signStatus: '未签单', remark: ''
       };
     }
@@ -42,9 +51,9 @@ const BorrowView = {
           api.get('/api/substations').catch(() => []),
           api.get('/api/units').catch(() => [])
         ]);
-        const ext = names(units);
-        extUnitOpts.value = [...new Set(ext)];
-        unitOpts.value = [...new Set([...names(subs), ...ext])];
+        subOpts.value = [...new Set(names(subs))];
+        unitOpts.value = [...new Set(names(units))];
+        extUnitOpts.value = unitOpts.value;
       } catch (e) {}
     }
 
@@ -216,7 +225,7 @@ const BorrowView = {
     onUnmounted(() => revokeThumbs());
 
     return {
-      list, loading, tab, filters, unitOpts, extUnitOpts,
+      list, loading, tab, filters, subOpts, unitOpts, extUnitOpts, allUnitOpts,
       DIRECTIONS, PROJECT_TYPES, SIGN_STATUS, EVIDENCE_MAX,
       filtered, reset, dlg, openAdd, openEdit, submit, remove,
       evDlg, evInput, evRecord, evFiles, openEvidences, onEvidenceFile, previewEvidence, removeEvidence, revokeThumbs,
@@ -238,7 +247,7 @@ const BorrowView = {
 
       <div class="wv-filters">
         <el-select v-model="filters.unit" placeholder="往来单位" clearable filterable style="width:160px">
-          <el-option v-for="u in unitOpts" :key="u" :label="u" :value="u" />
+          <el-option v-for="u in allUnitOpts" :key="u" :label="u" :value="u" />
         </el-select>
         <el-select v-model="filters.direction" placeholder="方向" clearable style="width:130px">
           <el-option v-for="d in DIRECTIONS" :key="d" :label="d" :value="d" />
@@ -305,8 +314,13 @@ const BorrowView = {
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
             <el-form-item label="往来单位" required>
-              <el-select v-model="dlg.form.unit" filterable clearable placeholder="请选择" style="width:100%">
-                <el-option v-for="u in unitOpts" :key="u" :label="u" :value="u" />
+              <el-select v-model="dlg.form.unit" filterable clearable placeholder="从属地供电所或兄弟单位选择" style="width:100%">
+                <el-option-group v-if="subOpts.length" label="属地供电所">
+                  <el-option v-for="u in subOpts" :key="'s-' + u" :label="u" :value="u" />
+                </el-option-group>
+                <el-option-group v-if="unitOpts.length" label="兄弟单位">
+                  <el-option v-for="u in unitOpts" :key="'u-' + u" :label="u" :value="u" />
+                </el-option-group>
               </el-select>
             </el-form-item>
           </el-col>
