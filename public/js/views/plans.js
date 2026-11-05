@@ -223,6 +223,12 @@ const PlansView = {
     // 表格展示：日期 MM-DD HH:mm，空值显示 -
     function fmtDT(v) { if (!v) return '-'; const s = String(v); return s.length > 10 ? s.slice(5, 16) : s.slice(5); }
     function dash(v) { const s = String(v == null ? '' : v).trim(); return s || '-'; }
+    // 电压等级显示规范化：历史数据里的 10kv / 0.4KV 统一成 10kV / 0.4kV（只改显示，不动库里的值）
+    function fmtVoltage(v) {
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return '-';
+      return s.replace(/(\d+(?:\.\d+)?)\s*k\s*v$/i, '$1kV');
+    }
     // 行高亮：已取消整行置灰（与已归档一致）；覆盖今天且未取消/归档的计划（进行中）
     function rowClass({ row }) {
       if (row.status === '已取消') return 'plan-row-canceled';
@@ -288,6 +294,15 @@ const PlansView = {
         await api.put('/api/workPlans/' + row.id, { planNote: value || '' });
         ElementPlus.ElMessage.success('备注已保存'); load();
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
+    }
+    // 操作列「更多」下拉统一分发（与月计划 mp-acts 的交互一致，避免 6 个按钮挤成两行）
+    function planAct(row, cmd) {
+      if (cmd === 'copy') copyPlan(row);
+      else if (cmd === 'exec') execPlan(row);
+      else if (cmd === 'note') notePlan(row);
+      else if (cmd === 'cancel') cancelPlan(row);
+      else if (cmd === 'settle') monthSettle(row);
+      else if (cmd === 'reopen') monthReopen(row);
     }
     // ---------- 施工资料弹窗（勘察记录 / 生成资料 / 图纸 / 压缩包均接真实接口） ----------
     const matDlg = reactive({
@@ -492,10 +507,15 @@ const PlansView = {
       '高空坠落风险', '倒杆伤害风险', '物体打击风险', '超出作业范围误登杆风险',
       '工器具是否合格风险', '触电伤害风险', '施工区域外来人员进入风险'
     ];
-    // 「配电：配电第二种工作票」专用默认值：不停电作业 —— 4.1/4.2 按规则带入（徽标显示「规则自动带入」），
-    // 4.3 只预置这 4 条危险点（同样按标题精确匹配危险点库）
+    // 「第二种工作票」（配电 / 线路）专用默认值：不停电作业 —— 4.1/4.2 按规则带入（徽标显示「规则自动带入」），
+    // 4.3 只预置这 4 条危险点（同样按标题精确匹配危险点库），两种接地线都不需要。
+    // 区别：配电二票仍可选分组，线路二票不分小组（见 svNoGroup）。
     const TICKET_SECOND = '配电：配电第二种工作票';
+    const TICKET_LINE_SECOND = '线路：线路第二种工作票';
     const TICKET_LOW = '配电：低压工作票';
+    const TICKET_LINE_FIRST = '线路：线路第一种工作票';
+    const TICKET_SECOND_LIKE = [TICKET_SECOND, TICKET_LINE_SECOND];
+    function isSecondLikeTicket(t) { return TICKET_SECOND_LIKE.indexOf(String(t == null ? '' : t).trim()) > -1; }
     const SURVEY_P2_OUTAGE = '不停电';
     const SURVEY_P2_RETAINED = '工作范围内所有线路均带电';
     const SURVEY_P2_HAZARDS = ['物体打击风险', '工器具是否合格风险', '施工区域外来人员进入风险', '使用改装挖吊一体机施工'];
@@ -557,7 +577,7 @@ const PlansView = {
     // 4.4 班组应采取的安全措施：取自勘察单模板侧标准内容（整行一条；分组时默认归属「全组」）。
     // 与周计划无关——周计划没有对应字段，不得从任何计划字段取值。
     const SV_TEAM_MEASURES_DEFAULT = '所有下户表计负荷侧空开出线，分别用绝缘胶布将线头包裹严实，并悬挂“禁止合闸，线路有人工作”标识牌一块。';
-    // 配电第二种工作票：4.4 运维人员措施按规则带入「无」；4.4 班组措施留空（不分小组=待填写，
+    // 第二种工作票（配电 / 线路）：4.4 运维人员措施按规则带入「无」；4.4 班组措施留空（不分小组=待填写，
     // 分小组=每条选择一个小组），不套用上面的模板标准文案。
     const SURVEY_P2_OPS_MEASURES = '无';
     function surveySeed(plan) {
@@ -568,16 +588,16 @@ const PlansView = {
       // 编号：编辑器里存的就是拼好的完整编号（部门+编号）；已带部门前缀不重复拼，部门为空则裸号
       if (team && no && no.indexOf(team) !== 0) no = team + no;
       const day = s(p.startDate).slice(0, 10);
-      const isP2 = s(p.ticketType) === TICKET_SECOND;
+      const isP2 = isSecondLikeTicket(p.ticketType);   // 配电二票 + 线路二票，规则一致
       return {
         team: team,
         surveyNo: no,
         // 4.3 环境描述：首个默认文案只在「首次创建」时带入（见 openSurveyEditor），可改可清空
         envDesc: SV_ENV_DESC_DEFAULT,
         workTask: s(p.content),
-        // 4.1：配电第二种工作票按规则带入「不停电」；其余仍抄周计划的停电范围
+        // 4.1：第二种工作票按规则带入「不停电」；其余仍抄周计划的停电范围
         outageScope: isP2 ? SURVEY_P2_OUTAGE : s(p.outageRange),
-        // 4.2：仅配电第二种工作票按规则带入；其余留空（不在停电范围的部位现场勘察时手填）
+        // 4.2：仅第二种工作票按规则带入；其余留空（不在停电范围的部位现场勘察时手填）
         retainedLive: isP2 ? SURVEY_P2_RETAINED : '',
         ticketSecond: isP2,
         ticketType: s(p.ticketType),
@@ -826,7 +846,7 @@ const PlansView = {
     const SV_SEED_FIELDS = ['team', 'surveyNo', 'workTask', 'outageScope', 'retainedLive', 'surveyDate', 'teamMeasures', 'opsMeasures', 'envDesc', 'surveyUnit'];
     // B 类（固定文案 / 规则算出）→「规则自动带入」；其余带入字段是 A 类（抄周计划字段）→「周计划自动带入」
     const SV_RULE_FIELDS = ['envDesc', 'surveyDate', 'teamMeasures', 'surveyUnit'];
-    // 配电第二种工作票额外把 4.1/4.2/4.4 运维措施计为「规则自动带入」；
+    // 第二种工作票（配电 / 线路）额外把 4.1/4.2/4.4 运维措施计为「规则自动带入」；
     // 其 4.4 班组措施留空，不再算规则带入（空值自动落「待填写」）
     const SV_RULE_FIELDS_P2 = SV_RULE_FIELDS.filter(k => k !== 'teamMeasures')
       .concat(['outageScope', 'retainedLive', 'opsMeasures']);
@@ -834,13 +854,15 @@ const PlansView = {
       'surveyUnit', 'team', 'surveyNo', 'dualName', 'workTask', 'outageScope', 'retainedLive',
       'envDesc', 'opsMeasures', 'teamMeasures', 'ground10', 'ground04', 'surveyDate'
     ];
-    // 配电第二种工作票：不停电作业 —— 勘察单不需要接地线位置
+    // 第二种工作票（配电 / 线路）：不停电作业 —— 勘察单不需要接地线位置
     const svTicketType = computed(() => String((surveyDlg.seed && surveyDlg.seed.ticketType) || ''));
-    const svSecondTicket = computed(() => svTicketType.value === TICKET_SECOND);
+    const svSecondTicket = computed(() => isSecondLikeTicket(svTicketType.value));
     const svLowTicket = computed(() => svTicketType.value === TICKET_LOW);
-    // 只有低压票不分小组（隐藏作业分组与所有分组相关 UI）；
-    // 二票可分组：分2/3个小组时，4.4 班组措施逐行可选所属小组（见 sx-lines）
-    const svNoGroup = computed(() => svLowTicket.value);
+    // 低压票、线路第一种 / 线路第二种工作票不分小组（隐藏作业分组与所有分组相关 UI）；
+    // 其余票种（含配电二票）可分组：分2/3个小组时，4.4 班组措施逐行可选所属小组（见 sx-lines）
+    const svNoGroup = computed(() => svLowTicket.value
+      || svTicketType.value === TICKET_LINE_FIRST
+      || svTicketType.value === TICKET_LINE_SECOND);
     // 10kV 接地线：二票（不停电）、低压票都不需要；0.4kV 接地线只在二票隐藏
     const svHideGround10 = computed(() => svSecondTicket.value || svLowTicket.value);
     const svHideGround04 = computed(() => svSecondTicket.value);
@@ -1386,7 +1408,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, rowClass, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1463,37 +1485,51 @@ const PlansView = {
 
       <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
         <el-table-column type="index" label="序号" width="52" align="center" />
-        <el-table-column prop="name" label="作业计划名称" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="team" label="作业班组" min-width="92" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="name" label="作业计划名称" min-width="180" class-name="plan-wrapcell" />
+        <el-table-column prop="team" label="作业班组" min-width="92" :formatter="(r,c,v)=>dash(v)" />
         <el-table-column prop="leader" label="班组长" width="76" :formatter="(r,c,v)=>dash(v)" />
         <el-table-column prop="startDate" label="计划开始" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
         <el-table-column prop="endDate" label="计划结束" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="ticketType" label="工作票类型" min-width="132" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="voltage" label="电压等级" width="78" align="center" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="station" label="变电站/线路" min-width="100" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePerson" label="工作负责人" width="92" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="144" show-overflow-tooltip :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column label="操作" width="184">
+        <el-table-column prop="ticketType" label="工作票类型" min-width="140" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="voltage" label="电压等级" width="78" align="center" :formatter="(r,c,v)=>fmtVoltage(v)" />
+        <el-table-column prop="station" label="变电站/线路" min-width="120" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePerson" label="工作负责人" width="92" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="144" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column label="操作" width="152" class-name="plan-act-col">
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">
-                <el-button link type="warning" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
-                <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
+                <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
+                <el-button link type="primary" size="small" @click="copyPlan(row)">复制</el-button>
                 <el-button link type="primary" size="small" @click="restorePlan(row)">恢复</el-button>
               </template>
+              <template v-else-if="row.planType === '月计划' && row.status === '已执行'">
+                <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
+                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-dropdown trigger="click" class="plan-act-more" @command="c => planAct(row, c)">
+                  <el-button link type="primary" size="small">更多<svg class="plan-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="settle">标记已结算</el-dropdown-item>
+                      <el-dropdown-item command="reopen">退回未执行</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </template>
               <template v-else>
-                <el-button link type="warning" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
-                <el-button link type="warning" size="small" @click="openEdit(row)">编辑</el-button>
-                <template v-if="row.planType === '月计划' && row.status === '已执行'">
-                  <el-button link type="primary" size="small" @click="monthSettle(row)">标记已结算</el-button>
-                  <el-button link type="info" size="small" @click="monthReopen(row)">退回未执行</el-button>
-                </template>
-                <template v-else>
-                  <el-button link type="warning" size="small" @click="copyPlan(row)">复制</el-button>
-                  <el-button link type="warning" size="small" @click="execPlan(row)">执行</el-button>
-                  <el-button link type="warning" size="small" @click="notePlan(row)">备注</el-button>
-                  <el-button link type="danger" size="small" @click="cancelPlan(row)">取消</el-button>
-                </template>
+                <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
+                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-dropdown trigger="click" class="plan-act-more" @command="c => planAct(row, c)">
+                  <el-button link type="primary" size="small">更多<svg class="plan-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="copy">复制</el-dropdown-item>
+                      <el-dropdown-item command="exec">执行</el-dropdown-item>
+                      <el-dropdown-item command="note">备注</el-dropdown-item>
+                      <el-dropdown-item command="cancel" divided class="plan-dd-danger">取消</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </div>
             <el-button v-else-if="canWrite('planQuantities')" link type="primary" size="small" @click="openQuantities(row)">填写施工量</el-button>
@@ -1995,7 +2031,7 @@ const PlansView = {
       <div v-if="surveyDlg.banner.text" class="sv-banner" :class="'sv-banner-' + surveyDlg.banner.type">{{ surveyDlg.banner.text }}</div>
       <div v-if="surveyDlg.form" style="max-height:72vh;overflow:auto;padding-right:6px">
         <el-form label-position="top" size="default">
-          <!-- 作业分组：配电第二种工作票（不停电作业）不分小组，整项隐藏 -->
+          <!-- 作业分组：低压票、线路第一/第二种工作票不分小组，整项隐藏 -->
           <el-form-item v-if="!svNoGroup" label="作业分组">
             <el-select v-model="surveyDlg.form.grouping" style="width:220px" @change="onGroupingChange">
               <el-option v-for="g in SURVEY_GROUPING_OPTS" :key="g" :label="g" :value="g" />
