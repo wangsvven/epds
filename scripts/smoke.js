@@ -1092,6 +1092,14 @@ async function listOk(p, token) {
     need(/teamMeasures:\s*isP2\s*\?\s*''\s*:\s*SV_TEAM_MEASURES_DEFAULT/.test(src), '4.4 班组措施：二票留空、其余取模板标准文案');
     // 二票：4.4 运维措施按规则带入「无」
     need(/opsMeasures:\s*isP2\s*\?\s*SURVEY_P2_OPS_MEASURES/.test(src), '4.4 运维措施：二票规则带入「无」');
+    // 线路第二种工作票：沿用二票全部规则（4.1/4.2/4.3/4.4 + 隐藏两种接地线），但不分小组
+    need(src.indexOf("const TICKET_LINE_SECOND = '线路：线路第二种工作票'") > -1, '应定义线路第二种工作票常量');
+    need(/const isP2 = isSecondLikeTicket\(/.test(src), '二票默认值应覆盖配电二票与线路二票');
+    need(/const svSecondTicket = computed\(\(\) => isSecondLikeTicket\(/.test(src), '接地线隐藏规则应覆盖两种二票');
+    const noGroupExpr = (src.match(/const svNoGroup = computed\([\s\S]*?\);/) || [''])[0];
+    need(/TICKET_LINE_SECOND/.test(noGroupExpr), '线路第二票应不分小组');
+    need(/TICKET_LINE_FIRST/.test(noGroupExpr), '线路第一票仍不分小组');
+    need(noGroupExpr.indexOf('TICKET_SECOND') === -1, '配电二票应保留分组能力（不得加入 svNoGroup）');
     // ④ 接口侧：不带该键新建 → 落库对象里没有这个属性
     const pNo = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟无班组措施计划', planType: '周计划' } }), 'plan POST 无班组措施');
     need(!('teamSafetyMeasures' in pNo), '新建计划落库不应带 teamSafetyMeasures：' + JSON.stringify(pNo.teamSafetyMeasures));
@@ -1100,7 +1108,38 @@ async function listOk(p, token) {
       token, body: { name: '冒烟假值计划', planType: '周计划', teamSafetyMeasures: '假值：不应带入' }
     }), 'plan POST 假值');
     need(pFake.teamSafetyMeasures === '假值：不应带入', '存量历史值应留在库里不动（不删不迁移）');
-    return '表单无该字段、保存体剔除该键、落库无该键、二票 4.4 班组留空/运维「无」、其余沿用标准文案、存量值保留不迁移';
+    return '表单无该字段、保存体剔除该键、落库无该键、二票（配电+线路）4.4 班组留空/运维「无」、线路二票不分小组而配电二票仍可分组、其余沿用标准文案、存量值保留不迁移';
+  });
+  await step('ui', '表格横向滚动：表头与内容共用同一滚动容器（无 JS 异步追赶）', async () => {
+    const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    need(css.indexOf('.el-table > .el-table__inner-wrapper { overflow-x:auto !important; overflow-y:hidden !important; }') > -1,
+      '应由 .el-table__inner-wrapper 统一承担横向滚动');
+    const block = (css.match(/\/\* ===== 表格横向滚动[\s\S]*?\.el-pagination \{ font-weight: 400; \}/) || [''])[0];
+    need(/\.el-scrollbar__wrap \{ overflow:visible !important; \}/.test(block)
+      && /\.el-table__header-wrapper,/.test(block) && /\.el-table__body-wrapper,/.test(block),
+      'header/body/scrollbar wrap 应改为 overflow:visible');
+    need(/display:none !important;/.test(block), '失效的 EP 自定义滚动条应隐藏');
+    need(css.indexOf('.el-table__body-wrapper, .el-table__header-wrapper { overflow:hidden !important; }') === -1,
+      '不得残留移动端「两层 wrapper 各滚各的」旧补丁（会让表头重新慢一拍）');
+    return 'inner-wrapper 统一滚动 + 三层 visible + 自定义滚动条隐藏，表头与内容天然同步';
+  });
+  await step('ui', '移动端：顶栏图标化、筛选栏两列网格、弹窗限高可滚动', async () => {
+    const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const main = fs.readFileSync(path.join(ROOT, 'public/js/main.js'), 'utf8');
+    need(/position:sticky; top:0;/.test(css), '移动端顶栏应固定（键盘弹出 / 页面平移时不被裁走）');
+    need(/\.app-header \.logout-btn \{ width:32px; height:32px;/.test(css)
+      && /\.app-header \.logout-text \{ display:none; \}/.test(css), '移动端「退出登录」应收成图标按钮');
+    need(/<span class="logout-text">退出登录<\/span>/.test(main)
+      && /aria-label="退出登录"/.test(main), '顶栏应保留桌面文字与无障碍标签');
+    need(/\.wv-filters \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\); grid-auto-flow:row dense;/.test(css),
+      '移动端筛选栏应为两列网格 + dense（不再一个控件独占一行）');
+    need(css.indexOf('.wv-filters .el-button { width:100%; }') === -1,
+      '不得残留「筛选控件全部占满整行」的旧规则');
+    need(/\.el-dialog__body \{ flex:1 1 auto; min-height:0; overflow-y:auto;/.test(css),
+      '移动端弹窗 body 应自身滚动（长表单不再撑破视口）');
+    need(/max-height:calc\(100dvh - 6vh\)/.test(css), '移动端弹窗应按 dvh 限高，键盘弹出时自动收缩');
+    need(/\.el-dialog__footer \{ flex:0 0 auto; border-top/.test(css), '弹窗固定底栏应与滚动内容做分隔');
+    return '顶栏图标化 + sticky、筛选栏 2 列 dense、弹窗 dvh 限高 + body 滚动 + 固定底栏';
   });
   await step('plans', '生成资料：无 survey → 400 → 生成勘察记录 docx（空槽保留 XXXX / 接地线并入通用风险 / 多行逐段）→ 再生成 +1 → 下载 PK → 删除后文件同消/404', async () => {
     const me = needOk(await api('GET', '/api/me', { token }), 'me');
@@ -1240,6 +1279,28 @@ async function listOk(p, token) {
     need(one.unit === '冒烟供电所' && one.direction === '我方借出' && one.techCount === 2, 'detail 新字段不匹配');
     return 'id=' + d.id + ' unit=' + one.unit + ' tech=' + one.techCount;
   });
+  await step('ui', '单位余额：默认汇总全部明细、10 列平表、克制视觉', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public/js/views/borrow.js'), 'utf8');
+    const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const bal = src.slice(src.indexOf('<div class="bw-bal">'), src.indexOf('<!-- 新增/编辑弹窗 -->'));
+    need(bal.indexOf('<div class="bw-bal">') === 0, '应存在单位余额容器');
+    need((bal.match(/<el-table-column/g) || []).length === 10, '单位余额应仍是 10 列平表（不引入分组表头）');
+    need(bal.indexOf('el-table-column-group') === -1, '不得引入分组表头');
+    need(!/class="bw-bal-table"[^>]*stripe/.test(bal), '余额表不应有斑马纹');
+    // 口径修正：默认全部明细，只有切到 signed 才按已签单过滤；切到余额页重新拉数据
+    need(/const balanceScope = ref\('all'\)/.test(src), '余额统计口径默认应为「全部明细」');
+    need(/balanceScope\.value !== 'signed' \|\| r\.signStatus === '已签单'/.test(src), '仅 signed 口径才按已签单过滤');
+    need(/function setBalanceScope\(/.test(src) && /setBalanceScope\('all'\)/.test(bal) && /setBalanceScope\('signed'\)/.test(bal), '应提供全部/仅已签单切换');
+    need(/watch\(tab,[\s\S]{0,80}v === 'balance'/.test(src), '切到余额页应重新加载明细，保证同步');
+    need(!/list\.value\.filter\(r => r && \(r\.signStatus === '已签单'\)\)/.test(src), '不得再写死只统计已签单');
+    need(/diffCls\(row\.dTech\)/.test(bal) && /diffCls\(row\.dWorker\)/.test(bal) && /diffCls\(row\.dVehicle\)/.test(bal), '三列差额都应带语义色');
+    need(/function diffText\(v\)\s*\{[^}]*'\+' \+ n/.test(src), '差额正数应显示 + 号');
+    need(/bw-bal-empty/.test(bal) && /\.bw-diff\.is-neg/.test(css) && /\.bw-diff\.is-zero/.test(css), '空态与差额正/负/零样式应存在');
+    need(/bw-h-start/.test(bal) && /bw-g-start/.test(bal), '借入/差额组首应有分隔线');
+    need(!/\.bw-diff \{[^}]*border-radius:999px/.test(css), '差额不得回到彩色胶囊标签');
+    need(!/th\.bw-h-diff \{ background/.test(css), '表头不得回到三色底块');
+    return '默认全量汇总 + 口径切换 + 切页刷新 + 10 列平表 + 纯数字语义色 + 无胶囊/三色表头';
+  });
   await step('plans', '借工 校验：非法计数/枚举 → 400', async () => {
     const r1 = await api('POST', '/api/borrowWorks', { token, body: { unit: 'X', direction: '我方借出', techCount: -1 } });
     const r2 = await api('POST', '/api/borrowWorks', { token, body: { unit: 'X', direction: '乱写' } });
@@ -1321,17 +1382,30 @@ async function listOk(p, token) {
   });
   await step('workticket', '安全措施 列表 GET', async () => listOk('/api/workticket/measures/safety', token).then(d => d.length + ' 条'));
   await step('workticket', '医院联系方式 列表 GET', async () => listOk('/api/workticket/hospitals', token).then(d => d.length + ' 条'));
-  await step('workticket', '默认模板 元信息 GET（内置 49/19）', async () => {
+  await step('workticket', '默认模板 元信息 GET（内置 规则15/技术49/安全19）', async () => {
     const d = needOk(await api('GET', '/api/workticket/measures/default', { token }), 'default meta');
     need(d.tech === 49 && d.safety === 19, '内置默认应为 技术49/安全19，实际 ' + d.tech + '/' + d.safety);
+    need(d.rules === 15, '内置默认应含 15 条作业内容匹配规则，实际 ' + d.rules);
     need(d.builtin === true, '空实例应为 builtin=true，实际 ' + d.builtin);
-    return 'tech=' + d.tech + ' safety=' + d.safety + ' builtin=' + d.builtin;
+    return 'rules=' + d.rules + ' tech=' + d.tech + ' safety=' + d.safety + ' builtin=' + d.builtin;
   });
-  await step('workticket', '载入默认 POST → 技术/安全各 +49/+19', async () => {
+  await step('workticket', '载入默认 POST → 规则+15 / 技术+49 / 安全+19，且规则按标题反查措施 id', async () => {
     const d = needOk(await api('POST', '/api/workticket/measures/default/load', { token }), 'default load');
     need(d.result && d.result.tech && d.result.tech.added === 49, '技术应新增 49，实际 ' + brief(d.result));
     need(d.result.safety && d.result.safety.added === 19, '安全应新增 19，实际 ' + brief(d.result));
-    return 'tech+' + d.result.tech.added + ' safety+' + d.result.safety.added;
+    need(d.result.rules && d.result.rules.added === 15, '匹配规则应新增 15，实际 ' + brief(d.result));
+    const rl = needOk(await api('GET', '/api/workticket/rules', { token }), 'rules list after load');
+    // 前面已新增 1 条「冒烟作业」规则，载入默认后应为 15 + 1
+    need(rl.length === 16, '载入默认后规则应为 16 条，实际 ' + rl.length);
+    const builtin = rl.filter(r => r.workType !== '冒烟作业');
+    need(builtin.length === 15, '内置规则应为 15 条，实际 ' + builtin.length);
+    const bad = builtin.filter(r => {
+      const cnt = v => String(v || '').split(/[;；]+/).map(x => x.trim()).filter(Boolean).length;
+      const ids = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean).length;
+      return cnt(r.techName) !== ids(r.techId) || cnt(r.safetyName) !== ids(r.safetyId);
+    });
+    need(!bad.length, '规则的措施标题应全部反查到本实例 id：' + brief(bad.map(r => r.workType)));
+    return 'rules+' + d.result.rules.added + ' tech+' + d.result.tech.added + ' safety+' + d.result.safety.added + ' 关联全命中';
   });
 
   /* ---------- actualWorks ---------- */
