@@ -90,10 +90,11 @@ app.get('/api/workticket/library', (req, res) => {
   });
 });
 
-// ---------- 默认模板（施工技术 / 安全措施原文 快照）----------
-/* 内置标准资料：assets/ct-standard.json 随代码分发（技术 49 条 / 安全 19 条通用措施原文）。
- * 全新实例（含 Docker 空卷首次启动）库里没有任何措施数据，此时「默认模板」直接回落为内置内容，
- * 保证「载入默认」开箱可用；用户一旦用「保存为默认」自行冻结过快照（savedAt 有值），则以用户快照为准。 */
+// ---------- 默认模板（作业内容匹配规则 / 施工技术 / 安全措施原文 快照）----------
+/* 内置标准资料：assets/ct-standard.json 随代码分发（技术 49 条 / 安全 19 条措施原文 + 15 条作业内容匹配规则）。
+ * 全新实例（含 Docker 空卷首次启动）库里没有任何资料数据，此时「默认模板」直接回落为内置内容，
+ * 保证「载入默认」开箱可用；用户一旦用「保存为默认」自行冻结过快照（savedAt 有值），则以用户快照为准。
+ * 规则单独兜底：旧实例的默认模板只有技术/安全快照、没有 rules，此时也从内置补齐 15 条。 */
 const CT_STANDARD_FILE = path.join(ROOT, 'assets', 'ct-standard.json');
 let CT_STANDARD_CACHE;
 function builtinStandard() {
@@ -102,11 +103,22 @@ function builtinStandard() {
   try {
     if (!fs.existsSync(CT_STANDARD_FILE)) return null;
     const d = JSON.parse(fs.readFileSync(CT_STANDARD_FILE, 'utf8'));
+    const s = v => String(v == null ? '' : v).trim();
     const norm = arr => (Array.isArray(arr) ? arr : [])
-      .map(x => ({ sort: Number(x.sort) || 0, title: String(x.title || '').trim(), content: String(x.content || '').trim() }))
+      .map(x => ({ sort: Number(x.sort) || 0, title: s(x.title), content: s(x.content) }))
       .filter(x => x.title && x.content);
-    const tech = norm(d.techMeasures), safety = norm(d.safetyMeasures);
-    if (tech.length || safety.length) CT_STANDARD_CACHE = { tech, safety };
+    // 匹配规则只保留可跨实例复用的字段：措施原文的随机 id 不落内置文件，载入时按条文标题反查
+    const normRules = arr => (Array.isArray(arr) ? arr : [])
+      .map(x => ({
+        sort: Number(x.sort) || 0,
+        workType: s(x.workType), category: s(x.category),
+        keywords: Array.isArray(x.keywords) ? x.keywords.map(s).filter(Boolean) : [],
+        keywordsRaw: s(x.keywordsRaw),
+        techName: s(x.techName), safetyName: s(x.safetyName)
+      }))
+      .filter(x => x.workType && (x.category || x.keywords.length || x.keywordsRaw));
+    const tech = norm(d.techMeasures), safety = norm(d.safetyMeasures), rules = normRules(d.rules);
+    if (tech.length || safety.length || rules.length) CT_STANDARD_CACHE = { tech, safety, rules };
   } catch (e) { console.error('  ⚠ 内置标准资料读取失败：', e.message); }
   return CT_STANDARD_CACHE;
 }
@@ -114,25 +126,40 @@ function wtDefaultShape() {
   if (!DB.wtDefaultMeasures || typeof DB.wtDefaultMeasures !== 'object') DB.wtDefaultMeasures = {};
   if (!Array.isArray(DB.wtDefaultMeasures.tech)) DB.wtDefaultMeasures.tech = [];
   if (!Array.isArray(DB.wtDefaultMeasures.safety)) DB.wtDefaultMeasures.safety = [];
+  if (!Array.isArray(DB.wtDefaultMeasures.rules)) DB.wtDefaultMeasures.rules = [];
   if (DB.wtDefaultMeasures.savedAt === undefined) DB.wtDefaultMeasures.savedAt = '';
   if (DB.wtDefaultMeasures.cleared === undefined) DB.wtDefaultMeasures.cleared = false;
+  const b = builtinStandard();
   // 未自行冻结过快照、且快照为空 → 回落内置标准资料（全新实例也能「载入默认」）
-  if (!DB.wtDefaultMeasures.tech.length && !DB.wtDefaultMeasures.safety.length && !DB.wtDefaultMeasures.savedAt) {
-    const b = builtinStandard();
-    if (b) { DB.wtDefaultMeasures.tech = b.tech.slice(); DB.wtDefaultMeasures.safety = b.safety.slice(); }
+  if (!DB.wtDefaultMeasures.tech.length && !DB.wtDefaultMeasures.safety.length && !DB.wtDefaultMeasures.savedAt && b) {
+    DB.wtDefaultMeasures.tech = b.tech.slice(); DB.wtDefaultMeasures.safety = b.safety.slice();
+  }
+  // 规则默认独立兜底：旧快照没有 rules（或规则快照为空）时，用内置 15 条补齐
+  if (!DB.wtDefaultMeasures.rules.length && b && b.rules && b.rules.length) {
+    DB.wtDefaultMeasures.rules = b.rules.slice();
   }
   return DB.wtDefaultMeasures;
 }
 const wtNormTitle = s => String(s || '').replace(/\s+/g, ' ').trim();
-// 把当前「施工技术/安全措施原文」冻结为默认模板（按当前顺序与序号）
+// 把当前「作业内容匹配规则 / 施工技术 / 安全措施原文」一起冻结为默认模板（按当前顺序与序号）
+// 规则不保存措施 id：跨实例/清空重建后 id 会变，载入默认时按条文标题重新反查
 function wtSnapshotDefault() {
   const d = wtDefaultShape();
+  const s = v => String(v == null ? '' : v).trim();
   const pick = key => wtAlive(key).slice()
     .sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0))
-    .map(r => ({ sort: Number(r.sort) || 0, title: String(r.title || '').trim(), content: String(r.content || '').trim() }))
+    .map(r => ({ sort: Number(r.sort) || 0, title: s(r.title), content: s(r.content) }))
     .filter(x => x.title && x.content);
+  const pickRules = () => wtAlive('wtRules').slice()
+    .sort((a, b) => (Number(a.sort) || 0) - (Number(b.sort) || 0))
+    .map(r => ({
+      sort: Number(r.sort) || 0, workType: s(r.workType), category: s(r.category),
+      keywords: Array.isArray(r.keywords) ? r.keywords.map(s).filter(Boolean) : [],
+      keywordsRaw: s(r.keywordsRaw), techName: s(r.techName), safetyName: s(r.safetyName)
+    })).filter(x => x.workType);
   d.tech = pick('wtTechMeasures');
   d.safety = pick('wtSafetyMeasures');
+  d.rules = pickRules();
   d.savedAt = nowISO();
   d.cleared = false;
   saveDB();
@@ -151,7 +178,7 @@ function wtSnapshotDefault() {
 app.get('/api/workticket/measures/default', (req, res) => {
   const d = wtDefaultShape();
   // builtin=true 表示用的是随代码分发的内置标准资料（尚未被用户「保存为默认」覆盖）
-  res.json({ tech: d.tech.length, safety: d.safety.length, savedAt: d.savedAt || '', builtin: !d.savedAt });
+  res.json({ tech: d.tech.length, safety: d.safety.length, rules: d.rules.length, savedAt: d.savedAt || '', builtin: !d.savedAt });
 });
 
 // 清除全部措施原文：清空「施工技术措施原文」与「施工安全措施原文」两个列表；
@@ -171,11 +198,13 @@ app.post('/api/workticket/measures/clear-all', (req, res) => {
 app.post('/api/workticket/measures/default/save', (req, res) => {
   try {
     const d = wtSnapshotDefault();
-    res.json({ ok: true, tech: d.tech.length, safety: d.safety.length, savedAt: d.savedAt });
+    res.json({ ok: true, tech: d.tech.length, safety: d.safety.length, rules: d.rules.length, savedAt: d.savedAt });
   } catch (e) { res.status(500).json({ error: '保存默认模板失败：' + e.message }); }
 });
 
-// 载入默认：把默认配置补回当前列表——完全相同的条目跳过（按「标题+内容」去重，避免同名不同内容被吞），删除过的补回
+// 载入默认：一次性把「作业内容匹配规则 + 施工技术措施原文 + 施工安全措施原文」补回当前列表。
+// 措施按「标题+内容」、规则按「作业类型+匹配词」多重集去重：完全相同的跳过，删除过的补回。
+// 顺序上必须先补措施原文，规则里的 techName/safetyName 才能反查到本实例的措施 id。
 app.post('/api/workticket/measures/default/load', (req, res) => {
   try {
     const d = wtDefaultShape();
@@ -204,8 +233,70 @@ app.post('/api/workticket/measures/default/load', (req, res) => {
     };
     merge('tech', 'wtTechMeasures', d.tech);
     merge('safety', 'wtSafetyMeasures', d.safety);
+    // ---- 作业内容匹配规则：措施先补回，再按条文标题反查本实例 id ----
+    const titleIndex = coll => {
+      const map = new Map();
+      wtAlive(coll).forEach(r => { const k = norm(r.title); if (k && !map.has(k)) map.set(k, r.id); });
+      return map;
+    };
+    const techIdx = titleIndex('wtTechMeasures'), safetyIdx = titleIndex('wtSafetyMeasures');
+    // techName / safetyName 用「；」分隔多条；逐条取标题对应的 id，保持与名称顺序一致
+    const resolveIds = (names, idx) => String(names || '').split(/[;；]+/)
+      .map(x => norm(x)).filter(Boolean)
+      .map(t => idx.get(t) || '').filter(Boolean).join(',');
+    const ruleKey = (workType, keywords) => norm(workType) + '\u0001' + norm((keywords || []).join('|'));
+    const aliveRules = wtAlive('wtRules');
+    const remainingRules = new Map();
+    aliveRules.forEach(r => { const k = ruleKey(r.workType, r.keywords); remainingRules.set(k, (remainingRules.get(k) || 0) + 1); });
+    let maxRuleSort = aliveRules.reduce((m, r) => Math.max(m, Number(r.sort) || 0), 0);
+    let rAdded = 0, rSkipped = 0;
+    (d.rules || []).forEach(item => {
+      const workType = String(item.workType || '').trim();
+      if (!workType) { rSkipped++; return; }
+      const category = String(item.category || '').trim();
+      const kws = Array.isArray(item.keywords) ? item.keywords.map(x => String(x || '').trim()).filter(Boolean) : [];
+      const keywordsRaw = String(item.keywordsRaw || '').trim();
+      const keywords = category ? [category]
+        : (kws.length ? kws : keywordsRaw.split(/[,，、;；\n\r]+/).map(x => x.trim()).filter(Boolean));
+      if (!keywords.length) { rSkipped++; return; }
+      const key = ruleKey(workType, keywords);
+      const n = remainingRules.get(key) || 0;
+      if (n > 0) { remainingRules.set(key, n - 1); rSkipped++; return; }
+      const techName = String(item.techName || '').trim();
+      const safetyName = String(item.safetyName || '').trim();
+      const sort = Number(item.sort) > 0 ? Number(item.sort) : ++maxRuleSort;
+      DB.wtRules.push({
+        id: genId('wr'), deleted: false, sort, createdAt: nowISO(), updatedAt: nowISO(),
+        workType, category, keywords, keywordsRaw: category ? '' : keywordsRaw,
+        techId: resolveIds(techName, techIdx), techName,
+        safetyId: resolveIds(safetyName, safetyIdx), safetyName
+      });
+      rAdded++;
+    });
+    // 「清除」清空措施原文后，旧规则里保存的措施 id 会悬空；补回措施的 id 是新建的。
+    // 这里按条文标题把悬空关联自愈，保证一键载入后整套资料库（含规则→措施）立即可用。
+    const techIdSet = new Set(techIdx.values()), safetyIdSet = new Set(safetyIdx.values());
+    let repaired = 0;
+    (DB.wtRules || []).forEach(r => {
+      if (r.deleted) return;
+      const tIds = String(r.techId || '').split(',').map(x => x.trim()).filter(Boolean);
+      const sIds = String(r.safetyId || '').split(',').map(x => x.trim()).filter(Boolean);
+      const tBad = tIds.some(id => !techIdSet.has(id));
+      const sBad = sIds.some(id => !safetyIdSet.has(id));
+      if (!tBad && !sBad) return;
+      if (tBad) r.techId = resolveIds(r.techName, techIdx);
+      if (sBad) r.safetyId = resolveIds(r.safetyName, safetyIdx);
+      r.updatedAt = nowISO();
+      repaired++;
+    });
+    result.rules = { added: rAdded, skipped: rSkipped, repaired };
     saveDB();
-    res.json({ ok: true, result, tech: wtAlive('wtTechMeasures').length, safety: wtAlive('wtSafetyMeasures').length });
+    res.json({
+      ok: true, result,
+      rules: wtAlive('wtRules').length,
+      tech: wtAlive('wtTechMeasures').length,
+      safety: wtAlive('wtSafetyMeasures').length
+    });
   } catch (e) { res.status(500).json({ error: '载入默认失败：' + e.message }); }
 });
 

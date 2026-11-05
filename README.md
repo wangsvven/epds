@@ -141,7 +141,7 @@ epds/
 │       ├── element-plus.css
 │       └── xlsx.full.min.js   # 离线导出 Excel
 ├── assets/                 # 静态模板与内置标准资料
-│   ├── ct-standard.json    # 内置默认模板：施工技术 49 条 / 安全 19 条措施原文（「载入默认」与「一键载入 CT 标准」的数据源）
+│   ├── ct-standard.json    # 内置默认模板：施工技术 49 条 / 安全 19 条措施原文 + 作业内容匹配规则 15 条（「载入默认」一键载入三者的数据源）
 │   ├── materials_import_template.xlsx
 │   ├── worker_import_template.xlsx
 │   ├── 危险点.xlsx

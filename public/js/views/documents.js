@@ -130,18 +130,19 @@ const DocumentsView = {
     const rulePreview = reactive({ visible: false, busy: false, rows: [], errors: [] });
     /* 施工技术 / 安全措施原文（同结构，kind = tech | safety） */
     const measures = reactive({ tech: [], safety: [] });
-    /* 默认模板（载入默认 / 清除） */
-    const defaultMea = reactive({ tech: 0, safety: 0, savedAt: '', builtin: false, busy: false });
+    /* 默认模板（载入默认 / 清除）：规则 + 技术措施原文 + 安全措施原文 一并作为默认数据 */
+    const defaultMea = reactive({ rules: 0, tech: 0, safety: 0, savedAt: '', builtin: false, busy: false });
     async function loadDefaultMeta() {
       try {
         const d = await api.get('/api/workticket/measures/default');
+        defaultMea.rules = d.rules || 0;
         defaultMea.tech = d.tech || 0; defaultMea.safety = d.safety || 0;
         defaultMea.savedAt = d.savedAt || ''; defaultMea.builtin = !!d.builtin;
       } catch (e) { /* 忽略 */ }
     }
     const defaultMeaTip = computed(() => {
-      if (!defaultMea.tech && !defaultMea.safety) return '暂无默认模板';
-      return `默认模板：技术 ${defaultMea.tech} 条 · 安全 ${defaultMea.safety} 条（${defaultMea.builtin ? '内置标准资料' : '已保存快照'}）`;
+      if (!defaultMea.rules && !defaultMea.tech && !defaultMea.safety) return '暂无默认模板';
+      return `默认模板：规则 ${defaultMea.rules} 条 · 技术 ${defaultMea.tech} 条 · 安全 ${defaultMea.safety} 条（${defaultMea.builtin ? '内置标准资料' : '已保存快照'}）`;
     });
     // 清除：清空「施工技术措施原文」「施工安全措施原文」两个列表（默认配置保留，可用「载入默认」恢复）
     const cntOfGroup = key => { const g = (lib.groups || []).find(x => x.key === key); return g ? (g.count || 0) : 0; };
@@ -182,18 +183,21 @@ const DocumentsView = {
       });
     });
     async function loadDefaultMeasures() {
-      if (!defaultMea.tech && !defaultMea.safety) await loadDefaultMeta();
-      if (!defaultMea.tech && !defaultMea.safety) { ElementPlus.ElMessage.warning('默认模板为空：既无内置标准资料，也未保存过默认配置'); return; }
+      if (!defaultMea.rules && !defaultMea.tech && !defaultMea.safety) await loadDefaultMeta();
+      if (!defaultMea.rules && !defaultMea.tech && !defaultMea.safety) { ElementPlus.ElMessage.warning('默认模板为空：既无内置标准资料，也未保存过默认配置'); return; }
       defaultMea.busy = true;
       try {
         const d = await api.post('/api/workticket/measures/default/load');
         const r = d.result || {};
         const t = r.tech || { added: 0, skipped: 0 }, s = r.safety || { added: 0, skipped: 0 };
-        const added = (t.added || 0) + (s.added || 0);
+        const ru = r.rules || { added: 0, skipped: 0, repaired: 0 };
+        const added = (t.added || 0) + (s.added || 0) + (ru.added || 0);
+        const fixed = ru.repaired || 0;
+        const fixTxt = fixed ? `，关联修复 ${fixed} 条` : '';
         ElementPlus.ElMessage.success(added
-          ? `已载入默认：技术新增 ${t.added} / 跳过 ${t.skipped}，安全新增 ${s.added} / 跳过 ${s.skipped}`
-          : '默认内容已全部存在，无需载入');
-        await loadMeasures('tech'); await loadMeasures('safety'); await loadLib(); await loadWt(); await loadDefaultMeta();
+          ? `已载入默认：规则新增 ${ru.added} / 跳过 ${ru.skipped}${fixTxt}，技术新增 ${t.added} / 跳过 ${t.skipped}，安全新增 ${s.added} / 跳过 ${s.skipped}`
+          : (fixed ? `默认内容已全部存在，规则关联已修复 ${fixed} 条` : '默认内容已全部存在，无需载入'));
+        await loadMeasures('tech'); await loadMeasures('safety'); await loadRules(); await loadLib(); await loadWt(); await loadDefaultMeta();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
       finally { defaultMea.busy = false; }
     }

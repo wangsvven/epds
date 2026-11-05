@@ -1,7 +1,7 @@
 {
-  "name": "配网工程施工技术/安全措施原文（内置默认模板）",
-  "version": 1,
-  "updatedAt": "2026-10-24",
+  "name": "配网工程施工技术/安全措施原文 + 作业内容匹配规则（内置默认模板）",
+  "version": 2,
+  "updatedAt": "2026-11-04",
   "techMeasures": [
     {
       "sort": 1,
@@ -344,6 +344,173 @@
       "sort": 19,
       "title": "用电采集、智能表及表箱类施工",
       "content": "（1）工作时，应有防止电流互感器二次侧开路、电压互感器二次侧短路和防止相间短路、相对地短路、电弧灼伤的措施。\n（2）电源侧不停电更换电能表时，直接接入的电能表应将出线负荷断开；经电流互感器接入的电能表应将电流互感器二次侧短路后进行。\n（3）现场校验电流互感器、电压互感器应停电进行，试验时应有防止反送电、防止人员触电的措施。\n（4）费控装置安装、维护和检修工作一般应停电"
+    }
+  ],
+  "rules": [
+    {
+      "sort": 1,
+      "workType": "开挖坑洞",
+      "category": "开挖坑洞",
+      "keywords": [
+        "开挖坑洞"
+      ],
+      "keywordsRaw": "",
+      "techName": "混凝土杆基坑",
+      "safetyName": "电杆及拉线基坑开挖"
+    },
+    {
+      "sort": 2,
+      "workType": "组立电杆",
+      "category": "组立电杆",
+      "keywords": [
+        "组立电杆"
+      ],
+      "keywordsRaw": "",
+      "techName": "施工前现场检查；电杆组立质量检查",
+      "safetyName": "电杆组立"
+    },
+    {
+      "sort": 3,
+      "workType": "制作拉线",
+      "category": "制作拉线",
+      "keywords": [
+        "制作拉线"
+      ],
+      "keywordsRaw": "",
+      "techName": "拉线制作；拉线安装",
+      "safetyName": ""
+    },
+    {
+      "sort": 4,
+      "workType": "高压/低压导线",
+      "category": "高压/低压导线",
+      "keywords": [
+        "高压/低压导线"
+      ],
+      "keywordsRaw": "",
+      "techName": "放线、紧线",
+      "safetyName": "放紧线及附件安装"
+    },
+    {
+      "sort": 5,
+      "workType": "组装金具",
+      "category": "组装金具",
+      "keywords": [
+        "组装金具"
+      ],
+      "keywordsRaw": "",
+      "techName": "横担安装",
+      "safetyName": ""
+    },
+    {
+      "sort": 6,
+      "workType": "拆除、撤除",
+      "category": "拆除、撤除",
+      "keywords": [
+        "拆除、撤除"
+      ],
+      "keywordsRaw": "",
+      "techName": "",
+      "safetyName": "拆旧工作"
+    },
+    {
+      "sort": 7,
+      "workType": "箱变",
+      "category": "箱变",
+      "keywords": [
+        "箱变"
+      ],
+      "keywordsRaw": "",
+      "techName": "环网柜、分支箱、箱变基础制作；环网柜、分支箱、箱变安装",
+      "safetyName": ""
+    },
+    {
+      "sort": 8,
+      "workType": "环网柜",
+      "category": "环网柜",
+      "keywords": [
+        "环网柜"
+      ],
+      "keywordsRaw": "",
+      "techName": "环网柜、分支箱、箱变基础制作；环网柜、分支箱、箱变安装",
+      "safetyName": "环网柜安装"
+    },
+    {
+      "sort": 9,
+      "workType": "开挖电缆沟",
+      "category": "开挖电缆沟",
+      "keywords": [
+        "开挖电缆沟"
+      ],
+      "keywordsRaw": "",
+      "techName": "电缆沟、电缆检查井；电缆排管",
+      "safetyName": ""
+    },
+    {
+      "sort": 10,
+      "workType": "电缆/敷设电缆",
+      "category": "电缆 / 敷设电缆",
+      "keywords": [
+        "电缆 / 敷设电缆"
+      ],
+      "keywordsRaw": "",
+      "techName": "电缆敷设施工准备；电缆敷设施工过程；电缆附件施工准备；电缆附件施工过程",
+      "safetyName": "电缆敷设；电缆附件制作安装；电缆接入；电缆试验"
+    },
+    {
+      "sort": 12,
+      "workType": "电缆试验",
+      "category": "电缆试验",
+      "keywords": [
+        "电缆试验"
+      ],
+      "keywordsRaw": "",
+      "techName": "电缆试验",
+      "safetyName": ""
+    },
+    {
+      "sort": 14,
+      "workType": "真空开关",
+      "category": "真空开关",
+      "keywords": [
+        "真空开关"
+      ],
+      "keywordsRaw": "",
+      "techName": "柱上开关；柱上隔离开关；设备接地安装；接地标识",
+      "safetyName": "杆架设备安装"
+    },
+    {
+      "sort": 16,
+      "workType": "刀闸",
+      "category": "刀闸",
+      "keywords": [
+        "刀闸"
+      ],
+      "keywordsRaw": "",
+      "techName": "柱上隔离开关",
+      "safetyName": "杆架设备安装"
+    },
+    {
+      "sort": 17,
+      "workType": "避雷器",
+      "category": "避雷器",
+      "keywords": [
+        "避雷器"
+      ],
+      "keywordsRaw": "",
+      "techName": "避雷器",
+      "safetyName": ""
+    },
+    {
+      "sort": 18,
+      "workType": "变压器",
+      "category": "变压器",
+      "keywords": [
+        "变压器"
+      ],
+      "keywordsRaw": "",
+      "techName": "跌落式熔断器；设备接地安装；接地标识；杆架式配电变压器",
+      "safetyName": "杆架变台安装"
     }
   ]
 }
