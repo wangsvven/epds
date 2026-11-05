@@ -184,10 +184,20 @@ const BorrowView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
-    /* ---------------- 单位余额（仅已签单、未删除；差额 = 借出 − 借入） ---------------- */
+    /* ---------------- 单位余额（按往来单位汇总，差额 = 借出 − 借入） ----------------
+     * 默认汇总「全部借工明细」，与明细页看到的数据一致；「仅已签单」作为可选口径。
+     * 旧版写死只统计已签单，导致明细有数据、余额却空白 —— 这里修正。 */
+    const balanceScope = ref('all');                 // 'all' | 'signed'
+    const balanceSource = computed(() => list.value.filter(r => r
+      && (balanceScope.value !== 'signed' || r.signStatus === '已签单')));
+    const balanceStat = computed(() => {
+      const all = list.value.filter(Boolean);
+      return { total: all.length, counted: balanceSource.value.length, unsigned: all.filter(r => r.signStatus !== '已签单').length };
+    });
+    function setBalanceScope(s) { balanceScope.value = s === 'signed' ? 'signed' : 'all'; }
     const balanceRows = computed(() => {
       const map = new Map();
-      list.value.filter(r => r && (r.signStatus === '已签单')).forEach(r => {
+      balanceSource.value.forEach(r => {
         const u = String(r.unit || '').trim() || '（未填单位）';
         let g = map.get(u);
         if (!g) { g = { unit: u, outTech: 0, outWorker: 0, outVehicle: 0, inTech: 0, inWorker: 0, inVehicle: 0 }; map.set(u, g); }
@@ -199,9 +209,14 @@ const BorrowView = {
         .map(g => Object.assign({}, g, { dTech: g.outTech - g.inTech, dWorker: g.outWorker - g.inWorker, dVehicle: g.outVehicle - g.inVehicle }))
         .sort((a, b) => String(a.unit).localeCompare(String(b.unit)));
     });
+    // 差额显示：正数=对方应还我方、负数=我方应还对方、0=已结平；只改显示，不动 balanceRows 数值
+    function diffText(v) { const n = Number(v) || 0; return n > 0 ? '+' + n : (n < 0 ? '−' + Math.abs(n) : '0'); }
+    function diffCls(v) { const n = Number(v) || 0; return 'bw-diff ' + (n > 0 ? 'is-pos' : (n < 0 ? 'is-neg' : 'is-zero')); }
 
     function fmtTime(v) { return String(v || '').slice(0, 16).replace('T', ' '); }
 
+    // 切到余额页时重新拉取一次，保证与明细页数据同步（明细新增/编辑后 list 本身也会刷新）
+    watch(tab, v => { if (v === 'balance') load(); });
     onMounted(() => { load(); loadOpts(); });
     onUnmounted(() => revokeThumbs());
 
@@ -211,7 +226,7 @@ const BorrowView = {
       filtered, reset, dlg, openAdd, openEdit, submit, remove,
       evDlg, evInput, evRecord, evFiles, openEvidences, onEvidenceFile, previewEvidence, removeEvidence, revokeThumbs,
       hasGen, generate,
-      balanceRows, fmtTime
+      balanceRows, balanceScope, balanceStat, setBalanceScope, diffText, diffCls, fmtTime
     };
   },
   template: `
@@ -239,7 +254,7 @@ const BorrowView = {
         <el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="用工起" end-placeholder="用工止" style="width:250px" />
         <el-input v-model="filters.keyword" placeholder="项目名称 / 工作内容" clearable style="width:200px" />
         <el-button @click="reset">重置</el-button>
-        <span style="margin-left:auto;font-size:13px;color:var(--text-3)">共 {{ filtered.length }} 条</span>
+        <span class="bw-filter-count" style="margin-left:auto;font-size:13px;color:var(--text-3)">共 {{ filtered.length }} 条</span>
       </div>
 
       <el-table :data="filtered" v-loading="loading" border stripe style="width:100%" empty-text="暂无数据">
@@ -272,18 +287,48 @@ const BorrowView = {
     </template>
 
     <template v-else>
-      <el-table :data="balanceRows" border stripe style="width:100%" empty-text="暂无已签单记录">
-        <el-table-column prop="unit" label="单位" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="outTech" label="借出技工" width="100" align="center" />
-        <el-table-column prop="outWorker" label="借出民工" width="100" align="center" />
-        <el-table-column prop="outVehicle" label="借出车辆" width="100" align="center" />
-        <el-table-column prop="inTech" label="借入技工" width="100" align="center" />
-        <el-table-column prop="inWorker" label="借入民工" width="100" align="center" />
-        <el-table-column prop="inVehicle" label="借入车辆" width="100" align="center" />
-        <el-table-column prop="dTech" label="差额技工" width="100" align="center" />
-        <el-table-column prop="dWorker" label="差额民工" width="100" align="center" />
-        <el-table-column prop="dVehicle" label="差额车辆" width="100" align="center" />
-      </el-table>
+      <div class="bw-bal">
+        <div class="bw-bal-head">
+          <div class="bw-bal-intro">
+            <svg class="bw-bal-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8" /><path d="M10 9.2v5" /><path d="M10 6.2v.4" /></svg>
+            <div class="bw-bal-intro-txt">
+              <div class="bw-bal-intro-t">按往来单位汇总借工明细</div>
+              <div class="bw-bal-intro-d"><span class="bw-bal-formula">差额 = 我方借出 − 我方借入</span> · 正数表示对方应还我方，负数表示我方应还对方 · 已汇总 {{ balanceStat.counted }} 条明细 · 共 {{ balanceRows.length }} 个单位</div>
+            </div>
+          </div>
+          <div class="bw-bal-scope">
+            <button type="button" :class="['bw-scope-btn', balanceScope === 'all' ? 'is-on' : '']" @click="setBalanceScope('all')">全部明细</button>
+            <button type="button" :class="['bw-scope-btn', balanceScope === 'signed' ? 'is-on' : '']" @click="setBalanceScope('signed')">仅已签单</button>
+          </div>
+        </div>
+        <div class="bw-bal-card">
+          <el-table :data="balanceRows" class="bw-bal-table" style="width:100%">
+            <el-table-column prop="unit" label="往来单位" min-width="180" show-overflow-tooltip class-name="bw-bal-unit" label-class-name="bw-bal-unit-h" />
+            <el-table-column prop="outTech" label="借出技工" width="88" align="center" class-name="bw-g-out" label-class-name="bw-h-out" />
+            <el-table-column prop="outWorker" label="借出民工" width="88" align="center" class-name="bw-g-out" label-class-name="bw-h-out" />
+            <el-table-column prop="outVehicle" label="借出车辆" width="88" align="center" class-name="bw-g-out" label-class-name="bw-h-out" />
+            <el-table-column prop="inTech" label="借入技工" width="88" align="center" class-name="bw-g-in bw-g-start" label-class-name="bw-h-in bw-h-start" />
+            <el-table-column prop="inWorker" label="借入民工" width="88" align="center" class-name="bw-g-in" label-class-name="bw-h-in" />
+            <el-table-column prop="inVehicle" label="借入车辆" width="88" align="center" class-name="bw-g-in" label-class-name="bw-h-in" />
+            <el-table-column prop="dTech" label="差额技工" width="88" align="center" class-name="bw-g-diff bw-g-start" label-class-name="bw-h-diff bw-h-start">
+              <template #default="{ row }"><span :class="diffCls(row.dTech)">{{ diffText(row.dTech) }}</span></template>
+            </el-table-column>
+            <el-table-column prop="dWorker" label="差额民工" width="88" align="center" class-name="bw-g-diff" label-class-name="bw-h-diff">
+              <template #default="{ row }"><span :class="diffCls(row.dWorker)">{{ diffText(row.dWorker) }}</span></template>
+            </el-table-column>
+            <el-table-column prop="dVehicle" label="差额车辆" width="88" align="center" class-name="bw-g-diff" label-class-name="bw-h-diff">
+              <template #default="{ row }"><span :class="diffCls(row.dVehicle)">{{ diffText(row.dVehicle) }}</span></template>
+            </el-table-column>
+            <template #empty>
+              <div class="bw-bal-empty">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M9 9v11M15 9v11" /></svg>
+                <div class="bw-bal-empty-t">暂无单位余额</div>
+                <div class="bw-bal-empty-d">当前口径下没有可汇总的借工明细。可在「借工明细」中新增记录，或切换上方统计口径。</div>
+              </div>
+            </template>
+          </el-table>
+        </div>
+      </div>
     </template>
 
     <!-- 新增/编辑弹窗 -->
