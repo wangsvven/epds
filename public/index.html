@@ -134,7 +134,9 @@
     .el-card { box-shadow: none !important; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
     .el-button { box-shadow: none; font-weight: 450; }
     .el-button.is-text { padding-left:8px; padding-right:8px; }
-    .el-button--primary { box-shadow: 0 1px 2px rgba(31,79,209,.28); }
+    /* 投影只给实心按钮：文字/链接按钮带上它，在浅色底上会形成「白色圆角胶囊」，密集排布时非常拥挤 */
+    .el-button--primary:not(.is-link):not(.is-text):not(.is-plain) { box-shadow: 0 1px 2px rgba(31,79,209,.28); }
+    .el-button.is-link, .el-button.is-text, .el-button.is-plain { box-shadow: none !important; }
     .el-dialog { border-radius: 14px; box-shadow: var(--shadow-md); max-width: 94vw; background: var(--surface); }
     .el-dialog .el-dialog__body { padding-top: 16px; }
     .el-dialog__header { border-bottom: 1px solid var(--line); margin-right: 0; padding-bottom: 14px; }
@@ -144,6 +146,18 @@
     .el-table th.el-table__cell { color: var(--text-2); font-weight: 600; }
     .el-table .el-table__cell { padding: 9px 0; }
     .el-table td.el-table__cell { color: var(--text-1); }
+    /* ===== 表格横向滚动：表头与内容合成一个整体 =====
+       EP 原生做法是让 body 内的 .el-scrollbar__wrap 横向滚动，再在 scroll 事件里把
+       header-wrapper.scrollLeft 追上去；scroll 事件异步，滚动时表头总慢一帧（触控板惯性滑动尤其明显）。
+       这里改成由同时包住表头与内容的 .el-table__inner-wrapper 统一滚动，两层 wrapper 都不再独立滚动，
+       两张 table 落在同一个滚动容器里，天然同步、无 JS 追赶，也就不会再出现表头「慢一拍」或错位。 */
+    .el-table > .el-table__inner-wrapper { overflow-x:auto !important; overflow-y:hidden !important; }
+    .el-table > .el-table__inner-wrapper > .el-table__header-wrapper,
+    .el-table > .el-table__inner-wrapper > .el-table__body-wrapper,
+    .el-table__body-wrapper > .el-scrollbar,
+    .el-table__body-wrapper > .el-scrollbar > .el-scrollbar__wrap { overflow:visible !important; }
+    /* 自定义滚动条挂在已不滚动的 wrap 上，拖它无效；交给滚动容器的原生滚动条 */
+    .el-table__body-wrapper > .el-scrollbar > .el-scrollbar__bar { display:none !important; }
     .el-pagination { font-weight: 400; }
     .el-message-box { border-radius: 14px; }
     .el-popper.is-light { border-radius: 10px; border-color: var(--line); background: var(--surface); }
@@ -183,8 +197,10 @@
     .theme-toggle:hover { background:var(--hover); color:var(--text-1); border-color:var(--brand); }
     .theme-toggle svg { width:14px; height:14px; }
     .user-name { font-size:13px; color:var(--text-2); white-space:nowrap; }
-    .logout-btn { font-size:13px; color:var(--text-2); cursor:pointer; padding:5px 9px; border-radius:8px; transition:background .15s,color .15s; user-select:none; }
+    .logout-btn { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--text-2); cursor:pointer; padding:5px 9px; border-radius:8px; transition:background .15s,color .15s; user-select:none; }
     .logout-btn:hover { background:var(--hover); color:var(--text-1); }
+    /* 桌面只显示文字；窄屏只显示图标（见移动端媒体查询） */
+    .logout-btn svg { display:none; width:16px; height:16px; flex:0 0 16px; }
     .user-role { font-size:11.5px; line-height:18px; padding:0 7px; border-radius:999px; color:var(--text-3);
       background:var(--surface-3); border:1px solid var(--line); white-space:nowrap; }
     .app-shell { height:100%; display:flex; flex-direction:column; }
@@ -426,6 +442,7 @@
   @media (max-width: 768px) {
     /* 刘海 / 灵动岛安全区 */
     .app-header { height:auto; min-height:var(--header-h); padding-top:0;
+      position:sticky; top:0;   /* 键盘弹出 / 页面平移时顶栏仍固定在可视区 */
       padding-top:env(safe-area-inset-top, 0px);
       padding-left:max(12px, env(safe-area-inset-left, 0px));
       padding-right:max(12px, env(safe-area-inset-right, 0px)); }
@@ -447,7 +464,11 @@
     .app-header .user-name { display:none; }
     .app-header .user-role { display:none; }
     .app-header .right { gap:6px; font-size:13px; }
-    .app-header .logout-btn { padding:5px 6px; }
+    /* 退出登录收成图标按钮：iOS Safari 键盘弹出时会轻微平移页面，文字按钮容易被裁在屏外；
+       图标化后右侧从 104px 缩到约 72px，品牌区更宽裕 */
+    .app-header .logout-btn { width:32px; height:32px; padding:0; justify-content:center; border-radius:9px; background:var(--surface-3); }
+    .app-header .logout-btn svg { display:block; }
+    .app-header .logout-text { display:none; }
     .app-brand { width:22px; height:28px; }
     .app-brand svg { width:22px; height:28px; }
     .theme-toggle { padding:0 9px; }
@@ -466,12 +487,25 @@
     /* 表格瘦身 + 允许横向滚动 */
     .el-table { font-size:12px; }
     .el-table .el-table__cell { padding:8px 4px; }
-    /* 表格横向滚动交给 EP 内部的 el-scrollbar：wrapper 自身绝不能再开横向滚动，
-       否则表头 wrapper 与内容 wrapper 会各自独立滚动 → 滑动时表头与内容错位（旧 bug 来源） */
-    .el-table__body-wrapper, .el-table__header-wrapper { overflow:hidden !important; }
-    /* 弹窗铺满 + 表单标签上移、字段单列 */
-    .el-dialog { width:94vw !important; max-width:94vw !important; margin:5vh auto !important; }
+    /* 横向滚动统一由上方全局的 .el-table__inner-wrapper 承担；此处不再给两层 wrapper
+       单独设 overflow，否则会覆盖全局规则、重新造成表头与内容分离 */
+    .el-table > .el-table__inner-wrapper { -webkit-overflow-scrolling:touch; }
+    /* 弹窗铺满 + 表单标签上移、字段单列。
+       关键：限高 + 表头/底部固定 + body 自身滚动 —— 长表单不再撑到 1000px+，
+       下拉浮层不会盖住标题，键盘弹出后仍能看到底部按钮。dvh 在 iOS 上会随键盘收缩。 */
+    .el-dialog { width:94vw !important; max-width:94vw !important; margin:3vh auto !important;
+      max-height:94vh; max-height:calc(100dvh - 6vh);
+      display:flex; flex-direction:column; }
+    .el-dialog__header { flex:0 0 auto; }
+    .el-dialog__body { flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+      padding:12px 16px 18px !important; }
+    .el-dialog__body .el-form-item { margin-bottom:14px; }
+    /* 固定底栏与滚动内容做视觉分隔，避免「半截输入框 + 按钮」贴在一起 */
+    .el-dialog__footer { flex:0 0 auto; border-top:1px solid var(--line); }
     .el-dialog .el-col { width:100% !important; }
+    /* 下拉浮层限高，避免盖住整张表单 */
+    .el-select-dropdown__wrap { max-height:min(40vh, 260px) !important; }
+    .el-select__popper, .el-picker__popper { max-width:calc(100vw - 24px) !important; }
     /* 选择器需与 EP 的 .el-form--label-right .el-form-item__label 同权重，靠源码顺序取胜 */
     .el-form .el-form-item__label { display:block; float:none; text-align:left; width:auto !important; padding:0 0 5px; line-height:1.5; }
     .el-form-item__content { margin-left:0 !important; }
@@ -550,8 +584,60 @@
   .wv-section { font-size:13.5px; color:var(--text-1); margin:18px 0 10px; }
   .wv-filters { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
   /* 借工明细操作列：按钮一行排布（去掉 EP 相邻按钮默认左边距，改用 gap） */
-  .bw-acts { display:flex; flex-wrap:wrap; gap:2px 10px; }
+  .bw-acts { display:flex; flex-wrap:wrap; gap:4px 12px; }
   .bw-acts .el-button + .el-button { margin-left:0; }
+  /* ===== 借工管理 · 单位余额（10 列平表；克制风格：无彩色表头、无胶囊标签）===== */
+  .bw-bal { padding-top:2px; }
+  .bw-bal-head {
+    display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
+    padding:14px 18px; margin-bottom:14px;
+    background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--radius); box-shadow:var(--shadow-sm);
+  }
+  .bw-bal-intro { display:flex; align-items:flex-start; gap:10px; min-width:0; }
+  .bw-bal-icon { width:17px; height:17px; flex:0 0 17px; margin-top:2px; color:var(--text-3); }
+  .bw-bal-intro-t { font-size:13.5px; font-weight:500; line-height:1.55; color:var(--text-1); }
+  .bw-bal-intro-d { margin-top:3px; font-size:12px; line-height:1.6; color:var(--text-3); font-variant-numeric:tabular-nums; }
+  .bw-bal-formula { color:var(--text-2); font-weight:500; }
+  /* 口径切换：信息条内的轻量分段控件，不是筛选栏 */
+  .bw-bal-scope { display:inline-flex; align-items:center; gap:2px; padding:3px; border-radius:9px; background:var(--surface-3); flex:0 0 auto; }
+  .bw-scope-btn {
+    appearance:none; border:0; background:transparent; color:var(--text-3); font:inherit;
+    font-size:12.5px; line-height:1; padding:7px 12px; border-radius:7px;
+    cursor:pointer; white-space:nowrap; transition:background .15s ease, color .15s ease;
+  }
+  .bw-scope-btn:hover { color:var(--text-1); }
+  .bw-scope-btn.is-on { background:var(--surface); color:var(--brand-text); font-weight:500; box-shadow:var(--shadow-sm); }
+  .bw-bal-card {
+    background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--radius); box-shadow:var(--shadow-sm); overflow:hidden;
+  }
+  .bw-bal-table { --el-table-border-color:var(--line); --el-table-row-hover-bg-color:var(--hover); }
+  .bw-bal-table th.el-table__cell { font-size:12.5px; font-weight:500; color:var(--text-2); padding:12px 0; background:var(--surface-2) !important; }
+  .bw-bal-table td.el-table__cell { font-size:13.5px; color:var(--text-2); padding:13px 0; font-variant-numeric:tabular-nums; border-bottom-color:var(--line) !important; }
+  .bw-bal-table .bw-bal-unit .cell { padding-left:18px; padding-right:14px; color:var(--text-1); font-weight:500; }
+  .bw-bal-table .bw-bal-unit-h .cell { padding-left:18px; }
+  /* 组首：仅 1px 淡线分区，不铺色块 */
+  .bw-bal-table .bw-h-start, .bw-bal-table .bw-g-start { border-left:1px solid var(--line) !important; }
+  /* 差额：纯数字 + 语义色，无底色无边框 */
+  .bw-diff { font-size:13.5px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .bw-diff.is-pos { color:var(--ok-text); }
+  .bw-diff.is-neg { color:var(--danger-text); }
+  .bw-diff.is-zero { color:var(--text-3); font-weight:400; }
+  .bw-bal-empty { padding:34px 16px 38px; text-align:center; }
+  .bw-bal-empty svg { display:block; width:26px; height:26px; margin:0 auto 10px; color:var(--text-3); opacity:.7; }
+  .bw-bal-empty-t { font-size:14px; font-weight:500; color:var(--text-2); margin-bottom:6px; }
+  .bw-bal-empty-d { font-size:12.5px; line-height:1.7; color:var(--text-3); max-width:420px; margin:0 auto; }
+  @media (max-width: 768px) {
+    .bw-bal-head { padding:12px 14px; gap:10px; }
+    .bw-bal-intro-t { font-size:13px; }
+    .bw-bal-intro-d { font-size:11.5px; }
+    .bw-bal-scope { margin-left:27px; }
+    .bw-scope-btn { padding:7px 10px; font-size:12px; }
+    .bw-bal-table th.el-table__cell { padding:10px 0; }
+    .bw-bal-table td.el-table__cell { padding:11px 0; font-size:13px; }
+    .bw-bal-table .bw-bal-unit .cell, .bw-bal-table .bw-bal-unit-h .cell { padding-left:12px; }
+  }
   .wv-del-btn { background:var(--surface) !important; border-color:var(--danger-text) !important; color:var(--danger-text) !important; }
   .wv-del-btn:hover { background:var(--danger-bg) !important; }
   /* 表头整条浅灰底、无竖分隔线（对齐截图） */
@@ -812,8 +898,15 @@
     .wv-actions { width:100%; }
     .wv-actions .el-button { flex:1 1 calc(50% - 8px); }
     .wv-body { padding:12px; }
-    .wv-filters .el-input, .wv-filters .el-select { width:100% !important; }
-    .wv-filters .el-button { width:100%; }
+    /* 筛选栏改两列网格：手机上不再一个控件独占一行（借工页原筛选栏高 270px，
+       表格被推出首屏）；日期范围 / 说明文字跨整行，dense 自动回填空位。 */
+    .wv-filters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-flow:row dense;
+      gap:8px; align-items:center; }
+    .wv-filters > * { width:100% !important; min-width:0; margin-left:0 !important; }
+    .wv-filters > .el-date-editor, .wv-filters > .ck-note, .wv-filters > .ct-hint { grid-column:1 / -1; }
+    .wv-filters > span { grid-column:1 / -1; text-align:right; }
+    .wv-filters > .ck-note { text-align:left; }
+    .wv-filters > .bw-filter-count { grid-column:auto; text-align:right; }
     /* 外部通讯录工具栏：按钮两列、说明落在按钮下方、导出整行 */
     .ct-toolbar { gap:8px; }
     .ct-toolbar .el-button { flex:1 1 calc(50% - 4px); }
@@ -873,7 +966,7 @@
   .page-head { margin:0 0 16px; }
   .page-head .page-title { margin:0; }
   .page-sub { font-size:12.5px; color:var(--text-3); margin-top:4px; letter-spacing:.2px; }
-  @media (max-width:768px){ .seg { width:100%; } .seg-item { flex:1; text-align:center; padding:6px 8px; } }
+  @media (max-width:768px){ .seg { width:100%; max-width:100%; box-sizing:border-box; } .seg-item { flex:1 1 0; min-width:0; text-align:center; padding:6px 8px; white-space:nowrap; } }
   .proj-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
   .bar-spacer { flex:1 1 auto; }
   @media (max-width:768px){ .proj-bar .bar-spacer { display:none; } .proj-bar .el-button { width:100%; } }
@@ -918,9 +1011,16 @@
   .plan-table td.el-table__cell { font-size:13px; padding:7px 0; }
   .plan-table .cell { line-height:20px; font-variant-numeric:tabular-nums; }
   .plan-table .pf-nowrap .cell { white-space:nowrap; }
-  /* 操作列：3 列等宽网格，6 个动作固定两行、上下对齐（已取消页签 3 个动作则一行） */
-  .plan-acts { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:1px 4px; }
-  .plan-acts .el-button { margin-left:0; font-size:12.5px; padding:0; height:19px; justify-content:flex-start; }
+  /* 长文本列完整折行，不再用省略号截断（作业计划名称 / 工作票类型 / 变电站线路） */
+  .plan-table .plan-wrapcell .cell { white-space:normal; overflow:visible; text-overflow:clip; word-break:break-word; line-height:1.45; }
+  /* 操作列：主操作一行平铺 + 「更多」下拉；文字按钮不投影、间距拉开，避免挤成一团胶囊 */
+  .plan-table .plan-act-col .cell { padding-left:4px; padding-right:4px; }
+  .plan-acts { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; padding:3px 0; }
+  .plan-acts .el-button { margin-left:0; padding-left:0; padding-right:0; height:22px; font-weight:450; }
+  .plan-caret { width:11px; height:11px; margin-left:2px; vertical-align:-1px; }
+  .plan-act-more .el-button { padding-left:0; padding-right:0; }
+  .plan-dd-danger { color:#c62828 !important; }
+  html.dark .plan-dd-danger { color:#ff7b72 !important; }
   .plan-empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:28px 0 32px; color:var(--text-3); font-size:13px; }
   .plan-empty svg { width:52px; height:52px; color:var(--line-strong); }
   .plan-empty-tip { max-width:520px; text-align:center; line-height:1.6; color:var(--text-3); font-size:12.5px; }
@@ -943,7 +1043,7 @@
   .mp-time2 { display:flex; flex-direction:column; gap:1px; line-height:1.45; font-variant-numeric:tabular-nums; font-size:11.5px; letter-spacing:-0.2px; }
   .mp-time2 .mp-t-d { color:var(--text-2); white-space:nowrap; }
   .mp-time2 .mp-t-h { color:var(--text-1); white-space:nowrap; }
-  .mp-acts { display:flex; align-items:center; flex-wrap:wrap; gap:2px 14px; line-height:1.7; padding:4px 0; }
+  .mp-acts { display:flex; align-items:center; flex-wrap:wrap; gap:4px 14px; line-height:1.7; padding:4px 0; }
   .mp-acts .el-button { margin-left:0; padding-left:0; padding-right:0; }
   .mp-act-lead { font-weight:600; }
   .mp-caret { width:11px; height:11px; margin-left:1px; vertical-align:-1px; }
@@ -1420,7 +1520,7 @@
   .mat-table .mat-code { font-variant-numeric: tabular-nums; letter-spacing: .2px; color: var(--text-2); }
   .mat-table .mat-code.is-empty { color: var(--text-3); }
   .th-inner.th-center { justify-content: center; gap: 6px; }
-  .mat-acts { display: flex; align-items: center; justify-content: center; gap: 2px; }
+  .mat-acts { display: flex; align-items: center; justify-content: center; gap: 4px 10px; }
   .mat-acts .el-button { margin-left: 0; }
   @media (max-width: 768px) {
     .mat-table .el-table__cell { padding: 9px 0; }
