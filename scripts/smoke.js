@@ -772,7 +772,7 @@ async function listOk(p, token) {
     need(rows - 2 >= 1, '不带 scope 时应导出全部，实为 ' + (rows - 2));
     return '48 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / scope 过滤 OK / ' + buf.length + 'B';
   });
-  await step('plans', '周计划导出 → 原样回灌导入（按表头识别列位，往返条数一致）', async () => {
+  await step('plans', '周计划导出 → 回灌判重 + 48 列单行表头模板落位', async () => {
     // 先造一条字段齐全的计划，保证往返有可比对的数据
     const mk = needOk(await api('POST', '/api/workPlans', {
       token, body: { name: '冒烟回灌计划', planType: '周计划', workType: '配农网工程', team: '施工一队', startDate: '2026-11-02 08:00:00', endDate: '2026-11-03 18:00:00', staffText: '张三/13800000000', voltage: '10kV' }
@@ -786,13 +786,16 @@ async function listOk(p, token) {
     const up = await fetch(base + '/api/workPlans/import?planType=' + encodeURIComponent('周计划'), { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd, signal: AbortSignal.timeout(15000) });
     const d = await up.json();
     need(up.status === 200 && d && d.ok, '往返导入失败：' + brief(d));
-    need(d.added === total - 2, '导入 ' + d.added + ' 条，导出数据行 ' + (total - 2) + ' 条');
+    // 判重后回灌行应全部跳过，且不改动已有记录
+    need(d.added === 0 && d.skipped === total - 2,
+      '判重应跳过全部 ' + (total - 2) + ' 条回灌行：' + brief(d));
     const again = needOk(await api('GET', '/api/workPlans', { token }), 'list');
     const hit = (Array.isArray(again) ? again : (again.data || [])).filter(p => p.name === '冒烟回灌计划' && !p.deleted);
-    need(hit.length === 2, '回灌后同名计划应为 2 条，实为 ' + hit.length);
-    const a = hit.find(p => p.id === mk.id), b = hit.find(p => p.id !== mk.id);
-    need(a && b && a.team === b.team && a.startDate === b.startDate && a.staffText === b.staffText && a.workType === b.workType, '回灌后字段与原记录不一致');
-    // 内置导入模板是 54 列（比导出多一列「班组长」），按表头名称取列才不错位：填一行验证
+    need(hit.length === 1 && hit[0].id === mk.id, '判重后不应新增同名计划，实为 ' + hit.length + ' 条');
+    const a = hit[0];
+    need(a && a.team === '施工一队' && a.startDate === '2026-11-02 08:00:00' && a.staffText === '张三/13800000000',
+      '判重跳过后原记录字段被改动：' + brief(a));
+    // 内置导入模板已改为 48 列单行表头（与导出逐列同名同序），按表头名称取列验证不错位
     const tplWb = xlsx.read(fs.readFileSync(path.join(ROOT, 'assets', 'plan-import-template.xlsx')), { type: 'buffer' });
     const ts = tplWb.Sheets[tplWb.SheetNames[0]];
     const rng = xlsx.utils.decode_range(ts['!ref']);
@@ -810,7 +813,7 @@ async function listOk(p, token) {
     };
     put('作业计划名称', '冒烟模板列位计划'); put('作业类型', '配农网工程');
     put('计划开始时间', '2026-11-09 08'); put('计划结束时间', '2026-11-09 18');   // 只写到小时也应接受
-    put('班组长', '模板班组长'); put('杆塔（基）', '9'); put('停电范围', '模板停电范围');
+    put('杆塔（基）', '9'); put('停电范围', '模板停电范围');
     put('作业实施（施工）人员（不包含工作负责人）', '甲/13000000001；乙/13000000002');
     put('作业人员（共多少人）', '9');   // 与名单人数冲突时，应以名单为准（导入按名单重算）
     ts['!ref'] = xlsx.utils.encode_range({ s: rng.s, e: { r: 2, c: rng.e.c } });   // 模板原本只有两行表头，写入行后要扩范围
@@ -824,12 +827,12 @@ async function listOk(p, token) {
     need(up2.status === 200 && d2 && d2.ok, '模板导入失败：' + brief(d2));
     const got = needOk(await api('GET', '/api/workPlans', { token }), 'list');
     const tp = (Array.isArray(got) ? got : (got.data || [])).find(p => p.name === '冒烟模板列位计划');
-    need(tp && tp.leader === '模板班组长' && tp.wlPole === '9' && tp.outageRange === '模板停电范围',
-      '54 列模板列位错位：' + brief(tp && { leader: tp.leader, wlPole: tp.wlPole, outageRange: tp.outageRange }));
+    need(tp && tp.wlPole === '9' && tp.outageRange === '模板停电范围',
+      '48 列模板列位错位：' + brief(tp && { wlPole: tp.wlPole, outageRange: tp.outageRange }));
     need(tp.startDate === '2026-11-09 08:00:00' && tp.endDate === '2026-11-09 18:00:00',
       '只写到小时的时间未补全：' + brief({ s: tp.startDate, e: tp.endDate }));
     need(tp.staffCount === '2', '人数应按施工人员名单重算为 2，实为 ' + tp.staffCount);
-    return '回灌 ' + d.added + ' 条字段一致；模板 54 列落位正确';
+    return '判重跳过回灌 ' + d.skipped + ' 条；48 列单行表头模板落位正确';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');
@@ -1122,6 +1125,41 @@ async function listOk(p, token) {
     need(css.indexOf('.el-table__body-wrapper, .el-table__header-wrapper { overflow:hidden !important; }') === -1,
       '不得残留移动端「两层 wrapper 各滚各的」旧补丁（会让表头重新慢一拍）');
     return 'inner-wrapper 统一滚动 + 三层 visible + 自定义滚动条隐藏，表头与内容天然同步';
+  });
+  await step('ui', '材料台账：暂存清单领料总数实时联动 / Tab 跳过移除 / 领料单项目与物料简称完整显示', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public/js/views/materials.js'), 'utf8');
+    const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const vm = require('vm');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/js/utils.js'), 'utf8'), sandbox);
+    const MatName = sandbox.window.MatName;
+    need(MatName && typeof MatName.short === 'function', 'utils.js 应暴露 window.MatName.short');
+    need(MatName.short('直角挂板Z-7') === '直角挂板', '物料简称应去掉型号：直角挂板Z-7 → 直角挂板');
+    need(MatName.short('预应力混凝土电杆(Z)Φ190×12M×GY（法兰）') === '预应力混凝土电杆', '电杆规格应整段去掉');
+    need(MatName.short('低压JP柜50kVA（双回、无补偿）') === '低压JP柜', '名称内嵌拉丁前缀应保留、参数应去掉');
+    need(MatName.short('10kV氧化锌避雷器HY5WS-17/50（脱扣式）') === '10kV氧化锌避雷器', '量词前缀应保留、型号应去掉');
+    need(MatName.short('中砂') === '中砂', '无型号物料应原样返回');
+    need(JSON.stringify(MatName.list([
+      { description: '直角挂板Z-7' }, { description: '直角挂板Z-10' }, { description: '镀锌钢绞线GJ-35' }
+    ])) === JSON.stringify(['直角挂板', '镀锌钢绞线']), '多物料简称应按明细顺序去重');
+    // 暂存清单：总数 computed + 统计条展示 + Tab 直连
+    need(/const stagingTotalQty = computed\(\(\) => stagingRows\.value\.reduce/.test(src), '领料总数应由 stagingRows + stagingQty 实时计算');
+    need(src.indexOf('领料总数 <b>{{ fmtQty(stagingTotalQty) }}</b>') > -1, '统计条应在「项目」旁展示领料总数');
+    need(/@keydown="onStagingTab"/.test(src) && /function onStagingTab\(e\)/.test(src)
+      && /class="stg-qty-input"/.test(src), 'Tab 应由数量输入框互相跳转（跳过移除按钮）');
+    need(/tabindex="-1" @click="removeStaging/.test(src), '移除按钮应退出 Tab 顺序（iOS 键盘「下一项」同样跳过）');
+    need(/e\.shiftKey/.test(src) && /% boxes\.length/.test(src), 'Tab 应支持末行回首行与 Shift+Tab 反向');
+    // 领料单列表：涉及项目完整折行 + 新增物料描述列
+    const projCols = src.match(/<el-table-column label="涉及项目"[^>]*/g) || [];
+    const mainProj = projCols.find(x => x.indexOf('class-name="rq-wrapcell"') > -1) || '';
+    need(mainProj.indexOf('show-overflow-tooltip') === -1 && mainProj.indexOf('min-width="200"') > -1,
+      '领料单主表「涉及项目」应完整折行、不得省略（关联领料单弹窗仍保留 tooltip）');
+    need(/<el-table-column label="物料描述" min-width="160" class-name="rq-wrapcell">/.test(src)
+      && /v-for="\(n, i\) in matNames\(row\)"/.test(src), '应在涉及项目旁新增物料描述列并调用简称函数');
+    need(/\.rq-main \.rq-wrapcell \.cell \{ white-space:normal; overflow:visible/.test(css), '折行列应有 white-space:normal CSS');
+    need(/\.stg-chips \{ display:flex; flex-wrap:wrap/.test(css), '暂存统计条应在窄屏换行');
+    return '总数 computed 联动 + Tab 循环跳转（移除退出 Tab 序）+ 5 组简称用例 + 去重 + 项目折行 + 物料描述列';
   });
   await step('ui', '移动端：顶栏图标化、筛选栏两列网格、弹窗限高可滚动', async () => {
     const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
@@ -1463,6 +1501,78 @@ async function listOk(p, token) {
     });
     need(m.status >= 200 && m.status < 300, '材料员写材料台账应允许，实际 ' + m.status + ' ' + brief(m.data));
     return '读 200 / 写项目 403 / 写材料 2xx';
+  });
+
+  /* ---------- 拆分出去的两个专用端点：运行时回归 ---------- */
+  await step('plans', '独立路由回归：月计划 xlsx 导出 / 借工单生成 + 下载', async () => {
+    const hdr = { Authorization: 'Bearer ' + token };
+    const xr = await fetch(base + '/api/workPlans/month-plan.xlsx', { headers: hdr });
+    need(xr.status === 200, '月计划 xlsx 导出应 200，实际 ' + xr.status);
+    const buf = Buffer.from(await xr.arrayBuffer());
+    need(buf.slice(0, 2).toString() === 'PK', '导出内容应为 xlsx（PK 头），实际 ' + buf.slice(0, 2).toString());
+    const list = needOk(await api('GET', '/api/borrowWorks', { token }), 'borrowWorks list');
+    const b = list[0];
+    need(b && b.id, '应有可生成借工单的借工记录');
+    const gen = await api('POST', '/api/borrowWorks/' + b.id + '/borrowForm/generate', { token });
+    need(gen.status === 200, '借工单生成应 200，实际 ' + gen.status + ' ' + brief(gen.data));
+    const dl = await fetch(base + '/api/borrowWorks/' + b.id + '/generated/' + gen.data.id + '/download', { headers: hdr });
+    need(dl.status === 200, '生成的借工单应可下载，实际 ' + dl.status);
+    return 'xlsx PK 头 ' + buf.length + ' 字节 / 借工单生成 + 下载 200';
+  });
+
+  /* ---------- 结构（按功能区分模块，防回退） ---------- */
+  await step('结构', '后端按功能区独立文件 + 单向依赖 + 挂载顺序', async () => {
+    const read = p => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const entry = read('server.js');
+    const plans = read('server/routes/plans.js');
+    const borrow = read('server/routes/borrow.js');
+    const month = read('server/routes/monthPlans.js');
+    const util = read('server/core/util.js');
+    const routeFiles = fs.readdirSync(path.join(ROOT, 'server/routes')).filter(x => x.endsWith('.js'));
+
+    const entryLines = entry.trimEnd().split('\n').length;
+    need(entryLines < 60, 'server.js 应保持纯入口（<60 行）');
+    need(routeFiles.indexOf('borrow.js') > -1 && routeFiles.indexOf('monthPlans.js') > -1,
+      '借工与月计划应有独立 routes 文件');
+    need(/app\.get\('\/api\/workPlans\/month-plan\.xlsx'/.test(month), '月计划 xlsx 导出应归属 monthPlans.js');
+    need(/crud\('borrowWorks', 'borrowWorks'/.test(borrow), 'borrowWorks 通用 CRUD 应归属 borrow.js');
+    need(/app\.post\('\/api\/borrowWorks\/:id\/evidences'/.test(borrow), '借工佐证端点应归属 borrow.js');
+    need(!/app\.(get|post|put|delete)\('\/api\/borrowWorks/.test(plans) &&
+      !/app\.get\('\/api\/workPlans\/month-plan\.xlsx'/.test(plans),
+      'plans.js 不得再混装借工或月计划导出端点');
+    need(!/\['plans',\s*'borrowWorks'/.test(plans), 'plans.js 通用 CRUD 不得再包含 borrowWorks');
+    need(/function safeFileName/.test(util) && /const INLINE_MIME/.test(util),
+      '附件落盘/预览共用工具应下沉 core/util');
+    need(plans.indexOf('function planFileSafeName') === -1 && borrow.indexOf('const DRAWING_INLINE_MIME') === -1,
+      'routes 不得重复定义已下沉的共用工具');
+
+    const at = f => entry.indexOf("require('./server/routes/" + f + "')");
+    need(at('borrow') > -1 && at('monthPlans') > -1 && at('plans') > -1, '三个模块都应在 server.js 中注册');
+    need(at('borrow') < at('plans') && at('monthPlans') < at('plans'),
+      '借工/月计划专用路由必须先于 plans.js 加载（静态路径不能被 /:id 抢先匹配）');
+    routeFiles.forEach(f => {
+      const src = read('server/routes/' + f);
+      need(!/require\(['"][^'"]*routes\//.test(src), f + ' 不得依赖其它 routes（依赖方向只能是 routes → core）');
+    });
+    return routeFiles.length + ' 个 routes 文件 / 入口 ' + entryLines +
+      ' 行 / 专用路由早于通用 CRUD / 无 routes↔routes';
+  });
+
+  await step('结构', 'SOURCE_TYPES 前后端两处定义逐项相等（防漂移）', async () => {
+    const read = p => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const pick = (src, label) => {
+      const m = src.match(/const SOURCE_TYPES = \[([^\]]*)\]/);
+      need(!!m, label + ' 未找到 SOURCE_TYPES 定义');
+      return m[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+    };
+    const back = read('server/routes/materials.js');
+    const front = read('public/js/views/materials.js');
+    const b = pick(back, '后端'), f = pick(front, '前端');
+    need(b.length === 5, '后端 SOURCE_TYPES 应为 5 项，实为 ' + b.length);
+    need(JSON.stringify(b) === JSON.stringify(f),
+      '前后端 SOURCE_TYPES 不一致：' + JSON.stringify(b) + ' vs ' + JSON.stringify(f));
+    need(/smoke\.js/.test(back) && /smoke\.js/.test(front), '两处定义附近应有互指本断言的注释');
+    return b.join(' / ');
   });
 
   /* ---------- 汇总 ---------- */
