@@ -621,6 +621,17 @@ const DocumentsView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
 
+    function downloadTpl(file, name) {
+      const a = document.createElement('a');
+      a.href = '/assets/' + file;
+      a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    const downloadRuleTpl = () => downloadTpl('rules_import_template.xlsx', '作业内容匹配规则导入模板.xlsx');
+    const downloadMeasureTpl = () => downloadTpl('measures_import_template.xlsx', '施工技术安全措施导入模板.xlsx');
+    const downloadHospitalTpl = () => downloadTpl('hospitals_import_template.xlsx', '医院联系方式导入模板.xlsx');
+    const downloadHazTpl = () => downloadTpl('hazard_import_template.xlsx', '企业危险点库导入模板.xlsx');
+
     onMounted(() => { load(); loadWt(); loadLib(); loadDefaultMeta(); });
     return {
       docs, docTab, activeCat, catCount,
@@ -634,6 +645,7 @@ const DocumentsView = {
       emergency, saveEmergency,
       impPreview, impInput, triggerImp, onImp, confirmImp,
       triggerRuleImport, onRuleImport, confirmRuleImport,
+      downloadRuleTpl, downloadMeasureTpl, downloadHospitalTpl, downloadHazTpl,
       hazLoading, hazSearch, hazPage, hazPageSize, hazFiltered, hazPaged, hazDlg, hazView, hazImportInput,
       loadHazards, applyHazSearch, reloadHazards, openHazAdd, openHazEdit, submitHaz, removeHaz, openHazView,
       triggerHazImport, onHazImport,
@@ -758,6 +770,7 @@ const DocumentsView = {
                             </svg>导入预览
                           </el-button>
                           <el-button v-if="canWrite('documents')" @click="openRuleAdd">＋ 新增</el-button>
+                          <el-button @click="downloadRuleTpl">下载模板</el-button>
                           <input ref="ruleImportInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="onRuleImport" />
                         </div>
                       </div>
@@ -818,6 +831,7 @@ const DocumentsView = {
                             </svg>导入预览
                           </el-button>
                           <el-button v-if="canWrite('documents')" @click="openMeaAdd(g.key)">＋ 新增</el-button>
+                          <el-button @click="downloadMeasureTpl">下载模板</el-button>
                         </div>
                       </div>
 
@@ -871,6 +885,7 @@ const DocumentsView = {
                             </svg>导入预览
                           </el-button>
                           <el-button v-if="canWrite('documents')" @click="openHosAdd">＋ 新增</el-button>
+                          <el-button @click="downloadHospitalTpl">下载模板</el-button>
                         </div>
                       </div>
 
@@ -935,6 +950,7 @@ const DocumentsView = {
                 <el-button @click="reloadHazards">重新读取</el-button>
                 <el-button v-if="canWrite('documents')" type="primary" @click="openHazAdd">新增危险点</el-button>
                 <el-button v-if="canWrite('documents')" @click="triggerHazImport">导入 Excel</el-button>
+                <el-button @click="downloadHazTpl">下载模板</el-button>
                 <input ref="hazImportInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="onHazImport" />
               </div>
 
