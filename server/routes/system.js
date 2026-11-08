@@ -18,7 +18,7 @@ const { crud } = require('../core/crud');
 const { DB, saveDB, DEFAULT_LOGIN_BG, LEGACY_LOGIN_BG_MAP, USER_GROUPS } = require('../core/db');
 const {
   genId, nowISO, fmtNow, aliveFilter, parseCNDate, parseCSVBuffer, repairUploadName,
-  bjStr, setClockOffset, getClockOffset
+  bjStr, setClockOffset, getClockOffset, validateWorkerId
 } = require('../core/util');
 const {
   TOKENS, isAdmin, passwordStrong, userGroupOf, writeModulesOf
@@ -197,56 +197,70 @@ const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工
 const WORKER_STATUS = ['已准入', '待定'];
 
 
+// 解析 + 整批校验：单步端点与两段式（preview/confirm）共用；错误全量返回、不落半截数据。
+function parseWorkerFile(file, todayStr) {
+  let rows;
+  if (/\.csv$/i.test(file.originalname || '')) {
+    rows = parseCSVBuffer(file.buffer);
+  } else {
+    const wb = xlsx.read(file.buffer, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+  }
+  const errors = [];
+  const parsed = [];
+  rows.forEach((r, i) => {
+    if (i === 0) return; // 第一行无条件作表头跳过
+    const name = String(r[0] || '').trim();
+    const idNumber = String(r[1] || '').trim();
+    const phone = String(r[2] || '').trim();
+    const identity = String(r[3] || '').trim();
+    const team = String(r[4] || '').trim();
+    const certTypes = String(r[5] || '').trim();
+    const validRaw = String(r[6] || '').trim();
+    const statusRaw = String(r[7] || '').trim();
+    if (!name && !idNumber && !phone && !validRaw) return; // 空行
+    if (!name) errors.push(`第${i + 1}行：姓名为空`);
+    if (statusRaw && !WORKER_STATUS.includes(statusRaw)) errors.push(`第${i + 1}行：状态「${statusRaw}」无效（仅支持：${WORKER_STATUS.join(' / ')}）`);
+    if (idNumber) {
+      if (!WORKER_ID_RE.test(idNumber)) errors.push(`第${i + 1}行：身份证号格式错误（需18位，末位可为X）`);
+      else {
+        const v = validateWorkerId(idNumber, todayStr);
+        if (!v.ok) errors.push(`第${i + 1}行：${v.error}`);
+      }
+    }
+    if (phone && !WORKER_PHONE_RE.test(phone)) errors.push(`第${i + 1}行：手机号格式错误（需11位手机号）`);
+    if (identity && !WORKER_IDENTITY_OPTIONS.includes(identity)) errors.push(`第${i + 1}行：身份选项无效`);
+    let validStart = '', validEnd = '';
+    if (validRaw) {
+      // 支持「2026-10-09 - 2026-11-18」「2026年10月9日至2026年11月18日」「2026/10/9」等写法
+      const parts = validRaw.split(/\s+[-–—~]\s+|\s*至\s*|\s*到\s*/).map(s => s.trim()).filter(Boolean);
+      const dates = parts.map(parseCNDate);
+      if (dates.length === 1 && dates[0]) { validStart = dates[0]; validEnd = dates[0]; }
+      else if (dates.length >= 2 && dates[0] && dates[1]) {
+        if (dates[1] < dates[0]) errors.push(`第${i + 1}行：准入有效期结束日期不得早于开始日期`);
+        validStart = dates[0]; validEnd = dates[1];
+      }
+      else errors.push(`第${i + 1}行：准入有效期格式错误`);
+    }
+    parsed.push({
+      rowNo: i + 1,
+      name, idNumber, phone, identity, team,
+      certTypes: certTypes ? certTypes.split(/[、,，;；\/\s]+/).filter(Boolean) : [],
+      validStart, validEnd, status: statusRaw
+    });
+  });
+  return { errors, parsed };
+}
+function workerImportError(errors) {
+  return `存在格式错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处错误` : ''}`;
+}
+
 app.post('/api/workers/import', upload.single('file'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '未收到文件' });
-    let rows;
-    if (/\.csv$/i.test(req.file.originalname || '')) {
-      rows = parseCSVBuffer(req.file.buffer);
-    } else {
-      const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
-    }
-    const errors = [];
-    const parsed = [];
-    rows.forEach((r, i) => {
-      if (i === 0) return; // 跳过表头
-      const name = String(r[0] || '').trim();
-      const idNumber = String(r[1] || '').trim();
-      const phone = String(r[2] || '').trim();
-      const identity = String(r[3] || '').trim();
-      const team = String(r[4] || '').trim();
-      const certTypes = String(r[5] || '').trim();
-      const validRaw = String(r[6] || '').trim();
-      const statusRaw = String(r[7] || '').trim();
-      if (!name && !idNumber && !phone && !validRaw) return; // 空行
-      if (!name) errors.push(`第${i + 1}行：姓名为空`);
-      if (statusRaw && !WORKER_STATUS.includes(statusRaw)) errors.push(`第${i + 1}行：状态「${statusRaw}」无效（仅支持：${WORKER_STATUS.join(' / ')}）`);
-      if (idNumber && !WORKER_ID_RE.test(idNumber)) errors.push(`第${i + 1}行：身份证号格式错误（需18位，末位可为X）`);
-      if (phone && !WORKER_PHONE_RE.test(phone)) errors.push(`第${i + 1}行：手机号格式错误（需11位手机号）`);
-      if (identity && !WORKER_IDENTITY_OPTIONS.includes(identity)) errors.push(`第${i + 1}行：身份选项无效`);
-      let validStart = '', validEnd = '';
-      if (validRaw) {
-        // 支持「2026-10-09 - 2026-11-18」「2026年10月9日至2026年11月18日」「2026/10/9」等写法
-        const parts = validRaw.split(/\s+[-–—~]\s+|\s*至\s*|\s*到\s*/).map(s => s.trim()).filter(Boolean);
-        const dates = parts.map(parseCNDate);
-        if (dates.length === 1 && dates[0]) { validStart = dates[0]; validEnd = dates[0]; }
-        else if (dates.length >= 2 && dates[0] && dates[1]) {
-          if (dates[1] < dates[0]) errors.push(`第${i + 1}行：准入有效期结束日期不得早于开始日期`);
-          validStart = dates[0]; validEnd = dates[1];
-        }
-        else errors.push(`第${i + 1}行：准入有效期格式错误`);
-      }
-      parsed.push({
-        name, idNumber, phone, identity, team,
-        certTypes: certTypes ? certTypes.split(/[、,，;；\/\s]+/).filter(Boolean) : [],
-        validStart, validEnd, status: statusRaw
-      });
-    });
-    if (errors.length) {
-      return res.status(400).json({ error: `存在格式错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处错误` : ''}` });
-    }
+    const { errors, parsed } = parseWorkerFile(req.file, bjStr().slice(0, 10));
+    if (errors.length) return res.status(400).json({ error: workerImportError(errors) });
     // 身份证判重：库中未删除人员 + 本文件内先出现的行；命中则整行跳过，不改动已有记录的任何字段。
     // 身份证为空的行照现行追加逻辑入库，不参与判重，单独计数。
     const seenIds = new Set(DB.workers.filter(w => !w.deleted && w.idNumber).map(w => String(w.idNumber).trim().toUpperCase()));

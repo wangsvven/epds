@@ -1575,6 +1575,22 @@ async function listOk(p, token) {
     return b.join(' / ');
   });
 
+  await step('users', '身份证校验纯函数：真实日历/闰年/MOD 11-2 校验码/未来日期/小写 x', async () => {
+    const { validateWorkerId } = require(path.join(ROOT, 'server/core/util.js'));
+    const TODAY = '2026-11-08';
+    need(validateWorkerId('510301199001010010', TODAY).ok === true, '合法身份证应通过');
+    const badCheck = validateWorkerId('510301199001010019', TODAY);
+    need(badCheck.ok === false && /校验码/.test(badCheck.error), '校验码错应拒绝');
+    const badDay = validateWorkerId('51030119900230001X', TODAY);
+    need(badDay.ok === false && /出生日期/.test(badDay.error), '2 月 30 日应拒绝');
+    const future = validateWorkerId('510301209001010017', TODAY);
+    need(future.ok === false && /出生日期/.test(future.error), '未来生日应拒绝');
+    need(validateWorkerId('51030119900101007x', TODAY).ok === true, '末位小写 x 应通过');
+    need(validateWorkerId('510301200002290013', TODAY).ok === true, '闰年 2000-02-29 应通过');
+    need(validateWorkerId('510301199902290013', TODAY).ok === false, '平年 1999-02-29 应拒绝');
+    return '合法/校验码错/2月30日/未来日期/小写x/闰年/平年 7 个样本';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;

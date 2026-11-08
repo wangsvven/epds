@@ -17,6 +17,17 @@ function repairUploadName(s) {
   return s;
 }
 
+/* ---------- 附件落盘 / 下载共用（routes/plans、routes/borrow 等跨区复用） ---------- */
+// 磁盘安全文件名：去掉路径分隔符与非法字符，只保留末尾 120 字符，避免中文长名被截断到不可读
+function safeFileName(name) {
+  return String(name).replace(/[/\\?%*:|"<>\x00-\x1f]/g, '_').slice(-120);
+}
+// ?inline=1 预览时给可直出浏览器的 Content-Type，其余一律按附件下载
+const INLINE_MIME = {
+  pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+  txt: 'text/plain; charset=utf-8'
+};
 function genId(prefix) {
   return prefix + Math.random().toString(36).slice(2, 9);
 }
@@ -181,8 +192,33 @@ function buildStoreZip(entries) {
   return Buffer.concat([...locals, centralBuf, eocd]);
 }
 
+/* 身份证号校验（GB 11643）：格式 / 真实日历出生日期（含闰年）/ MOD 11-2 校验码。
+   纯函数，todayStr 由调用方按北京时间传 YYYY-MM-DD，供导入预览与确认两段共用，也便于单测。
+   不校验前 6 位地址码。 */
+const WORKER_ID_WEIGHTS = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+const WORKER_ID_CHECK = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
+function validateWorkerId(raw, todayStr) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!/^\d{17}[\dXx]$/.test(s)) return { ok: false, error: '身份证号格式错误（需18位，末位可为X）' };
+  const y = Number(s.slice(6, 10)), m = Number(s.slice(10, 12)), d = Number(s.slice(12, 14));
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, m - 1, d);
+  dt.setUTCHours(0, 0, 0, 0);
+  const pad2 = n => String(n).padStart(2, '0');
+  const birthday = y + '-' + pad2(m) + '-' + pad2(d);
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d ||
+      (todayStr && birthday > String(todayStr))) {
+    return { ok: false, error: '身份证号出生日期无效' };
+  }
+  let sum = 0;
+  for (let i = 0; i < 17; i++) sum += Number(s[i]) * WORKER_ID_WEIGHTS[i];
+  if (s[17].toUpperCase() !== WORKER_ID_CHECK[sum % 11]) return { ok: false, error: '身份证号校验码错误' };
+  return { ok: true };
+}
+
 module.exports = {
-  aliveFilter, repairUploadName, genId, nowISO, fmtNow, fmtStamp, bjDate, bjStr, BJ_OFFSET_MS, setClockOffset, getClockOffset,
+  aliveFilter, repairUploadName, safeFileName, INLINE_MIME,
+  genId, nowISO, fmtNow, fmtStamp, bjDate, bjStr, BJ_OFFSET_MS, setClockOffset, getClockOffset,
   parseCNDate, parseCSVBuffer, decodeXmlEntities, unzipEntry, listZipEntries, extractDocxText,
-  crc32, buildStoreZip
+  crc32, buildStoreZip, validateWorkerId
 };
