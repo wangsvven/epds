@@ -4,6 +4,30 @@
 const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工', '其他技工（不计入高处作业人员）'];
 const WORKER_CERT_OPTIONS = ['高压电工', '低压电工', '高处', '电力电缆作业', '电气试验', '司索工', '吊车司机', '挖机操作工'];
 
+/* 身份证校验常量与 server/core/util.js 的 WORKER_ID_WEIGHTS / WORKER_ID_CHECK 逐字一致；
+   scripts/smoke.js 有「core 与表单两处逐项相等」断言防漂移。 */
+const WORKER_ID_WEIGHTS = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+const WORKER_ID_CHECK = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
+function workerIdError(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return ''; // 空身份证放行，与后端/导入口径一致
+  if (!/^\d{17}[\dXx]$/.test(s)) return '身份证号需为18位数字，末位可为X';
+  const y = Number(s.slice(6, 10)), mo = Number(s.slice(10, 12)), d = Number(s.slice(12, 14));
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, mo - 1, d);
+  dt.setUTCHours(0, 0, 0, 0);
+  const pad2 = n => String(n).padStart(2, '0');
+  const birthday = y + '-' + pad2(mo) + '-' + pad2(d);
+  const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== mo || dt.getUTCDate() !== d || birthday > today) {
+    return '身份证号出生日期无效';
+  }
+  let sum = 0;
+  for (let i = 0; i < 17; i++) sum += Number(s[i]) * WORKER_ID_WEIGHTS[i];
+  if (s[17].toUpperCase() !== WORKER_ID_CHECK[sum % 11]) return '身份证号校验码错误';
+  return '';
+}
+
 const WorkersPanel = {
   // variant: 'page' = 独立二级页「作业人员与班组」（含卡片头与班组维护）
   //          'tab'  = 用户管理 → 作业人员名单标签（无卡片头、无班组区块，列含身份证号）
@@ -102,7 +126,8 @@ const WorkersPanel = {
     }
     function validate() {
       if (!form.name.trim()) { ElementPlus.ElMessage.error('请填写姓名'); return false; }
-      if (form.idNumber && !/^\d{17}[\dXx]$/.test(form.idNumber)) { ElementPlus.ElMessage.error('身份证号需为18位数字，末位可为X'); return false; }
+      const idErr = workerIdError(form.idNumber);
+      if (idErr) { ElementPlus.ElMessage.error(idErr); return false; }
       if (form.phone && !/^1\d{10}$/.test(form.phone)) { ElementPlus.ElMessage.error('电话号码需为11位手机号'); return false; }
       return true;
     }

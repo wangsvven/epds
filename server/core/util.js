@@ -194,7 +194,8 @@ function buildStoreZip(entries) {
 
 /* 身份证号校验（GB 11643）：格式 / 真实日历出生日期（含闰年）/ MOD 11-2 校验码。
    纯函数，todayStr 由调用方按北京时间传 YYYY-MM-DD，供导入预览与确认两段共用，也便于单测。
-   不校验前 6 位地址码。 */
+   不校验前 6 位地址码。
+   下列两个常量与 public/js/views/users.js 的表单校验逐字一致；scripts/smoke.js 有逐项相等断言防漂移。 */
 const WORKER_ID_WEIGHTS = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
 const WORKER_ID_CHECK = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
 function validateWorkerId(raw, todayStr) {

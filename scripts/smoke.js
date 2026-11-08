@@ -263,7 +263,7 @@ async function listOk(p, token) {
   });
   await step('system', '作业人员 新增 → 详情', async () => {
     const d = needOk(await api('POST', '/api/workers', {
-      token, body: { name: '张三', idNumber: '110101199001011234', phone: '13800138000', role: '技工（计入高处作业人员）', team: '冒烟班组' }
+      token, body: { name: '张三', idNumber: '510301199001010053', phone: '13800138000', role: '技工（计入高处作业人员）', team: '冒烟班组' }
     }), 'workers POST');
     need(d && d.id, '响应缺少 id');
     const one = needOk(await api('GET', '/api/workers/' + d.id, { token }), 'workers detail');
@@ -1573,6 +1573,24 @@ async function listOk(p, token) {
       '前后端 SOURCE_TYPES 不一致：' + JSON.stringify(b) + ' vs ' + JSON.stringify(f));
     need(/smoke\.js/.test(back) && /smoke\.js/.test(front), '两处定义附近应有互指本断言的注释');
     return b.join(' / ');
+  });
+
+  await step('结构', '身份证权重/校验码映射：core 与表单两处逐项相等（防漂移）', async () => {
+    const read = p => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const pick = (src, name, label) => {
+      const m = src.match(new RegExp('const ' + name + ' = \\[([^\\]]*)\\]'));
+      need(!!m, label + ' 未找到 ' + name);
+      return m[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+    };
+    const core = read('server/core/util.js');
+    const view = read('public/js/views/users.js');
+    const a1 = pick(core, 'WORKER_ID_WEIGHTS', 'core'), b1 = pick(view, 'WORKER_ID_WEIGHTS', '表单');
+    const a2 = pick(core, 'WORKER_ID_CHECK', 'core'), b2 = pick(view, 'WORKER_ID_CHECK', '表单');
+    need(a1.length === 17 && a2.length === 11, 'core 常量长度应为 17 / 11，实为 ' + a1.length + ' / ' + a2.length);
+    need(JSON.stringify(a1) === JSON.stringify(b1), 'WORKER_ID_WEIGHTS 两处不一致：' + JSON.stringify(a1) + ' vs ' + JSON.stringify(b1));
+    need(JSON.stringify(a2) === JSON.stringify(b2), 'WORKER_ID_CHECK 两处不一致：' + JSON.stringify(a2) + ' vs ' + JSON.stringify(b2));
+    need(/smoke\.js/.test(core) && /smoke\.js/.test(view), '两处定义附近应有互指本断言的注释');
+    return '权重 17 项 / 映射 11 项逐项相等';
   });
 
   await step('users', '身份证校验纯函数：真实日历/闰年/MOD 11-2 校验码/未来日期/小写 x', async () => {

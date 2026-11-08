@@ -674,6 +674,20 @@ app.delete('/api/settings/login-bg', (req, res) => {
   } catch (e) { res.status(500).json({ error: '删除失败：' + e.message }); }
 });
 
+// 前置校验（仿 routes/borrow.js 先例）：只拦 POST /api/workers 与 PUT /api/workers/:id；
+// 带更多路径段的（/import/preview、/import/confirm 等）一律放行。须晚于本文件导入导出端点、早于通用 CRUD。
+app.use((req, res, next) => {
+  const isCreate = req.method === 'POST' && req.path === '/api/workers';
+  const isUpdate = req.method === 'PUT' && /^\/api\/workers\/[^/]+$/.test(req.path);
+  if (!isCreate && !isUpdate) return next();
+  const b = req.body || {};
+  const idNumber = String(b.idNumber == null ? '' : b.idNumber).trim();
+  if (!idNumber) return next(); // 空身份证放行，与导入「填了才查」口径一致
+  const v = validateWorkerId(idNumber, bjStr().slice(0, 10));
+  if (!v.ok) return res.status(400).json({ error: v.error }); // 错误文案与导入一致
+  next();
+});
+
 // 简单集合（直接 CRUD，须在本文件导入导出端点之后注册）
 ['workers', 'contacts'].forEach(c => {
   crud(c, c, { biz: true, soft: true });
