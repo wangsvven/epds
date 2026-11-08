@@ -1316,7 +1316,7 @@ const PlansView = {
         const res = await fetch('/api/workPlans/import?planType=' + encodeURIComponent(planType), { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') }, body: fd });
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || '导入失败');
-        ElementPlus.ElMessage.success('已导入 ' + d.added + ' 条作业计划');
+        ElementPlus.ElMessage.success('导入 ' + d.added + ' 条作业计划，跳过重复 ' + (d.skipped || 0) + ' 条');
         importDlg.visible = false;
         load();
       } catch (err) { ElementPlus.ElMessage.error(err.message); }
@@ -1568,7 +1568,7 @@ const PlansView = {
 
       <el-dialog title="导入周计划" v-model="importDlg.visible" width="min(560px, 94%)">
         <div class="plan-imp-tip">支持原周报的两行表头格式（.xlsx /.xls），文件不超过 10MB。作业班组须与本企业已有班组名称一致，班组长可不填；先检查整份文件，再逐条新增周计划。</div>
-        <div class="plan-imp-tip">工作负责人和施工人员按原姓名保存；项目不自动匹配，导入后可在「编辑」中关联。导入不会覆盖已有计划；再次导入同一文件会新增另一批计划。</div>
+        <div class="plan-imp-tip">工作负责人和施工人员按原姓名保存；项目不自动匹配，导入后可在「编辑」中关联。导入不会覆盖已有计划；按「计划类型 + 项目 + 计划名称 + 开始日期」判重，重复行自动跳过。</div>
         <div class="plan-imp-acts">
           <el-button size="small" @click="downloadImportTemplate">下载导入模板</el-button>
           <el-button size="small" type="primary" :loading="importDlg.importing" :disabled="importDlg.importing" @click="pickImportFile">选择文件</el-button>

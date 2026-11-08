@@ -1,5 +1,8 @@
 /* ========== routes/plans ========== */
-/* 计划管理：作业计划（导入 / 导出 / 班组长当日计划工作量 / 施工资料图纸）与 plans、borrowWorks、workPlans 集合 CRUD。 */
+/* 计划管理（周计划）：导入 / 导出 / 班组长当日计划工作量 / 施工资料图纸 / 勘察单生成，
+   以及 plans、workPlans 集合通用 CRUD。
+   月计划 xlsx 导出见 routes/monthPlans.js，借工管理见 routes/borrow.js；
+   两者的专用路由都必须注册在通用 CRUD（含 GET /api/workPlans/:id）之前，故在 server.js 中先于本文件加载。 */
 const fs = require('fs');
 const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
@@ -11,11 +14,9 @@ const app = require('../core/app');
 const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
-const { genId, nowISO, bjDate } = require('../core/util');
+const { genId, nowISO, safeFileName, INLINE_MIME } = require('../core/util');
 const { resolveDocPath, resolveSurveyTemplate } = require('../core/doc-templates');
 const { buildSurveyDocx } = require('../core/survey-doc');
-const { buildMonthPlanXlsx } = require('../core/month-plan-xlsx');
-const { buildBorrowDocx } = require('../core/borrow-doc');
 
 const PLAN_QTY_FIELDS = ['wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04'];
 
@@ -162,9 +163,22 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       return res.status(400).json({ error: '导入失败，共 ' + errors.length + ' 处问题：' + errors.slice(0, 5).join('；') + (errors.length > 5 ? '（仅显示前 5 处）' : '') });
     }
     if (!parsed.length) return res.status(400).json({ error: '模板中没有可导入的数据行' });
-    parsed.forEach(p => DB.workPlans.unshift(p));
+    // 判重：planType + project + name + startDate；范围 = 库中同键未删除计划 + 本文件内先出现的行。
+    // 现行导入对话框无逐行勾选能力，命中重复的行一律跳过（不覆盖、不改动已有记录）。
+    const planKey = p => [p.planType, p.project, p.name, p.startDate]
+      .map(x => String(x == null ? '' : x).trim()).join('\u0001');
+    const seenPlans = new Set(DB.workPlans.filter(p => p && !p.deleted).map(planKey));
+    const skippedRows = [];
+    const fresh = [];
+    parsed.forEach(p => {
+      const k = planKey(p);
+      if (seenPlans.has(k)) { skippedRows.push({ project: p.project || '', name: p.name || '' }); return; }
+      seenPlans.add(k);
+      fresh.push(p);
+    });
+    fresh.forEach(p => DB.workPlans.unshift(p));
     saveDB();
-    res.json({ ok: true, added: parsed.length });
+    res.json({ ok: true, added: fresh.length, skipped: skippedRows.length, skippedRows });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 // ---------- 导出：对齐原周报「周计划」文件（48 列 / 两行表头 / 三处分组表头） ----------
@@ -351,16 +365,13 @@ function findPlan(id) {
   if (!p || p.deleted) return null;
   return p;
 }
-function planFileSafeName(name) {
-  return String(name).replace(/[/\\?%*:|"<>\x00-\x1f]/g, '_').slice(-120);
-}
 app.post('/api/workPlans/:id/drawings', upload.single('file'), (req, res) => {
   const p = findPlan(req.params.id);
   if (!p) return res.status(404).json({ error: '未找到计划' });
   if (!req.file) return res.status(400).json({ error: '未收到文件' });
   const dir = path.join(ROOT, 'data', 'uploads', 'plans', p.id);
   fs.mkdirSync(dir, { recursive: true });
-  const diskName = Date.now() + '_' + planFileSafeName(req.file.originalname);
+  const diskName = Date.now() + '_' + safeFileName(req.file.originalname);
   fs.writeFileSync(path.join(dir, diskName), req.file.buffer);
   const item = {
     id: genId('dw'),
@@ -375,12 +386,7 @@ app.post('/api/workPlans/:id/drawings', upload.single('file'), (req, res) => {
   res.json(item);
 });
 // 下载：与 /api/projects/:id/files/:fid/download 同一套（uploads 不做静态托管，只能走接口）
-// ?inline=1 时对 PDF/图片给可预览的 Content-Type，供前端「打开」用
-const DRAWING_INLINE_MIME = {
-  pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
-  gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
-  txt: 'text/plain; charset=utf-8'
-};
+// ?inline=1 时对 PDF/图片给可预览的 Content-Type，供前端「打开」用；MIME 表在 core/util
 app.get('/api/workPlans/:id/drawings/:fileId/download', (req, res) => {
   const p = findPlan(req.params.id);
   // 下载是只读接口：不初始化 drawings（避免 GET 顺手改记录）
@@ -388,7 +394,7 @@ app.get('/api/workPlans/:id/drawings/:fileId/download', (req, res) => {
   const fp = f && path.join(ROOT, 'data', f.path);
   if (!f || !fs.existsSync(fp)) return res.status(404).json({ error: '文件不存在' });
   const ext = String(f.name || '').split('.').pop().toLowerCase();
-  const inline = req.query.inline === '1' && DRAWING_INLINE_MIME[ext];
+  const inline = req.query.inline === '1' && INLINE_MIME[ext];
   res.setHeader('Content-Type', inline || 'application/octet-stream');
   res.setHeader('Content-Disposition', (inline ? 'inline' : 'attachment') + '; filename="' + encodeURIComponent(f.name) + '"');
   fs.createReadStream(fp).pipe(res);
@@ -437,7 +443,7 @@ app.post('/api/workPlans/:id/package', upload.single('file'), (req, res) => {
   const prev = planPackage(p);
   const oldPkg = prev ? { ...prev } : null;
   const dir = path.join(ROOT, 'data', 'uploads', 'plans', p.id);
-  const diskName = Date.now() + '_' + planFileSafeName(name);
+  const diskName = Date.now() + '_' + safeFileName(name);
   const abs = path.join(dir, diskName);
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -641,7 +647,7 @@ app.post('/api/workPlans/:id/survey/generate', (req, res) => {
   const list = planGenerated(p);
   // 已有「现场勘察记录」生成文件 → 原地覆盖（改过内容再点生成，只更新这一份，不产生新单据）
   const prev = list.find(x => x && x.category === GEN_CATEGORY && typeof x.path === 'string' && x.path.startsWith('uploads/plans/'));
-  const rel = prev ? prev.path : ('uploads/plans/' + p.id + '/' + Date.now() + '_' + planFileSafeName(GEN_FILE_NAME));
+  const rel = prev ? prev.path : ('uploads/plans/' + p.id + '/' + Date.now() + '_' + safeFileName(GEN_FILE_NAME));
   const abs2 = path.join(ROOT, 'data', rel);
   let backup = null;                       // 覆盖前的旧内容，写库失败时回滚
   try {
@@ -714,210 +720,11 @@ app.delete('/api/workPlans/:id/generated/:fileId', (req, res) => {
   res.json({ ok: true });
 });
 
-// 月计划导出：按用户提供的「月计划导出模板」生成（主网 / 配网两张子表、20 列、标题+表头+红字说明）。
-// 前端按当前筛选传 ids（顺序即导出行序），不传则导出全部未删除的月计划，按停电时间排序。
-app.get('/api/workPlans/month-plan.xlsx', async (req, res) => {
-  try {
-    const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
-    const all = (DB.workPlans || []).filter(p => p && p.planType === '月计划' && !p.deleted);
-    let rows;
-    if (ids.length) {
-      const map = new Map(all.map(p => [p.id, p]));
-      rows = ids.map(id => map.get(id)).filter(Boolean);
-    } else {
-      rows = all.slice().sort((a, b) => String(a.outageStart || '').localeCompare(String(b.outageStart || '')));
-    }
-    const now = bjDate();
-    const year = Number(req.query.year) || now.getUTCFullYear();
-    const month = Number(req.query.month) || (now.getUTCMonth() + 1);
-    const first = rows.find(r => String(r.opsUnit || '').trim());
-    const company = first ? String(first.opsUnit).trim() : 'XX供电公司';
-    const buf = await buildMonthPlanXlsx(rows, { company, year, month });
-    const fname = company + year + '年' + month + '月检修计划.xlsx';
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="month-plan.xlsx"; filename*=UTF-8\'\'' + encodeURIComponent(fname));
-    res.end(Buffer.from(buf));
-  } catch (e) {
-    res.status(500).json({ error: '导出失败：' + e.message });
-  }
-});
+// 月计划 xlsx 导出 → routes/monthPlans.js；借工管理专用端点 → routes/borrow.js
+// 二者均在 server.js 中先于本文件加载，保证静态路径不被通用 /:id 路由抢先匹配。
 
-// ==================== 借工管理（独立视图）：佐证 / 借工单生成 / 前置校验 ====================
-// borrowWorks 基础增删改查仍走末尾通用 CRUD；以下专用端点与校验须注册在其之前。
-const BORROW_EVIDENCE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
-const BORROW_EVIDENCE_MAX = 5;
-const BORROW_GEN_CATEGORY = '借工单';
-const BORROW_GEN_FILE_NAME = '借工单.docx';
-const BORROW_TEMPLATE_REL = 'assets/借工单模板.docx';
-const BORROW_DIRECTIONS = ['我方借出', '我方借入'];
-const BORROW_PROJECT_TYPES = ['抢险抢修', '运维检修', '运维值班', '相互往来'];
-const BORROW_SIGN_STATUS = ['未签单', '已签单'];
-
-function findBorrow(id) {
-  const b = (DB.borrowWorks || []).find(x => x.id === id);
-  if (!b || b.deleted) return null;
-  return b;
-}
-function borrowEvidences(b) {
-  if (!Array.isArray(b.evidences)) b.evidences = [];
-  return b.evidences;
-}
-function borrowGenerated(b) {
-  if (!Array.isArray(b.generatedFiles)) b.generatedFiles = [];
-  return b.generatedFiles;
-}
-function borrowExt(name) {
-  const n = String(name || '');
-  const i = n.lastIndexOf('.');
-  return i >= 0 ? n.slice(i + 1).toLowerCase() : '';
-}
-
-// 佐证：上传（仅图片，每条记录上限 5，超出 400）
-app.post('/api/borrowWorks/:id/evidences', upload.single('file'), (req, res) => {
-  const b = findBorrow(req.params.id);
-  if (!b) return res.status(404).json({ error: '未找到借工记录' });
-  if (!req.file) return res.status(400).json({ error: '未收到文件' });
-  if (BORROW_EVIDENCE_EXTS.indexOf(borrowExt(req.file.originalname)) < 0) {
-    return res.status(400).json({ error: '仅支持图片（jpg/jpeg/png/gif/webp/bmp）' });
-  }
-  const list = borrowEvidences(b);
-  if (list.length >= BORROW_EVIDENCE_MAX) return res.status(400).json({ error: '佐证最多 ' + BORROW_EVIDENCE_MAX + ' 张，请先删除后再上传' });
-  const dir = path.join(ROOT, 'data', 'uploads', 'borrow', b.id);
-  fs.mkdirSync(dir, { recursive: true });
-  const diskName = Date.now() + '_' + planFileSafeName(req.file.originalname);
-  fs.writeFileSync(path.join(dir, diskName), req.file.buffer);
-  const item = {
-    id: genId('bv'), category: '佐证',
-    name: req.file.originalname, size: req.file.size,
-    path: 'uploads/borrow/' + b.id + '/' + diskName, uploadedAt: nowISO()
-  };
-  list.push(item);
-  saveDB();
-  res.json(item);
-});
-// 佐证下载/预览（?inline=1 图片给可预览 MIME；GET 不改记录）
-app.get('/api/borrowWorks/:id/evidences/:fileId/download', (req, res) => {
-  const b = findBorrow(req.params.id);
-  const f = b && (Array.isArray(b.evidences) ? b.evidences : []).find(x => x.id === req.params.fileId);
-  const fp = f && path.join(ROOT, 'data', f.path);
-  if (!f || !fs.existsSync(fp)) return res.status(404).json({ error: '文件不存在' });
-  const inline = req.query.inline === '1' && DRAWING_INLINE_MIME[borrowExt(f.name)];
-  res.setHeader('Content-Type', inline || 'application/octet-stream');
-  res.setHeader('Content-Disposition', (inline ? 'inline' : 'attachment') + '; filename="' + encodeURIComponent(f.name) + '"');
-  fs.createReadStream(fp).pipe(res);
-});
-// 删除佐证（记录 + 磁盘文件）
-app.delete('/api/borrowWorks/:id/evidences/:fileId', (req, res) => {
-  const b = findBorrow(req.params.id);
-  if (!b) return res.status(404).json({ error: '未找到借工记录' });
-  const list = borrowEvidences(b);
-  const idx = list.findIndex(x => x.id === req.params.fileId);
-  if (idx < 0) return res.status(404).json({ error: '未找到佐证' });
-  const [f] = list.splice(idx, 1);
-  if (f && typeof f.path === 'string' && f.path.startsWith('uploads/borrow/')) {
-    try { fs.unlinkSync(path.join(ROOT, 'data', f.path)); } catch (e) {}
-  }
-  saveDB();
-  res.json({ ok: true });
-});
-
-// 生成借工单：读 assets 模板 → 填充 → 落盘 → generatedFiles 原地覆盖同类别条目
-app.post('/api/borrowWorks/:id/borrowForm/generate', (req, res) => {
-  const b = findBorrow(req.params.id);
-  if (!b) return res.status(404).json({ error: '未找到借工记录' });
-  const tplAbs = path.join(ROOT, BORROW_TEMPLATE_REL);
-  if (!fs.existsSync(tplAbs)) return res.status(400).json({ error: '借工单模板缺失（assets/借工单模板.docx）' });
-  let buf;
-  try {
-    buf = buildBorrowDocx(fs.readFileSync(tplAbs), b).buffer;
-  } catch (e) {
-    return res.status(400).json({ error: '生成失败：' + e.message });
-  }
-  const list = borrowGenerated(b);
-  const prev = list.find(x => x && x.category === BORROW_GEN_CATEGORY && typeof x.path === 'string' && x.path.startsWith('uploads/borrow/'));
-  const rel = prev ? prev.path : ('uploads/borrow/' + b.id + '/' + Date.now() + '_' + planFileSafeName(BORROW_GEN_FILE_NAME));
-  const abs2 = path.join(ROOT, 'data', rel);
-  let backup = null;
-  try {
-    fs.mkdirSync(path.dirname(abs2), { recursive: true });
-    if (prev && fs.existsSync(abs2)) backup = fs.readFileSync(abs2);
-    fs.writeFileSync(abs2, buf);
-  } catch (e) {
-    return res.status(500).json({ error: '保存生成文件失败：' + e.message });
-  }
-  let item;
-  const prevSnapshot = prev ? { name: prev.name, size: prev.size, uploadedAt: prev.uploadedAt } : null;
-  if (prev) {
-    item = prev;
-    item.name = BORROW_GEN_FILE_NAME;
-    item.size = buf.length;
-    item.uploadedAt = nowISO();
-  } else {
-    item = { id: genId('bg'), category: BORROW_GEN_CATEGORY, name: BORROW_GEN_FILE_NAME, size: buf.length, path: rel, uploadedAt: nowISO() };
-    list.push(item);
-  }
-  try {
-    saveDB();
-  } catch (e) {
-    if (prev && prevSnapshot) {
-      prev.name = prevSnapshot.name; prev.size = prevSnapshot.size; prev.uploadedAt = prevSnapshot.uploadedAt;
-      if (backup) { try { fs.writeFileSync(abs2, backup); } catch (e3) {} }
-    } else {
-      const i = list.indexOf(item);
-      if (i > -1) list.splice(i, 1);
-      try { fs.unlinkSync(abs2); } catch (e2) {}
-    }
-    return res.status(500).json({ error: '保存生成记录失败：' + e.message });
-  }
-  res.json(Object.assign({}, item, { updated: !!prev }));
-});
-app.get('/api/borrowWorks/:id/generated/:fileId/download', (req, res) => {
-  const b = findBorrow(req.params.id);
-  const f = b && (Array.isArray(b.generatedFiles) ? b.generatedFiles : []).find(x => x.id === req.params.fileId);
-  const fp = f && path.join(ROOT, 'data', f.path);
-  if (!f || !fs.existsSync(fp)) return res.status(404).json({ error: '文件不存在' });
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(f.name) + '"');
-  fs.createReadStream(fp).pipe(res);
-});
-app.delete('/api/borrowWorks/:id/generated/:fileId', (req, res) => {
-  const b = findBorrow(req.params.id);
-  if (!b) return res.status(404).json({ error: '未找到借工记录' });
-  const list = borrowGenerated(b);
-  const idx = list.findIndex(x => x.id === req.params.fileId);
-  if (idx < 0) return res.status(404).json({ error: '未找到生成资料' });
-  const [f] = list.splice(idx, 1);
-  if (f && typeof f.path === 'string' && f.path.startsWith('uploads/borrow/')) {
-    try { fs.unlinkSync(path.join(ROOT, 'data', f.path)); } catch (e) {}
-  }
-  saveDB();
-  res.json({ ok: true });
-});
-
-// 前置校验：只拦 POST /api/borrowWorks 与 PUT /api/borrowWorks/:id；带更多路径段的（/:id/evidences 等）一律放行
-app.use((req, res, next) => {
-  const isCreate = req.method === 'POST' && req.path === '/api/borrowWorks';
-  const isUpdate = req.method === 'PUT' && /^\/api\/borrowWorks\/[^/]+$/.test(req.path);
-  if (!isCreate && !isUpdate) return next();
-  const b = req.body || {};
-  const errs = [];
-  ['techCount', 'workerCount', 'vehicleCount'].forEach(k => {
-    if (b[k] === undefined || b[k] === null || b[k] === '') return;
-    const n = Number(b[k]);
-    if (!Number.isInteger(n) || n < 0) errs.push(k + ' 须为 ≥0 的整数');
-  });
-  const enumCheck = (k, arr, label) => {
-    if (b[k] === undefined || b[k] === null || b[k] === '') return;
-    if (arr.indexOf(String(b[k])) < 0) errs.push(label + ' 取值非法');
-  };
-  enumCheck('direction', BORROW_DIRECTIONS, '方向');
-  enumCheck('projectType', BORROW_PROJECT_TYPES, '项目类型');
-  enumCheck('signStatus', BORROW_SIGN_STATUS, '签单状态');
-  if (errs.length) return res.status(400).json({ error: errs.join('；') });
-  next();
-});
-
-// 计划相关集合走通用 CRUD（逻辑删除；须晚于上面 /import /export /:id/quantities /:id/drawings /:id/package /:id/survey 注册）
-['plans', 'borrowWorks', 'workPlans'].forEach(c => {
+// 计划相关集合走通用 CRUD（逻辑删除；须晚于本文件所有专用端点注册）
+// borrowWorks 的 CRUD 已移至 routes/borrow.js，月计划 xlsx 导出已移至 routes/monthPlans.js
+['plans', 'workPlans'].forEach(c => {
   crud(c, c, { biz: true, soft: true });
 });
