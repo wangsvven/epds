@@ -182,7 +182,8 @@ app.delete('/api/materialImports/:id', (req, res) => {
 
 
 // ---------- 材料明细（工程材料清单） ----------
-// 来源类型为固定枚举（与原系统一致），新增/编辑/导入均强制校验
+// 来源类型为固定枚举（与原系统一致），新增/编辑/导入均强制校验。
+// 与 public/js/views/materials.js 的同名枚举必须保持一致；scripts/smoke.js 有逐项相等断言防漂移。
 const SOURCE_TYPES = ['ERP采购申请', '甲供材料', '库存调拨', '乙供/自购', '运检项目'];
 
 app.get('/api/materials', (req, res) => res.json(DB.materials.filter(aliveFilter()).map(withGen)));
@@ -334,8 +335,26 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
       return res.status(400).json({ error: '导入失败，共 ' + errors.length + ' 处不一致：' + errors.slice(0, 5).join('；') + (errors.length > 5 ? '（仅显示前 5 处）' : '') });
     }
     if (!parsed.length) return res.status(400).json({ error: '模板中没有可导入的数据行' });
+    // 判重：项目 + 物料编码 + 物料描述 + 单位（材料记录无「规格」字段）。
+    // 范围 = 库中未删除材料 + 本文件内先出现的行；重复行跳过，不覆盖已有材料。
+    const matKey = r => [r.project, r.code, r.description, r.unit]
+      .map(x => String(x == null ? '' : x).trim()).join('\u0001');
+    const seenMats = new Set(DB.materials.filter(m => m && !m.deleted).map(m => matKey({
+      project: m.project, code: m.code, description: m.description, unit: m.unit
+    })));
+    const fresh = [];
+    let skipped = 0;
+    parsed.forEach(r => {
+      const k = matKey(r);
+      if (seenMats.has(k)) { skipped++; return; }
+      seenMats.add(k);
+      fresh.push(r);
+    });
+    if (!fresh.length) {
+      return res.json({ ok: true, added: 0, skipped, batch: '', data: [], note: '全部行均为重复，未生成导入批次' });
+    }
     const batchId = genId('im'); // 先定批次 id，材料上直接写入 importId，保证可整批删除
-    const added = parsed.map(r => {
+    const added = fresh.map(r => {
       const item = {
         id: genId('m'), createdAt: nowISO(), importId: batchId,
         project: r.project, description: r.description,
@@ -349,11 +368,11 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
       return item;
     });
     // 记录导入批次（供「导入批次」页签展示）：项目归属 / 行数（总/匹配/跳过）/ 调整数 / 备注
-    const projects = [...new Set(parsed.map(r => r.project))];
+    const projects = [...new Set(fresh.map(r => r.project))];
     const batch = {
       id: batchId, batch: 'IMP' + Date.now(), fileName: name,
       project: projects.length === 1 ? projects[0] : projects.join('、'),
-      rowsTotal: parsed.length + skippedEmpty, rowsMatched: parsed.length, rowsSkipped: skippedEmpty,
+      rowsTotal: parsed.length + skippedEmpty, rowsMatched: fresh.length, rowsSkipped: skippedEmpty + skipped,
       adjusted: 0, adjustments: [],
       rows: added.length, materialIds: added.map(x => x.id),
       importedBy: req.user.name, importedAt: fmtNow(), status: '成功', remark: '-',
@@ -361,7 +380,7 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
     };
     DB.materialImports.push(batch);
     saveDB();
-    res.json({ ok: true, added: added.length, batch: batch.batch, data: added });
+    res.json({ ok: true, added: added.length, skipped, batch: batch.batch, data: added });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 

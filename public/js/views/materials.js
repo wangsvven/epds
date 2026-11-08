@@ -15,6 +15,7 @@ const MaterialsView = {
     const dialogVisible = ref(false);
     const editingId = ref(null);
     const origQty = ref(0);
+    // 与 server/routes/materials.js 的同名枚举必须保持一致；scripts/smoke.js 有逐项相等断言防漂移。
     const SOURCE_TYPES = ['ERP采购申请', '甲供材料', '库存调拨', '乙供/自购', '运检项目'];
     const sourceColors = { 'ERP采购申请': '#3370ff', '甲供材料': '#7c4dbe', '库存调拨': '#0e9e9e', '乙供/自购': '#d48806', '运检项目': '#389e0d' };
     const statusColors = { '全部到库': '#389e0d', '部分到库': '#e6932c', '未到库': '#f56c6c', '已生成领料单': '#3370ff' };
@@ -243,6 +244,20 @@ const MaterialsView = {
       return staging.value.map(id => rows.find(r => r.id === id)).filter(Boolean);
     });
     const stagedProjects = computed(() => [...new Set(stagingRows.value.map(r => r.project))].length);
+    // 暂存清单「领料总数」：汇总全部暂存行的领料数量（含分页未显示的行），输入框改动即时联动
+    const stagingTotalQty = computed(() => stagingRows.value.reduce((s, r) => s + (Number(stagingQty[r.id]) || 0), 0));
+    // Tab 在数量输入框之间直接切换：跳过「移除」按钮 / 分页 / 底部按钮；末行回到首行，Shift+Tab 反向
+    function onStagingTab(e) {
+      if (e.key !== 'Tab') return;
+      const boxes = Array.from(e.currentTarget.querySelectorAll('.stg-qty-input'));
+      if (!boxes.length) return;
+      const i = boxes.findIndex(b => b === e.target || b.contains(e.target));
+      if (i < 0) return; // 焦点不在数量输入区，保持浏览器默认行为
+      e.preventDefault();
+      const next = e.shiftKey ? (i - 1 + boxes.length) % boxes.length : (i + 1) % boxes.length;
+      const input = boxes[next].querySelector('input');
+      if (input) { input.focus(); input.select(); }
+    }
     function addStaging() {
       let added = 0;
       selection.value.forEach(row => {
@@ -375,7 +390,7 @@ const MaterialsView = {
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || '导入失败');
-          ElementPlus.ElMessage.success('成功导入 ' + data.added + ' 条物料（批次 ' + data.batch + '）');
+          ElementPlus.ElMessage.success(data.added ? ('成功导入 ' + data.added + ' 条物料（批次 ' + data.batch + '），跳过重复 ' + (data.skipped || 0) + ' 条') : ('全部 ' + (data.skipped || 0) + ' 条均为重复，未生成导入批次'));
           load();
         } catch (e) { ElementPlus.ElMessage.error(e.message); }
       };
@@ -384,7 +399,7 @@ const MaterialsView = {
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
       projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
-      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
+      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
   <div>
@@ -590,11 +605,13 @@ const MaterialsView = {
       </div>
 
       <el-dialog :title="'材料暂存清单（' + staging.length + '）'" v-model="stagingVisible" width="920px" top="10vh">
-        <div style="margin-bottom:12px">
+        <div class="stg-chips">
           <span :style="chipStyle('#3370ff')">材料 {{ stagingRows.length }} 条</span>
-          <span :style="chipStyle('#8a5cf6') + 'margin-left:8px'">项目 {{ stagedProjects }} 个</span>
+          <span :style="chipStyle('#8a5cf6')">项目 {{ stagedProjects }} 个</span>
+          <span :style="chipStyle('#0e9e9e')">领料总数 <b>{{ fmtQty(stagingTotalQty) }}</b></span>
         </div>
-        <el-table :data="stagingRows.slice((stagingPage-1)*stagingPageSize, stagingPage*stagingPageSize)" border style="width:100%">
+        <div @keydown="onStagingTab">
+        <el-table :data="stagingRows.slice((stagingPage-1)*stagingPageSize, stagingPage*stagingPageSize)" border style="width:100%" class="stg-table">
           <el-table-column prop="project" label="项目名称" min-width="240" show-overflow-tooltip />
           <el-table-column prop="code" label="物料编码" width="130" />
           <el-table-column prop="description" label="物料描述" min-width="160" />
@@ -602,16 +619,17 @@ const MaterialsView = {
           <el-table-column label="领料数量" width="190">
             <template #default="{row}">
               <el-input-number v-model="stagingQty[row.id]" :min="0" :max="Number(row.qtyCanGen) || 0"
-                controls-position="right" size="small" style="width:120px" placeholder="领料数量" />
+                controls-position="right" size="small" class="stg-qty-input" style="width:120px" placeholder="领料数量" />
               <div style="color:var(--text-3);font-size:12px;line-height:18px;margin-top:2px">可继续领料 {{ fmtQty(row.qtyCanGen) }} {{ row.unit }}（应到 {{ fmtQty(row.qtyRequired) }} / 已生成 {{ fmtQty(row.qtyGenerated) }}）</div>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="80">
             <template #default="{row}">
-              <el-button link type="danger" size="small" @click="removeStaging(row.id)">移除</el-button>
+              <el-button link type="danger" size="small" tabindex="-1" @click="removeStaging(row.id)">移除</el-button>
             </template>
           </el-table-column>
         </el-table>
+        </div>
         <div style="display:flex;justify-content:flex-end;margin-top:12px">
           <el-pagination v-model:current-page="stagingPage" v-model:page-size="stagingPageSize" :total="stagingRows.length"
             :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next" background />
@@ -815,6 +833,8 @@ const Requisitions = {
     // 定版格式 LL-YYYYMMDD-NNN；解析同时接受无 LL- 前缀的历史测试期写法。
     function resetFilters() { filters.project = ''; filters.status = ''; filters.keyword = ''; }
     function sumQty(r) { return r.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); }
+    // 列表「物料描述」列：只取物料名称主体，去掉型号 / 规格，多物料按明细顺序去重
+    function matNames(r) { return window.MatName.list(r.items); }
     function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }
     function statusType(s) { return s === '待入库' ? 'warning' : s === '部分到库' ? 'warning' : s === '已入库' ? 'success' : 'info'; }
 
@@ -935,7 +955,7 @@ const Requisitions = {
     function arrivedSum(rec, materialId) {
       return itemHistory(rec, materialId).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum };
+    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum };
   },
   template: `
   <div>
@@ -992,18 +1012,27 @@ const Requisitions = {
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="reqNo" label="领料单号" width="190" />
-      <el-table-column label="涉及项目" min-width="240" show-overflow-tooltip>
-        <template #default="{row}">{{ row.projects.join('、') }}</template>
+      <el-table-column prop="reqNo" label="领料单号" width="180" />
+      <el-table-column label="涉及项目" min-width="200" class-name="rq-wrapcell">
+        <template #default="{row}">
+          <span v-for="(p, i) in row.projects" :key="i" class="rq-cell-item">{{ p }}</span>
+          <span v-if="!row.projects.length" class="rq-cell-item">—</span>
+        </template>
       </el-table-column>
-      <el-table-column label="明细" width="130">
+      <el-table-column label="物料描述" min-width="160" class-name="rq-wrapcell">
+        <template #default="{row}">
+          <span v-for="(n, i) in matNames(row)" :key="i" class="rq-cell-item">{{ n }}</span>
+          <span v-if="!matNames(row).length" class="rq-cell-item">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="明细" width="110">
         <template #default="{row}">{{ row.items.length }} 项 / {{ sumQty(row) }}</template>
       </el-table-column>
-      <el-table-column prop="createdAt" label="创建时间" width="160" />
-      <el-table-column label="状态" width="100">
+      <el-table-column prop="createdAt" label="创建时间" width="150" />
+      <el-table-column label="状态" width="90">
         <template #default="{row}"><el-tag size="small" :type="statusType(row.status)">{{ row.status }}</el-tag></template>
       </el-table-column>
-      <el-table-column label="操作" width="200">
+      <el-table-column label="操作" width="190">
         <template #default="{row}">
           <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
           <el-button v-if="row.status==='待入库' && canWrite('materials')" link type="primary" size="small" @click="openConfirm(row)">确认入库</el-button>
