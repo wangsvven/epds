@@ -167,7 +167,7 @@ const WorkersPanel = {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '导入失败');
-        ElementPlus.ElMessage.success('成功导入 ' + data.added + ' 名作业人员');
+        ElementPlus.ElMessage.success('成功导入 ' + data.added + ' 名作业人员，跳过重复 ' + (data.skipped || 0) + ' 名');
         load();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }

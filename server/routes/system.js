@@ -189,10 +189,12 @@ app.delete('/api/users/:id', (req, res) => {
 });
 
 // ---------- 作业人员：导入/导出（需在通用 CRUD 之前注册，避免被 GET /:id 拦截） ----------
-// 模板列（按位置）：0 姓名 / 1 身份证号 / 2 电话号码 / 3 身份 / 4 班组 / 5 证件类型 / 6 准入有效期
+// 模板列（按位置）：0 姓名 / 1 身份证号 / 2 电话号码 / 3 身份 / 4 班组 / 5 证件类型 / 6 准入有效期 / 7 状态（可空，老 7 列模板兼容）
 const WORKER_ID_RE = /^\d{17}[\dXx]$/;
 const WORKER_PHONE_RE = /^1\d{10}$/;
 const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工', '其他技工（不计入高处作业人员）'];
+// 作业人员状态合法值（与 public/js/views/users.js 的 togglePending / 状态标签一致）
+const WORKER_STATUS = ['已准入', '待定'];
 
 
 app.post('/api/workers/import', upload.single('file'), (req, res) => {
@@ -217,8 +219,10 @@ app.post('/api/workers/import', upload.single('file'), (req, res) => {
       const team = String(r[4] || '').trim();
       const certTypes = String(r[5] || '').trim();
       const validRaw = String(r[6] || '').trim();
+      const statusRaw = String(r[7] || '').trim();
       if (!name && !idNumber && !phone && !validRaw) return; // 空行
       if (!name) errors.push(`第${i + 1}行：姓名为空`);
+      if (statusRaw && !WORKER_STATUS.includes(statusRaw)) errors.push(`第${i + 1}行：状态「${statusRaw}」无效（仅支持：${WORKER_STATUS.join(' / ')}）`);
       if (idNumber && !WORKER_ID_RE.test(idNumber)) errors.push(`第${i + 1}行：身份证号格式错误（需18位，末位可为X）`);
       if (phone && !WORKER_PHONE_RE.test(phone)) errors.push(`第${i + 1}行：手机号格式错误（需11位手机号）`);
       if (identity && !WORKER_IDENTITY_OPTIONS.includes(identity)) errors.push(`第${i + 1}行：身份选项无效`);
@@ -237,22 +241,37 @@ app.post('/api/workers/import', upload.single('file'), (req, res) => {
       parsed.push({
         name, idNumber, phone, identity, team,
         certTypes: certTypes ? certTypes.split(/[、,，;；\/\s]+/).filter(Boolean) : [],
-        validStart, validEnd
+        validStart, validEnd, status: statusRaw
       });
     });
     if (errors.length) {
       return res.status(400).json({ error: `存在格式错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处错误` : ''}` });
     }
-    const added = parsed.map(p => ({
-      id: genId('w'), createdAt: nowISO(),
-      name: p.name, idNumber: p.idNumber, phone: p.phone,
-      identity: p.identity, team: p.team, certTypes: p.certTypes,
-      validStart: p.validStart, validEnd: p.validEnd, status: '已准入',
-      deleted: false
-    }));
+    // 身份证判重：库中未删除人员 + 本文件内先出现的行；命中则整行跳过，不改动已有记录的任何字段。
+    // 身份证为空的行照现行追加逻辑入库，不参与判重，单独计数。
+    const seenIds = new Set(DB.workers.filter(w => !w.deleted && w.idNumber).map(w => String(w.idNumber).trim().toUpperCase()));
+    const skippedNames = [];
+    let noIdAdded = 0;
+    const added = [];
+    parsed.forEach(p => {
+      const key = p.idNumber ? String(p.idNumber).trim().toUpperCase() : '';
+      if (key) {
+        if (seenIds.has(key)) { skippedNames.push(p.name); return; }
+        seenIds.add(key);
+      } else {
+        noIdAdded++;
+      }
+      added.push({
+        id: genId('w'), createdAt: nowISO(),
+        name: p.name, idNumber: p.idNumber, phone: p.phone,
+        identity: p.identity, team: p.team, certTypes: p.certTypes,
+        validStart: p.validStart, validEnd: p.validEnd, status: p.status || '已准入',
+        deleted: false
+      });
+    });
     DB.workers.push(...added);
     saveDB();
-    res.json({ ok: true, added: added.length });
+    res.json({ ok: true, added: added.length, skipped: skippedNames.length, skippedNames, noIdAdded });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 
