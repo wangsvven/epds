@@ -1675,6 +1675,115 @@ async function listOk(p, token) {
     return '新增1/更新1/无变化1/跳过4 → 勾选疑似新增1 → 再次导入 added=0 updated=0';
   });
 
+  /* ---------- 通讯录导入快照/恢复：常驻回归（增补，step 自带数据与文件清理） ---------- */
+  await step('system', '通讯录快照/恢复：落盘+清单、回滚、可逆、5 份上限、非法参数 400', async () => {
+    const bkDir = path.join(TMP, 'data', 'backups', 'contacts');
+    const SNAP_RE = /^contacts-\d{14}(?:-\d+)?\.json$/;
+    const bkFiles = () => fs.existsSync(bkDir) ? fs.readdirSync(bkDir).filter(n => SNAP_RE.test(n)) : [];
+    const preFiles = bkFiles();                 // step 开始前已有的快照（正常为空）
+    const privateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-smoke-snap-'));
+    const dbPath = path.join(TMP, 'data', 'db.json');
+    const initialContacts = JSON.parse(fs.readFileSync(dbPath, 'utf8')).contacts || [];
+    const alive0 = await listOk('/api/contacts', token);
+    let firstSnap = '';
+
+    // 覆盖式导入是现行快照机制的触发口：优先「员工」sheet，按表头名解析 6 列
+    const rows = [
+      ['部门', '姓名', '职务', '手机', '移动短号', '备注'],
+      ['冒烟部门甲', '冒烟联系人甲', '主任', '13700000001', '6001', '冒烟备注甲'],
+      ['冒烟部门乙', '冒烟联系人乙', '专责', '13700000002', '6002', '冒烟备注乙']
+    ];
+    const wb = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(rows), '员工');
+    const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const doImport = async name => {
+      const fd = new FormData();
+      fd.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name);
+      const r = await fetch(base + '/api/contacts/import', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
+        signal: AbortSignal.timeout(15000)
+      });
+      return { status: r.status, data: await r.json().catch(() => ({})) };
+    };
+    const restore = file => api('POST', '/api/contacts/restore-snapshot', { token, body: { file } });
+    const snaps = () => listOk('/api/contacts/import-snapshots', token);
+    // 上限测试会清掉最早那份，私有副本保证收尾仍能把通讯录还原到 step 开始前
+    const putBackInitial = async () => {
+      if (!firstSnap) return;
+      fs.mkdirSync(bkDir, { recursive: true });
+      const target = path.join(bkDir, firstSnap);
+      // 快照名按秒生成且上限会清理最旧份：同名文件可能已被后续写入复用（内容不再是初始快照），
+      // 所以每次都用 step 私有副本覆盖回去，保证恢复端点读到的一定是导入前数组。
+      fs.copyFileSync(path.join(privateDir, firstSnap), target);
+      needOk(await restore(firstSnap), '收尾还原初始通讯录');
+    };
+
+    try {
+      /* 1. 触发快照：文件落盘 + 清单含该份 + 条数与导入前一致 */
+      const imp = await doImport('contacts-snapshot-smoke.xlsx');
+      need(imp.status === 200 && imp.data.imported === 2, '覆盖式导入失败：' + brief(imp.data));
+      firstSnap = String(imp.data.snapshot || '');
+      need(SNAP_RE.test(firstSnap), '响应应带合法快照文件名：' + brief(imp.data));
+      const snapAbs = path.join(bkDir, firstSnap);
+      need(fs.existsSync(snapAbs), '快照文件未落盘：' + snapAbs);
+      const snapData = JSON.parse(fs.readFileSync(snapAbs, 'utf8'));
+      need(Array.isArray(snapData) && snapData.length === initialContacts.length,
+        '快照应原样保存导入前 ' + initialContacts.length + ' 条（含逻辑删除），实为 ' + (snapData || []).length);
+      fs.copyFileSync(snapAbs, path.join(privateDir, firstSnap));
+      const l1 = await snaps();
+      const hit = l1.find(x => x.file === firstSnap);
+      need(hit && hit.count === initialContacts.length && hit.createdAt,
+        '清单应含该快照且条数/时间正确：' + brief(hit));
+      need(l1.every(x => x.file && x.createdAt && typeof x.count === 'number'), '清单字段应为 file/createdAt/count');
+      need(l1.every((x, i) => !i || l1[i - 1].createdAt >= x.createdAt), '清单应按时间倒序');
+      need((await listOk('/api/contacts', token)).length === 2, '导入后通讯录应为 2 条');
+
+      /* 2. 修改后恢复 → 数据回到快照时状态 */
+      const rs1 = needOk(await restore(firstSnap), '恢复快照');
+      need(rs1.restored === initialContacts.length, '恢复条数应为 ' + initialContacts.length + '：' + brief(rs1));
+      need(JSON.stringify(await listOk('/api/contacts', token)) === JSON.stringify(alive0),
+        '恢复后通讯录应逐字段回到导入前状态');
+
+      /* 3. 恢复本身可逆：恢复前再快照，可再恢复回去 */
+      need(SNAP_RE.test(String(rs1.snapshot || '')) && rs1.snapshot !== firstSnap &&
+        fs.existsSync(path.join(bkDir, rs1.snapshot)), '恢复前应再生成一份新快照：' + brief(rs1));
+      need((await snaps()).some(x => x.file === rs1.snapshot), '清单应含恢复前新快照');
+      needOk(await restore(rs1.snapshot), '再恢复回去');
+      need((await listOk('/api/contacts', token)).length === 2, '再恢复应回到导入后的 2 条');
+
+      /* 4. 份数上限：连续生成超过 5 份后目录与清单都只剩最近 5 份 */
+      for (let i = 0; i < 7; i++) {
+        const r = await doImport('contacts-limit-' + i + '.xlsx');
+        need(r.status === 200, '第 ' + (i + 1) + ' 次上限测试导入失败：' + brief(r.data));
+      }
+      need(bkFiles().length === 5, '快照目录应只保留最近 5 份，实为 ' + bkFiles().length);
+      need((await snaps()).length === 5, '清单端点也应只返回 5 份');
+
+      /* 5. 安全：清单外文件名与路径穿越样式 → 400，且数据不变 */
+      need((await restore('contacts-19990101000000.json')).status === 400, '清单外文件名应 400');
+      need((await restore('../db.json')).status === 400, '路径穿越样式应 400');
+      need((await restore('..%2fcontacts-19990101000000.json')).status === 400, '编码路径穿越样式应 400');
+      need((await listOk('/api/contacts', token)).length === 2, '非法恢复请求不得改动通讯录');
+
+      /* 收尾：走恢复端点把数据还原，不改库结构、不改快照机制 */
+      await putBackInitial();
+      const aliveFinal = await listOk('/api/contacts', token);
+      need(JSON.stringify(aliveFinal) === JSON.stringify(alive0),
+        '收尾应把通讯录还原到 step 开始前状态：' + brief(aliveFinal));
+      return '落盘/清单/回滚/可逆/5 份上限/3 类非法参数 400 + 数据与快照文件清理';
+    } finally {
+      // 成功或失败都尽力还原数据；只删本 step 新增的快照，保留 step 前已有文件
+      try { await putBackInitial(); } catch (e) { /* 不掩盖主体的错误 */ }
+      bkFiles().forEach(f => {
+        if (!preFiles.includes(f)) { try { fs.unlinkSync(path.join(bkDir, f)); } catch (e) { } }
+      });
+      if (!preFiles.length && fs.existsSync(bkDir) && bkFiles().length === 0) {
+        try { fs.rmSync(bkDir, { recursive: true, force: true }); } catch (e) { }
+      }
+      try { fs.rmSync(privateDir, { recursive: true, force: true }); } catch (e) { }
+    }
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
