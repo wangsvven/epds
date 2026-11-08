@@ -291,6 +291,51 @@ app.get('/api/workers/export', (req, res) => {
   res.send(buf);
 });
 
+// ---------- 通讯录导入快照：覆盖式导入前自动留底，可回滚 ----------
+const CONTACT_BACKUP_DIR = path.join(ROOT, 'data', 'backups', 'contacts');
+const CONTACT_BACKUP_MAX = 5;
+const CONTACT_BACKUP_RE = /^contacts-\d{14}(?:-\d+)?\.json$/;
+function contactBackupFiles() {
+  if (!fs.existsSync(CONTACT_BACKUP_DIR)) return [];
+  return fs.readdirSync(CONTACT_BACKUP_DIR)
+    .filter(n => CONTACT_BACKUP_RE.test(n))
+    .map(file => ({ file, mt: fs.statSync(path.join(CONTACT_BACKUP_DIR, file)).mtimeMs }))
+    .sort((a, b) => a.mt - b.mt)
+    .map(x => x.file);
+}
+function pruneContactBackups() {
+  const files = contactBackupFiles();
+  while (files.length > CONTACT_BACKUP_MAX) {
+    const old = files.shift();
+    try { fs.unlinkSync(path.join(CONTACT_BACKUP_DIR, old)); } catch (e) { /* 清理失败不阻断导入 */ }
+  }
+}
+// 原样序列化当前 DB.contacts（含逻辑删除标记）。写盘异常直接抛出，由调用方中止导入。
+function writeContactSnapshot() {
+  fs.mkdirSync(CONTACT_BACKUP_DIR, { recursive: true });
+  const stamp = bjStr(undefined, true).replace(/\D/g, '');
+  let file = 'contacts-' + stamp + '.json';
+  let n = 2;
+  while (fs.existsSync(path.join(CONTACT_BACKUP_DIR, file))) {
+    file = 'contacts-' + stamp + '-' + (n++) + '.json';
+  }
+  fs.writeFileSync(path.join(CONTACT_BACKUP_DIR, file), JSON.stringify(DB.contacts), 'utf8');
+  pruneContactBackups();
+  return file;
+}
+function listContactSnapshots() {
+  return contactBackupFiles().slice().reverse().map(file => {
+    let count = 0;
+    try {
+      const d = JSON.parse(fs.readFileSync(path.join(CONTACT_BACKUP_DIR, file), 'utf8'));
+      count = Array.isArray(d) ? d.length : 0;
+    } catch (e) { /* 损坏文件仍列出，条数为 0 */ }
+    const m = file.match(/^contacts-(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+    const createdAt = m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : '';
+    return { file, createdAt, count };
+  });
+}
+
 // ---------- 外部通讯录：导入/导出（同样须在通用 CRUD 之前注册） ----------
 // 字段：部门 dept / 姓名 name / 职务 post / 手机 phone / 移动短号 shortNo / 备注 remark
 // 兼容旧字段：unit → 部门、remark → 备注
@@ -361,7 +406,8 @@ app.post('/api/contacts/import', upload.single('file'), (req, res) => {
     }
     if (!parsed.length) return res.status(400).json({ error: '未解析到有效联系人（姓名列不能为空）' });
 
-    // 覆盖式导入：整表替换为本次导入的通讯录
+    // 覆盖式导入：整表替换为本次导入的通讯录。先留快照，写盘失败则中止，不得在无快照时替换。
+    const snapshot = writeContactSnapshot();
     const replaced = DB.contacts.filter(c => !c.deleted).length;
     DB.contacts = [];
     const added = parsed.map(p => ({
@@ -371,8 +417,31 @@ app.post('/api/contacts/import', upload.single('file'), (req, res) => {
     }));
     DB.contacts.push(...added);
     saveDB();
-    res.json({ ok: true, imported: added.length, replaced });
+    res.json({ ok: true, imported: added.length, replaced, snapshot });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
+});
+
+// 快照清单（时间倒序）与恢复：file 只取 basename，且必须存在于清单内，拒绝任何路径穿越
+app.get('/api/contacts/import-snapshots', (req, res) => {
+  try { res.json(listContactSnapshots()); }
+  catch (e) { res.status(500).json({ error: '读取快照失败：' + e.message }); }
+});
+app.post('/api/contacts/restore-snapshot', (req, res) => {
+  try {
+    const raw = String((req.body && req.body.file) || '');
+    const file = path.basename(raw);
+    if (!file || file !== raw || !CONTACT_BACKUP_RE.test(file) || !contactBackupFiles().includes(file)) {
+      return res.status(400).json({ error: '快照文件不存在或文件名无效' });
+    }
+    let data;
+    try { data = JSON.parse(fs.readFileSync(path.join(CONTACT_BACKUP_DIR, file), 'utf8')); }
+    catch (e) { return res.status(400).json({ error: '快照文件已损坏：' + e.message }); }
+    if (!Array.isArray(data)) return res.status(400).json({ error: '快照内容格式无效' });
+    const snapshot = writeContactSnapshot(); // 恢复前再留一份，使恢复本身可逆
+    DB.contacts = data;
+    saveDB();
+    res.json({ ok: true, restored: data.length, snapshot });
+  } catch (e) { res.status(500).json({ error: '恢复失败：' + e.message }); }
 });
 
 // ---------- 设置 ----------

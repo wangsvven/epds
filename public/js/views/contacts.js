@@ -9,6 +9,8 @@ const ContactsPanel = {
     const filters = reactive({ dept: '', name: '' });
     const dlg = reactive({ visible: false, editing: false, busy: false, id: '', dept: '', name: '', post: '', phone: '', shortNo: '', remark: '' });
     const fileInput = ref(null);
+    const snapshots = ref([]);
+    const restoreDlg = reactive({ visible: false, busy: false, selected: '' });
 
     const filtered = computed(() => list.value.filter(c => {
       if (filters.dept && !(c.dept || c.unit || '').includes(filters.dept)) return false;
@@ -61,6 +63,11 @@ const ContactsPanel = {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = '';
       if (!file) return;
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          '将以「' + file.name + '」的内容整体替换当前通讯录（当前共 ' + list.value.length + ' 人）。导入前系统会自动保存快照，可在「恢复导入前备份」中还原。是否继续？',
+          '导入并覆盖通讯录', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' });
+      } catch (e) { return; }
       const fd = new FormData(); fd.append('file', file);
       try {
         const res = await fetch('/api/contacts/import', {
@@ -70,8 +77,8 @@ const ContactsPanel = {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '导入失败');
-        ElementPlus.ElMessage.success('导入完成：' + data.imported + ' 位联系人（覆盖原有 ' + (data.replaced || 0) + ' 条）');
-        load();
+        ElementPlus.ElMessage.success('导入完成：' + data.imported + ' 位联系人（覆盖原有 ' + (data.replaced || 0) + ' 条），已保存导入前快照');
+        load(); loadSnapshots();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     function doExport() {
@@ -84,11 +91,38 @@ const ContactsPanel = {
         })
         .catch(e => ElementPlus.ElMessage.error(e.message));
     }
+    async function loadSnapshots() {
+      try { snapshots.value = await api.get('/api/contacts/import-snapshots'); }
+      catch (e) { snapshots.value = []; }
+    }
+    function openRestore() {
+      if (!snapshots.value.length) return;
+      restoreDlg.selected = snapshots.value[0].file;
+      restoreDlg.visible = true;
+    }
+    async function doRestore() {
+      if (!restoreDlg.selected) return;
+      const item = snapshots.value.find(s => s.file === restoreDlg.selected);
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          '确认将通讯录恢复到「' + (item ? item.createdAt : restoreDlg.selected) + '」的快照（' + (item ? item.count : 0) + ' 条）？当前数据会在恢复前自动保存一份快照，可再恢复回来。',
+          '恢复导入前备份', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      restoreDlg.busy = true;
+      try {
+        const r = await api.post('/api/contacts/restore-snapshot', { file: restoreDlg.selected });
+        ElementPlus.ElMessage.success('已恢复 ' + r.restored + ' 条联系人');
+        restoreDlg.visible = false;
+        load(); await loadSnapshots();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { restoreDlg.busy = false; }
+    }
     function deptOf(row) { return row.dept || row.unit || '-'; }
 
-    onMounted(load);
-    return { list, loading, filters, filtered, reset, dlg, fileInput, openAdd, openEdit, submit, remove,
-      triggerImport, onFileChange, doExport, deptOf };
+    onMounted(() => { load(); loadSnapshots(); });
+    return { list, loading, filters, filtered, reset, dlg, fileInput, snapshots, restoreDlg,
+      openAdd, openEdit, submit, remove, triggerImport, onFileChange, doExport, deptOf,
+      loadSnapshots, openRestore, doRestore };
   },
   template: `
   <div>
@@ -96,7 +130,7 @@ const ContactsPanel = {
       <span class="wv-alert-icon">i</span>
       <div class="wv-alert-main">
         <div class="wv-alert-title">配置说明</div>
-        <div class="wv-alert-text">外部通讯录用于维护工作票和施工资料中需要引用的联系人，与登录账号、作业人员名单分开维护。建议至少填写姓名和手机；系统会按姓名匹配联系方式。导入会覆盖现有数据，请先导出备份；导出文件可直接再次导入。</div>
+        <div class="wv-alert-text">外部通讯录用于维护工作票和施工资料中需要引用的联系人，与登录账号、作业人员名单分开维护。建议至少填写姓名和手机；系统会按姓名匹配联系方式。导入会整体替换现有通讯录，系统会在替换前自动保存快照，可在「恢复导入前备份」中还原；导出文件可直接再次导入。</div>
       </div>
     </div>
 
@@ -104,9 +138,10 @@ const ContactsPanel = {
       <el-button v-if="canWrite('users')" type="primary" size="small" @click="openAdd">新增</el-button>
       <el-button v-if="canWrite('users')" size="small" @click="triggerImport">导入</el-button>
       <el-button size="small" :disabled="!list.length" @click="doExport">导出</el-button>
+      <el-button v-if="canWrite('users')" size="small" :disabled="!snapshots.length" @click="openRestore">恢复导入前备份</el-button>
       <input ref="fileInput" type="file" accept=".xls,.xlsx,.csv" style="display:none" @change="onFileChange" />
     </div>
-    <div class="ct-hint-line">支持含「员工」sheet 的 xls/xlsx；标准表头：部门、姓名、职务、手机、移动短号、备注。导入会覆盖现有通讯录，建议先导出备份。</div>
+    <div class="ct-hint-line">支持含「员工」sheet 的 xls/xlsx；标准表头：部门、姓名、职务、手机、移动短号、备注。导入会整体替换现有通讯录，系统会自动保存导入前快照，可随时恢复。</div>
 
     <div class="wv-filters">
       <el-input v-model="filters.dept" placeholder="按部门筛选" clearable style="width:180px" />
@@ -165,6 +200,17 @@ const ContactsPanel = {
       <template #footer>
         <el-button @click="dlg.visible=false">取消</el-button>
         <el-button type="primary" :loading="dlg.busy" @click="submit">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="恢复导入前备份" v-model="restoreDlg.visible" width="min(520px, 94%)">
+      <div style="font-size:13px;color:var(--text-2);margin-bottom:12px">选择一份导入前自动保存的快照，恢复后当前通讯录会被整体替换；系统会在恢复前再保存一份快照，可再恢复回来。</div>
+      <el-radio-group v-model="restoreDlg.selected" style="display:flex;flex-direction:column;gap:10px;align-items:flex-start">
+        <el-radio v-for="s in snapshots" :key="s.file" :label="s.file" :value="s.file">{{ s.createdAt || s.file }} · {{ s.count }} 条</el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button @click="restoreDlg.visible=false">取消</el-button>
+        <el-button type="primary" :loading="restoreDlg.busy" :disabled="!restoreDlg.selected" @click="doRestore">恢复</el-button>
       </template>
     </el-dialog>
   </div>`
