@@ -256,36 +256,147 @@ function workerImportError(errors) {
   return `存在格式错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处错误` : ''}`;
 }
 
-app.post('/api/workers/import', upload.single('file'), (req, res) => {
+// ---------- 作业人员导入：两段式（预览 → 确认）+ 有值更新 ----------
+// 可更新字段：电话 / 身份 / 班组 / 证件类型 / 准入有效期（起止）/ 状态；姓名与身份证号永不更新。
+// 空值不覆盖：文件单元格为空（含纯空白）保留库内值；非空才比较并替换。
+function workerUpdatePlan(p, existing) {
+  const next = {};
+  const diffs = [];
+  const put = (key, label, fileVal, dbVal) => {
+    if (fileVal === '' || fileVal === null || fileVal === undefined) return;
+    const a = String(dbVal == null ? '' : dbVal);
+    const b = String(fileVal);
+    if (a !== b) diffs.push({ field: label, old: a, next: b });
+    next[key] = fileVal;
+  };
+  put('phone', '电话号码', p.phone, existing.phone);
+  put('identity', '身份', p.identity, existing.identity);
+  put('team', '班组', p.team, existing.team);
+  const certText = (p.certTypes || []).join('、');
+  if (certText) {
+    const dbText = (existing.certTypes || []).join('、');
+    if (dbText !== certText) diffs.push({ field: '证件类型', old: dbText, next: certText });
+    next.certTypes = p.certTypes; // 非空时整体替换列表
+  }
+  if (p.validStart) {
+    // 有效期非空时起止一并替换
+    const dbText = (existing.validStart || '') + (existing.validEnd && existing.validEnd !== existing.validStart ? ' - ' + existing.validEnd : '');
+    const fileText = p.validStart + (p.validEnd && p.validEnd !== p.validStart ? ' - ' + p.validEnd : '');
+    if (dbText !== fileText) diffs.push({ field: '准入有效期', old: dbText, next: fileText });
+    next.validStart = p.validStart;
+    next.validEnd = p.validEnd;
+  }
+  put('status', '状态', p.status, existing.status || '已准入'); // 更新时状态为空保留库内，默认已准入只用于新增
+  return { diffs, next };
+}
+
+const WORKER_IMPORT_KINDS = ['新增', '更新', '无变化', '疑似重复', '冲突', '文件内重复'];
+const NAME_PHONE_SEP = String.fromCharCode(1);
+function classifyWorkerRows(parsed) {
+  const alive = DB.workers.filter(w => w && !w.deleted);
+  const byId = new Map();
+  alive.forEach(w => {
+    const k = String(w.idNumber || '').trim().toUpperCase();
+    if (k && !byId.has(k)) byId.set(k, w);
+  });
+  const namePhone = new Set(alive.filter(w => w && w.phone)
+    .map(w => String(w.name || '').trim() + NAME_PHONE_SEP + String(w.phone || '').trim()));
+  const seenIds = new Set(), seenNoIds = new Set();
+  const rows = parsed.map(p => {
+    const key = String(p.idNumber || '').trim().toUpperCase();
+    const row = {
+      rowNo: p.rowNo, name: p.name, idNumber: p.idNumber, phone: p.phone, kind: '',
+      fields: { identity: p.identity, team: p.team, certTypes: p.certTypes,
+        validStart: p.validStart, validEnd: p.validEnd, status: p.status },
+      diffs: [], reason: '', existingId: '', next: null, parsed: p
+    };
+    if (key) {
+      if (seenIds.has(key)) { row.kind = '文件内重复'; row.reason = '本文件已有相同身份证号的行，仅首行生效'; }
+      else {
+        seenIds.add(key);
+        const ex = byId.get(key);
+        if (!ex) row.kind = '新增';
+        else {
+          row.existingId = ex.id;
+          if (String(p.name).trim() !== String(ex.name || '').trim()) {
+            row.kind = '冲突'; row.reason = '身份证号已存在但姓名不一致（同号异名）';
+          } else {
+            const plan = workerUpdatePlan(p, ex);
+            row.diffs = plan.diffs; row.next = plan.next;
+            row.kind = plan.diffs.length ? '更新' : '无变化';
+            if (!plan.diffs.length) row.reason = '各字段与库内一致';
+          }
+        }
+      }
+    } else {
+      const np = String(p.name).trim() + NAME_PHONE_SEP + String(p.phone).trim();
+      if (seenNoIds.has(np)) { row.kind = '文件内重复'; row.reason = '本文件已有同名同电话且无身份证号的行，仅首行生效'; }
+      else {
+        seenNoIds.add(np);
+        if (p.phone && namePhone.has(np)) { row.kind = '疑似重复'; row.reason = '库内存在同名同电话人员，需勾选后才导入'; }
+        else row.kind = '新增';
+      }
+    }
+    return row;
+  });
+  const summary = {};
+  WORKER_IMPORT_KINDS.forEach(k => { summary[k] = rows.filter(r => r.kind === k).length; });
+  return { rows, summary };
+}
+function workerNewRecord(p) {
+  return {
+    id: genId('w'), createdAt: nowISO(),
+    name: p.name, idNumber: p.idNumber, phone: p.phone,
+    identity: p.identity, team: p.team, certTypes: p.certTypes,
+    validStart: p.validStart, validEnd: p.validEnd, status: p.status || '已准入',
+    deleted: false
+  };
+}
+function workerPublicRow(r) {
+  const { rowNo, kind, name, idNumber, phone, fields, diffs, reason } = r;
+  return { rowNo, kind, name, idNumber, phone, fields, diffs, reason };
+}
+
+// 预览：解析 + 整批校验 + 逐行分类，不写库；错误全量返回且不返回可确认数据。
+app.post('/api/workers/import/preview', upload.single('file'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '未收到文件' });
     const { errors, parsed } = parseWorkerFile(req.file, bjStr().slice(0, 10));
-    if (errors.length) return res.status(400).json({ error: workerImportError(errors) });
-    // 身份证判重：库中未删除人员 + 本文件内先出现的行；命中则整行跳过，不改动已有记录的任何字段。
-    // 身份证为空的行照现行追加逻辑入库，不参与判重，单独计数。
-    const seenIds = new Set(DB.workers.filter(w => !w.deleted && w.idNumber).map(w => String(w.idNumber).trim().toUpperCase()));
-    const skippedNames = [];
-    let noIdAdded = 0;
-    const added = [];
-    parsed.forEach(p => {
-      const key = p.idNumber ? String(p.idNumber).trim().toUpperCase() : '';
-      if (key) {
-        if (seenIds.has(key)) { skippedNames.push(p.name); return; }
-        seenIds.add(key);
+    if (errors.length) return res.status(400).json({ error: workerImportError(errors), errors });
+    const { rows, summary } = classifyWorkerRows(parsed);
+    res.json({ ok: true, rows: rows.map(workerPublicRow), summary });
+  } catch (e) { res.status(500).json({ error: '预览失败：' + e.message }); }
+});
+
+// 确认：重传同一文件 + 疑似行决策（行号数组），以确认时刻库状态重新解析分类后落库。
+app.post('/api/workers/import/confirm', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    let decisions = [];
+    try {
+      const d = JSON.parse(String((req.body && req.body.decisions) || '[]'));
+      if (Array.isArray(d)) decisions = d.map(Number);
+    } catch (e) { decisions = []; }
+    const { errors, parsed } = parseWorkerFile(req.file, bjStr().slice(0, 10));
+    if (errors.length) return res.status(400).json({ error: workerImportError(errors), errors });
+    const { rows } = classifyWorkerRows(parsed);
+    let added = 0, updated = 0, unchanged = 0, skipped = 0;
+    rows.forEach(r => {
+      if (r.kind === '新增' || (r.kind === '疑似重复' && decisions.includes(r.rowNo))) {
+        DB.workers.push(workerNewRecord(r.parsed));
+        added++;
+      } else if (r.kind === '更新') {
+        const w = DB.workers.find(x => x.id === r.existingId && !x.deleted);
+        if (!w) { skipped++; return; }
+        Object.assign(w, r.next);
+        updated++;
       } else {
-        noIdAdded++;
+        if (r.kind === '无变化') unchanged++;
+        skipped++;
       }
-      added.push({
-        id: genId('w'), createdAt: nowISO(),
-        name: p.name, idNumber: p.idNumber, phone: p.phone,
-        identity: p.identity, team: p.team, certTypes: p.certTypes,
-        validStart: p.validStart, validEnd: p.validEnd, status: p.status || '已准入',
-        deleted: false
-      });
     });
-    DB.workers.push(...added);
     saveDB();
-    res.json({ ok: true, added: added.length, skipped: skippedNames.length, skippedNames, noIdAdded });
+    res.json({ ok: true, added, updated, unchanged, skipped });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 

@@ -1591,6 +1591,72 @@ async function listOk(p, token) {
     return '合法/校验码错/2月30日/未来日期/小写x/闰年/平年 7 个样本';
   });
 
+  const WID = { A: '510301199001010010', B: '510301199001010029', C: '510301199001010037', D: '510301199001010045' };
+  let workerMixBuf = null;
+  let workerSuspectNo = null;
+  const workerUpload = async (path, decisions) => {
+    const fd = new FormData();
+    fd.append('file', new Blob([workerMixBuf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'mix.xlsx');
+    if (decisions) fd.append('decisions', JSON.stringify(decisions));
+    const r = await fetch(base + path, { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd });
+    return { status: r.status, data: await r.json().catch(() => ({})) };
+  };
+
+  await step('users', '作业人员导入预览：六类分类 + 字段级差异，不写库', async () => {
+    const mk = async (name, idNumber, phone, extra) => needOk(await api('POST', '/api/workers', {
+      token, body: { name, idNumber, phone, ...(extra || {}) }
+    }), 'worker POST');
+    await mk('冒烟甲', WID.A, '13800000001', { identity: '民工', team: '一队', status: '待定' });
+    await mk('冒烟乙', WID.B, '13800000002');
+    await mk('冒烟丁', WID.D, '13800000004');
+    await mk('冒烟无证', '', '13800000003');
+    const before = needOk(await api('GET', '/api/workers', { token }), 'workers before');
+    const rows = [
+      ['姓名', '身份证号', '电话号码', '身份', '班组', '证件类型', '准入有效期', '状态'],
+      ['冒烟新人', WID.C, '13800000011', '', '', '', '', ''],
+      ['冒烟甲', WID.A, '13900000001', '', '', '', '', ''],
+      ['冒烟乙', WID.B, '13800000002', '', '', '', '', ''],
+      ['冒烟无证', '', '13800000003', '', '', '', '', ''],
+      ['冒烟异名', WID.D, '13800000004', '', '', '', '', ''],
+      ['冒烟新人复', WID.C, '13800000011', '', '', '', '', '']
+    ];
+    const wb = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(rows), '作业人员名单');
+    workerMixBuf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const pv = await workerUpload('/api/workers/import/preview');
+    need(pv.status === 200 && pv.data && pv.data.ok, '预览失败：' + brief(pv.data));
+    const s = pv.data.summary || {};
+    need(['新增', '更新', '无变化', '疑似重复', '冲突', '文件内重复'].every(k => s[k] === 1),
+      '六类应各 1 条：' + brief(s));
+    const upd = (pv.data.rows || []).find(r => r.kind === '更新');
+    need(upd && Array.isArray(upd.diffs) && upd.diffs.length === 1 && upd.diffs[0].field === '电话号码',
+      '更新行差异应只含电话号码：' + brief(upd && upd.diffs));
+    workerSuspectNo = (pv.data.rows || []).find(r => r.kind === '疑似重复').rowNo;
+    const after = needOk(await api('GET', '/api/workers', { token }), 'workers after');
+    need(after.length === before.length, '预览不得写库：' + before.length + ' → ' + after.length);
+    return '六类各 1 / 更新差异只含电话号码 / 预览不写库 / 疑似行号 ' + workerSuspectNo;
+  });
+
+  await step('users', '作业人员导入确认：有值更新 / 疑似决策 / 重复导入幂等', async () => {
+    const first = await workerUpload('/api/workers/import/confirm', []);
+    need(first.status === 200 && first.data.added === 1 && first.data.updated === 1 &&
+      first.data.unchanged === 1 && first.data.skipped === 4,
+      '首次确认计数不符：' + brief(first.data));
+    const list1 = needOk(await api('GET', '/api/workers', { token }), 'workers 1');
+    const a1 = list1.find(w => w.idNumber === WID.A);
+    need(a1 && a1.phone === '13900000001' && a1.status === '待定',
+      '有值更新应只改电话、状态留空保持待定：' + brief(a1 && { phone: a1.phone, status: a1.status }));
+    need(list1.filter(w => w.name === '冒烟无证').length === 1,
+      '疑似行未勾选时不应新增同名无证件人员');
+    const second = await workerUpload('/api/workers/import/confirm', [workerSuspectNo]);
+    need(second.status === 200 && second.data.added === 1 && second.data.updated === 0,
+      '勾选疑似行后应新增 1 条：' + brief(second.data));
+    const third = await workerUpload('/api/workers/import/confirm', []);
+    need(third.status === 200 && third.data.added === 0 && third.data.updated === 0,
+      '同一文件第三次导入应全为无变化/跳过：' + brief(third.data));
+    return '新增1/更新1/无变化1/跳过4 → 勾选疑似新增1 → 再次导入 added=0 updated=0';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;

@@ -153,28 +153,69 @@ const WorkersPanel = {
         })
         .catch(e => ElementPlus.ElMessage.error(e.message));
     }
+    const imp = reactive({ visible: false, busy: false, file: null, rows: [], summary: {}, errors: [], decisions: [] });
+    function impKindType(k) {
+      return { '新增': 'success', '更新': 'warning', '无变化': 'info', '疑似重复': 'warning', '冲突': 'danger', '文件内重复': 'info' }[k] || 'info';
+    }
     function triggerImport() { if (fileInput.value) fileInput.value.click(); }
     async function onFileChange(ev) {
       const file = ev.target.files && ev.target.files[0];
       ev.target.value = '';
       if (!file) return;
-      const fd = new FormData(); fd.append('file', file);
+      imp.file = file;
+      imp.rows = []; imp.summary = {}; imp.errors = []; imp.decisions = [];
+      imp.visible = true; imp.busy = true;
       try {
-        const res = await fetch('/api/workers/import', {
+        const fd = new FormData(); fd.append('file', file);
+        const res = await fetch('/api/workers/import/preview', {
           method: 'POST',
           headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') },
           body: fd
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '导入失败');
-        ElementPlus.ElMessage.success('成功导入 ' + data.added + ' 名作业人员，跳过重复 ' + (data.skipped || 0) + ' 名');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          imp.errors = Array.isArray(data.errors) && data.errors.length ? data.errors : [data.error || '预览失败'];
+          return;
+        }
+        imp.rows = data.rows || [];
+        imp.summary = data.summary || {};
+      } catch (e) { imp.errors = [e.message || '预览失败']; }
+      finally { imp.busy = false; }
+    }
+    function toggleImpDecision(rowNo, checked) {
+      const i = imp.decisions.indexOf(rowNo);
+      if (checked && i < 0) imp.decisions.push(rowNo);
+      if (!checked && i >= 0) imp.decisions.splice(i, 1);
+    }
+    async function confirmImport() {
+      if (!imp.file || imp.busy) return;
+      imp.busy = true;
+      try {
+        const fd = new FormData();
+        fd.append('file', imp.file);
+        fd.append('decisions', JSON.stringify(imp.decisions));
+        const res = await fetch('/api/workers/import/confirm', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') },
+          body: fd
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          imp.errors = Array.isArray(data.errors) && data.errors.length ? data.errors : [data.error || '导入失败'];
+          imp.rows = []; imp.summary = {};
+          return;
+        }
+        ElementPlus.ElMessage.success('新增 ' + (data.added || 0) + ' 人、更新 ' + (data.updated || 0) + ' 人、跳过 ' + (data.skipped || 0) + ' 人');
+        imp.visible = false;
         load();
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) { ElementPlus.ElMessage.error(e.message || '导入失败'); }
+      finally { imp.busy = false; }
     }
 
     onMounted(load);
     return { isTab, list, teams, sortedTeams, loading, filters, page, pageSize, filtered, paged, resetFilters, dialogVisible, editing, form, fileInput,
       openAdd, openEdit, submit, togglePending, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
+      imp, impKindType, toggleImpDecision, confirmImport,
       teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
       fmtValid, fmtCerts, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
   },
@@ -368,6 +409,40 @@ const WorkersPanel = {
       <template #footer>
         <el-button @click="teamDlg.visible=false">取消</el-button>
         <el-button type="primary" :loading="teamDlg.busy" @click="saveTeam">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="导入作业人员（预览确认）" v-model="imp.visible" width="min(900px, 96%)" top="6vh">
+      <div v-if="imp.errors.length" style="color:var(--danger);line-height:1.8">
+        <div style="font-weight:600;margin-bottom:8px">文件存在错误，请修改后重新选择文件：</div>
+        <div v-for="(e,i) in imp.errors" :key="i">{{ e }}</div>
+      </div>
+      <template v-else>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+          <span v-for="(n,k) in imp.summary" :key="k" style="font-size:12.5px;color:var(--text-2)">{{ k }} {{ n }}</span>
+        </div>
+        <el-table :data="imp.rows" border size="small" max-height="380" empty-text="没有可导入的数据行">
+          <el-table-column prop="rowNo" label="行" width="56" />
+          <el-table-column prop="name" label="姓名" min-width="110" />
+          <el-table-column prop="idNumber" label="身份证号" min-width="180" />
+          <el-table-column label="分类" width="150">
+            <template #default="{row}">
+              <el-tag size="small" :type="impKindType(row.kind)">{{ row.kind }}</el-tag>
+              <el-checkbox v-if="row.kind==='疑似重复'" :model-value="imp.decisions.includes(row.rowNo)"
+                @change="v=>toggleImpDecision(row.rowNo, v)" style="margin-left:6px">导入</el-checkbox>
+            </template>
+          </el-table-column>
+          <el-table-column label="差异 / 原因" min-width="240">
+            <template #default="{row}">
+              <div v-for="(d,i) in row.diffs" :key="i" style="font-size:12.5px;line-height:1.7">{{ d.field }}：{{ d.old || '空' }} → {{ d.next || '空' }}</div>
+              <span v-if="!row.diffs.length" style="font-size:12.5px;color:var(--text-3)">{{ row.reason || '-' }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <template #footer>
+        <el-button @click="imp.visible=false">取消</el-button>
+        <el-button v-if="!imp.errors.length" type="primary" :loading="imp.busy" :disabled="imp.busy || !imp.rows.length" @click="confirmImport">确认导入</el-button>
       </template>
     </el-dialog>
   </div>`
