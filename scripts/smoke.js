@@ -2136,6 +2136,24 @@ async function listOk(p, token) {
     return '退场写入 / 恢复清空 / 派生不可选 / 导入枚举对齐 / 存量无字段不报错';
   });
 
+  await step('结构', '首页工作动态：来源模块加载顺序 + 五色标签 + 卡片形态静态断言', async () => {
+    const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+    const dash = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'dashboard.js'), 'utf8');
+    const iU = html.indexOf('<script src="/js/utils.js"></script>');
+    const iF = html.indexOf('<script src="/js/work-feed.js"></script>');
+    const iD = html.indexOf('<script src="/js/views/dashboard.js"></script>');
+    need(iU > -1 && iF > iU && iD > iF, 'work-feed.js 必须在 utils 之后、dashboard 之前加载');
+    ['alert', 'person', 'material', 'plan', 'borrow'].forEach(function (k) {
+      need(html.includes('.fd-tag-' + k + ' {'), '缺少五色标签样式 .fd-tag-' + k);
+      need(html.includes('html.dark .fd-tag-' + k + ' {'), '缺少深色模式样式 .fd-tag-' + k);
+    });
+    need(html.includes('max-height: 186px') && html.includes('max-height: 176px'), '一屏 5 条（桌面 / 移动端）滚动高度');
+    need(html.includes('flex: 0 0 33.3333%'), '卡片应保持约 1/3 宽');
+    need(dash.includes('工作动态') && dash.includes('暂无工作动态') && dash.includes('WorkFeed.build'), '标题 / 空态 / 聚合入口');
+    need(!dash.includes('__pendingFocusWorker = {'), '预警点击不得再直开编辑弹窗');
+    return '脚本顺序 / 五色浅深两套 / 5 条滚动 / 1/3 宽 / 标题空态 / 点击口径';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;

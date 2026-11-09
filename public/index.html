@@ -1542,7 +1542,7 @@
   .wk-empty { color: var(--text-3); }
   .wk-table .wk-acts-cell .cell { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .wk-table .wk-acts-cell .el-button { margin-left: 0; }
-  /* 首页：准入到期预警小白板（约 1/3 宽，一屏 5 条可滚动） */
+  /* 首页：「工作动态」小白板（约 1/3 宽，一屏 5 条可滚动） */
   .wk-board-row { margin-top: 16px; display: flex; align-items: flex-start; }
   .wk-alert-card { flex: 0 0 33.3333%; max-width: 33.3333%; padding: 16px 16px 14px; }
   .wk-alert-head { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 8px; }
@@ -1552,14 +1552,27 @@
   .wk-alert-list::-webkit-scrollbar { width: 6px; }
   .wk-alert-list::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
   .wk-alert-list::-webkit-scrollbar-track { background: transparent; }
-  .wk-alert-item { flex: 0 0 auto; box-sizing: border-box; height: 34px; display: flex; align-items: center; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .wk-alert-item { flex: 0 0 auto; box-sizing: border-box; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-size: 13px; background: var(--surface); }
   .wk-alert-item:hover { border-color: var(--line-strong); background: var(--hover); }
-  .wk-alert-line { display: block; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-1); font-variant-numeric: tabular-nums; }
+  .fd-tag { flex: 0 0 auto; box-sizing: border-box; height: 20px; line-height: 18px; padding: 0 6px; border: 1px solid; border-radius: 3px; font-size: 11.5px; white-space: nowrap; }
+  .fd-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-1); font-variant-numeric: tabular-nums; }
+  /* 中国传统色五色淡版：极淡底 + 同色系深一号字 + 同色系细边 */
+  .fd-tag-alert { background: #fbedf0; color: #a23e59; border-color: #eac9d2; }     /* 胭脂 */
+  .fd-tag-person { background: #eaf5f7; color: #2f7285; border-color: #c8e1e7; }    /* 天青 */
+  .fd-tag-material { background: #fdf6e4; color: #8a6a20; border-color: #ecdcaf; }  /* 藤黄 */
+  .fd-tag-plan { background: #f2edfa; color: #6b50a0; border-color: #dcd0ee; }      /* 雪青 */
+  .fd-tag-borrow { background: #edf6e8; color: #4a7a3a; border-color: #d3e6c8; }    /* 豆绿 */
+  html.dark .fd-tag-alert { background: #3a262d; color: #e6a8ba; border-color: #563944; }
+  html.dark .fd-tag-person { background: #22353a; color: #90cadb; border-color: #34525a; }
+  html.dark .fd-tag-material { background: #3a3422; color: #dec47b; border-color: #574e30; }
+  html.dark .fd-tag-plan { background: #2e2840; color: #bca6e3; border-color: #463d61; }
+  html.dark .fd-tag-borrow { background: #263425; color: #9dca8b; border-color: #385039; }
   @media (max-width: 768px) {
     .wk-board-row { display: block; }
     .wk-alert-card { flex: none; max-width: none; width: 100%; padding: 12px; }
     .wk-alert-list { max-height: 176px; }
     .wk-alert-item { height: 32px; padding: 0 8px; gap: 6px; }
+    .fd-tag { padding: 0 4px; font-size: 11px; }
   }
 </style>
   <!--LOGIN_BG-->
@@ -1607,6 +1620,7 @@
   <script src="/js/api.js"></script>
   <script src="/js/server-time.js"></script>
   <script src="/js/utils.js"></script>
+  <script src="/js/work-feed.js"></script>
   <script src="/js/arrival-calc.js"></script>
   <script src="/js/plan-no.js"></script>
   <script src="/js/auth.js"></script>

@@ -1,38 +1,53 @@
 /* ========== views/dashboard ========== */
-/* 首页仪表盘 Dashboard。 */
+/* 首页仪表盘 Dashboard：统计卡 + 「工作动态」小白板（多来源派生、现算不落库）。 */
 /* ---------------- 首页仪表盘 ---------------- */
 const Dashboard = {
   setup() {
     const stats = reactive({ projects: 0, materials: 0, requisitions: 0, documents: 0, borrow: 0 });
     const me = ref({});
-    const alerts = ref([]);
+    const messages = ref([]);
+    const alertCount = ref(0);
     async function load() {
+      let mats = [];
       try {
         const [p, m, r, d, b] = await Promise.all([
           api.get('/api/projects'), api.get('/api/materials'), api.get('/api/materialRequisitions'),
           api.get('/api/documents'), api.get('/api/borrowWorks')
         ]);
-        stats.projects = p.length; stats.materials = m.length; stats.requisitions = r.length;
+        mats = Array.isArray(m) ? m : [];
+        stats.projects = p.length; stats.materials = mats.length; stats.requisitions = r.length;
         stats.documents = d.files.length; stats.borrow = b.length;
       } catch (e) {}
       try { me.value = (await api.get('/api/me')).user; } catch (e) {}
-      // 准入到期预警：全部由作业人员现有数据派生，不新建集合/字段，超期在前、其余按到期日升序
+      // 工作动态：五类来源各自只读自己模块的现有接口，聚合与排序交给 WorkFeed 纯函数
       try {
-        const w = await api.get('/api/workers');
-        const arr = Array.isArray(w) ? w : (w.data || []);
-        alerts.value = WorkerStatus.alerts(arr, ServerTime.ymd());
-      } catch (e) { alerts.value = []; }
+        const [w, ims, plans, borrow] = await Promise.all([
+          api.get('/api/workers'), api.get('/api/materialImports'),
+          api.get('/api/workPlans'), api.get('/api/borrowWorks')
+        ]);
+        const workers = Array.isArray(w) ? w : (w.data || []);
+        const today = ServerTime.ymd();
+        const alerts = window.WorkerStatus.alerts(workers, today);
+        const feed = window.WorkFeed.build({
+          workers, alerts, today,
+          imports: Array.isArray(ims) ? ims : [],
+          materials: mats,
+          plans: Array.isArray(plans) ? plans : [],
+          borrow: Array.isArray(borrow) ? borrow : []
+        });
+        messages.value = feed.messages;
+        alertCount.value = feed.alertCount;
+      } catch (e) { messages.value = []; alertCount.value = 0; }
     }
-    function alertLine(a) {
-      return a.name + '（' + (a.team || '未分组') + '）· ' + a.validEnd;
-    }
-    function focusWorker(a) {
-      window.__pendingUsersTab = 'workers';
-      window.__pendingFocusWorker = { id: a.id, name: a.name };
-      window.dispatchEvent(new CustomEvent('nav-to', { detail: 'users' }));
+    // 点击只导航到对应模块列表页；预警/人员动态落到「用户管理 · 作业人员名单」，
+    // 并显式清掉上一批的 __pendingFocusWorker，确保不再直开某人的编辑弹窗。
+    function goTo(m) {
+      window.__pendingUsersTab = m.usersTab || '';
+      window.__pendingFocusWorker = null;
+      window.dispatchEvent(new CustomEvent('nav-to', { detail: m.nav }));
     }
     onMounted(load);
-    return { stats, me, alerts, alertLine, focusWorker };
+    return { stats, me, messages, alertCount, goTo };
   },
   template: `
   <div>
@@ -47,11 +62,12 @@ const Dashboard = {
 
     <div class="wk-board-row">
       <div class="stat-card wk-alert-card">
-        <div class="wk-alert-head">准入到期预警<span class="wk-alert-count">{{ alerts.length }}</span></div>
-        <div v-if="!alerts.length" class="wk-alert-empty">暂无准入到期预警</div>
+        <div class="wk-alert-head">工作动态<span v-if="alertCount" class="wk-alert-count">{{ alertCount }}</span></div>
+        <div v-if="!messages.length" class="wk-alert-empty">暂无工作动态</div>
         <div v-else class="wk-alert-list">
-          <div v-for="a in alerts" :key="a.id" class="wk-alert-item" :title="alertLine(a)" @click="focusWorker(a)">
-            <span class="wk-alert-line">{{ alertLine(a) }}</span>
+          <div v-for="(m,i) in messages" :key="i" class="wk-alert-item" :title="m.text" @click="goTo(m)">
+            <span class="fd-tag" :class="'fd-tag-' + m.kind">{{ m.label }}</span>
+            <span class="fd-text">{{ m.text }}</span>
           </div>
         </div>
       </div>
