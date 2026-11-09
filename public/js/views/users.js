@@ -2,6 +2,8 @@
 /* 用户管理相关视图：作业人员名单 WorkersPanel / WorkersView、账号 AccountsPanel、用户管理 UsersView 及其枚举常量。 */
 /* 用户管理 — 标签页2：作业人员名单（对齐原系统截图） */
 const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工', '其他技工（不计入高处作业人员）'];
+// 状态筛选项：只作下拉显示，判定一律走 wst(row).derived（WorkerStatus 派生），不在此定义状态语义。
+const WORKER_STATUS_FILTER_OPTIONS = ['已准入', '待定', '已退场'];
 const WORKER_CERT_OPTIONS = ['高压电工', '低压电工', '高处', '电力电缆作业', '电气试验', '司索工', '吊车司机', '挖机操作工'];
 
 /* 身份证校验常量与 server/core/util.js 的 WORKER_ID_WEIGHTS / WORKER_ID_CHECK 逐字一致；
@@ -37,7 +39,7 @@ const WorkersPanel = {
     const list = ref([]);
     const teams = ref([]);
     const loading = ref(false);
-    const filters = reactive({ name: '', identity: '', team: '' });
+    const filters = reactive({ name: '', identity: '', team: '', status: '' });
     const page = ref(1);
     const pageSize = 20;
     const dialogVisible = ref(false);
@@ -92,10 +94,11 @@ const WorkersPanel = {
       if (filters.name && !(w.name || '').includes(filters.name)) return false;
       if (filters.identity && w.identity !== filters.identity) return false;
       if (filters.team && w.team !== filters.team) return false;
+      if (filters.status && wst(w).derived !== filters.status) return false;
       return true;
     }));
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize));
-    function resetFilters() { filters.name = ''; filters.identity = ''; filters.team = ''; page.value = 1; }
+    function resetFilters() { filters.name = ''; filters.identity = ''; filters.team = ''; filters.status = ''; page.value = 1; }
 
     // 准入到期预警：全部为派生计算，不改存储状态、不写库。
     // 今天按北京时间唯一时间源 ServerTime.ymd()，与纯函数的 todayStr 口径一致。
@@ -107,7 +110,7 @@ const WorkersPanel = {
     }
     function statusTag(row) {
       const s = wst(row);
-      return { text: s.derived, type: s.derived === '已准入' ? 'success' : 'warning' };
+      return { text: s.derived, type: s.derived === '已准入' ? 'success' : (s.derived === '已退场' ? 'info' : 'warning') };
     }
     function emptyText(v) { return v ? v : '-'; }
     function fmtCerts(row) {
@@ -264,7 +267,7 @@ const WorkersPanel = {
       openAdd, openEdit, submit, togglePending, exitWorker, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
       imp, impKindType, toggleImpDecision, confirmImport,
       teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
-      fmtValid, fmtCerts, wst, rowClass, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
+      fmtValid, fmtCerts, wst, rowClass, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_STATUS_FILTER_OPTIONS, WORKER_CERT_OPTIONS };
   },
   template: `
   <div>
@@ -301,6 +304,9 @@ const WorkersPanel = {
           </el-select>
           <el-select v-model="filters.team" placeholder="班组" clearable style="width:170px" @change="page=1">
             <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
+          </el-select>
+          <el-select v-model="filters.status" placeholder="状态" clearable style="width:120px" @change="page=1">
+            <el-option v-for="s in WORKER_STATUS_FILTER_OPTIONS" :key="s" :label="s" :value="s" />
           </el-select>
           <el-button @click="resetFilters">重置</el-button>
         </div>
@@ -372,6 +378,9 @@ const WorkersPanel = {
         </el-select>
         <el-select v-model="filters.team" placeholder="班组" clearable style="width:150px" @change="page=1">
           <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
+        </el-select>
+        <el-select v-model="filters.status" placeholder="状态" clearable style="width:120px" @change="page=1">
+          <el-option v-for="s in WORKER_STATUS_FILTER_OPTIONS" :key="s" :label="s" :value="s" />
         </el-select>
         <el-button @click="resetFilters">重置</el-button>
         <span class="ck-note">由资料员维护，无需为每名作业人员创建登录账号</span>

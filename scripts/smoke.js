@@ -2207,6 +2207,17 @@ async function listOk(p, token) {
     return '已退场行整批拒绝 + 两值文件放行 + 导出写待定/其余原值/库内不变 + 导出回导入 200';
   });
 
+  await step('结构', '名单状态筛选与已退场灰徽标静态防回归（两套模板一致）', async () => {
+    const js = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'users.js'), 'utf8');
+    need(/const WORKER_STATUS_FILTER_OPTIONS = \['已准入', '待定', '已退场'\]/.test(js), '状态下拉应为三档且只作显示');
+    need(/filters\.status && wst\(w\)\.derived !== filters\.status/.test(js), '筛选谓词必须按 WorkerStatus 派生状态判定');
+    need(/function resetFilters\(\)[^\n]*filters\.status = ''/.test(js), '重置必须清空状态筛选');
+    const selects = js.match(/v-model="filters\.status"/g) || [];
+    need(selects.length === 2, '两套名单模板应各有一个状态下拉，实际 ' + selects.length);
+    need(/s\.derived === '已退场' \? 'info' : 'warning'/.test(js), '已退场徽标应为 info 灰、待定仍 warning');
+    return '下拉三档 / 派生谓词 / 重置清空 / 两模板各一 / info 徽标';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
