@@ -2005,6 +2005,52 @@ async function listOk(p, token) {
     return '+30/+31/今天/昨天/空有效期/存储待定 6 个边界 + 公告栏排序';
   });
 
+  await step('feed', '工作动态预警聚合：技工优先点名 / 等 N 人拼装 + 3 天窗口与日期标签纯函数', async () => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'work-feed.js'), 'utf8');
+    const sb = { window: {}, module: { exports: {} } };
+    vm.createContext(sb);
+    vm.runInContext(code, sb);
+    const F = sb.window.WorkFeed;
+    need(F && typeof F.alertMessage === 'function' && typeof F.build === 'function' &&
+      typeof F.inWindow === 'function', 'work-feed.js 应导出 alertMessage / build / inWindow');
+
+    const T = '2026-11-09';
+    const alerts = [
+      { id: 'a', name: '民工甲', validEnd: '2026-11-10' },
+      { id: 'b', name: '技工乙', validEnd: '2026-11-20' },
+      { id: 'c', name: '民工丙', validEnd: '2026-11-11' },
+      { id: 'd', name: '技工丁', validEnd: '2026-11-19' },
+      { id: 'e', name: '其他技工戊', validEnd: '2026-11-12' }
+    ];
+    const workers = [
+      { id: 'a', identity: '民工' }, { id: 'b', identity: '技工（计入高处作业人员）' },
+      { id: 'c', identity: '民工' }, { id: 'd', identity: '技工（计入高处作业人员）' },
+      { id: 'e', identity: '其他技工（不计入高处作业人员）' }
+    ];
+    const m5 = F.alertMessage(alerts, workers);
+    need(m5 && m5.text === '技工丁、技工乙、民工甲 等5人准入有效期已到期或即将到期，请及时续期',
+      '5 人应只点名前 3 名（精确技工优先、同组按到期日升序），N=总人数 5：' + brief(m5));
+    need(m5.kind === 'alert' && m5.nav === 'users' && m5.usersTab === 'workers',
+      '预警条目应落在作业人员名单页：' + brief(m5));
+    const m3 = F.alertMessage(alerts.slice(0, 3), workers);
+    need(m3 && m3.text === '技工乙、民工甲、民工丙准入有效期已到期或即将到期，请及时续期' && !/等/.test(m3.text),
+      '≤3 人应全列且不带「等」：' + brief(m3));
+    const m1 = F.alertMessage([alerts[0]], workers);
+    need(m1 && m1.text === '民工甲准入有效期已到期或即将到期，请及时续期' && !/等/.test(m1.text),
+      '1 人应是单人句式：' + brief(m1));
+    need(F.alertMessage([], workers) === null, '0 人不应产出预警条目');
+
+    need(F.bjDay('2026-11-07T16:00:00.000Z') === '2026-11-08', 'UTC ISO 应转北京自然日：' + F.bjDay('2026-11-07T16:00:00.000Z'));
+    need(F.bjDay('2026-11-09 08:13') === '2026-11-09', '北京时间字符串前 10 位即自然日');
+    need(F.dayLabel(T, T) === '今日' && F.dayLabel('2026-11-08', T) === '昨日' &&
+      F.dayLabel('2026-11-07', T) === '11-07', '日期标签 今日 / 昨日 / MM-DD');
+    need(F.inWindow(T, T) && F.inWindow('2026-11-08', T) && F.inWindow('2026-11-07', T) &&
+      !F.inWindow('2026-11-06', T) && !F.inWindow('2026-11-10', T) && !F.inWindow('', T),
+      '3 天窗口应含今天/昨天/前天，排除第 4 天前、未来与空值');
+    return '点名排序 5/3/1/0 四种句式 + ISO/北京时间转换 + 日期标签 + 窗口边界';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
