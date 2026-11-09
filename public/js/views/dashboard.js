@@ -23,9 +23,8 @@ const Dashboard = {
         alerts.value = WorkerStatus.alerts(arr, ServerTime.ymd());
       } catch (e) { alerts.value = []; }
     }
-    function alertText(a) {
-      if (a.overdue) return '已过期 ' + a.overdueDays + ' 天';
-      return a.days === 0 ? '今天到期' : '剩 ' + a.days + ' 天';
+    function alertLine(a) {
+      return a.name + '（' + (a.team || '未分组') + '）· ' + a.validEnd;
     }
     function focusWorker(a) {
       window.__pendingUsersTab = 'workers';
@@ -33,7 +32,7 @@ const Dashboard = {
       window.dispatchEvent(new CustomEvent('nav-to', { detail: 'users' }));
     }
     onMounted(load);
-    return { stats, me, alerts, alertText, focusWorker };
+    return { stats, me, alerts, alertLine, focusWorker };
   },
   template: `
   <div>
@@ -46,14 +45,14 @@ const Dashboard = {
       <el-col :span="4" :xs="12"><div class="stat-card"><div class="num" style="color:var(--ok-text)">在线</div><div class="label">当前用户：{{ me.name || me.username || '-' }}</div></div></el-col>
     </el-row>
 
-    <div class="stat-card wk-alert-card">
-      <div class="wk-alert-head">准入到期预警<span class="wk-alert-count">{{ alerts.length }}</span></div>
-      <div v-if="!alerts.length" class="wk-alert-empty">暂无准入到期预警</div>
-      <div v-else class="wk-alert-list">
-        <div v-for="a in alerts" :key="a.id" class="wk-alert-item" @click="focusWorker(a)">
-          <span class="wk-alert-name">{{ a.name }}（{{ a.team || '未分组' }}）</span>
-          <span class="wk-alert-date">{{ a.validEnd }}</span>
-          <span :class="a.overdue ? 'wk-alert-bad' : 'wk-alert-soon'">{{ alertText(a) }}</span>
+    <div class="wk-board-row">
+      <div class="stat-card wk-alert-card">
+        <div class="wk-alert-head">准入到期预警<span class="wk-alert-count">{{ alerts.length }}</span></div>
+        <div v-if="!alerts.length" class="wk-alert-empty">暂无准入到期预警</div>
+        <div v-else class="wk-alert-list">
+          <div v-for="a in alerts" :key="a.id" class="wk-alert-item" :title="alertLine(a)" @click="focusWorker(a)">
+            <span class="wk-alert-line">{{ alertLine(a) }}</span>
+          </div>
         </div>
       </div>
     </div>

@@ -105,12 +105,6 @@ const WorkersPanel = {
       if (!row.validStart && !row.validEnd) return '';
       return (row.validStart || '?') + ' ~ ' + (row.validEnd || '?');
     }
-    function validTip(row) {
-      const s = wst(row);
-      if (s.warn) return s.days === 0 ? '今天到期' : '剩 ' + s.days + ' 天';
-      if (s.overdue) return '已过期 ' + s.overdueDays + ' 天';
-      return '';
-    }
     function statusTag(row) {
       const s = wst(row);
       return { text: s.derived, type: s.derived === '已准入' ? 'success' : 'warning' };
@@ -261,7 +255,7 @@ const WorkersPanel = {
       openAdd, openEdit, submit, togglePending, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
       imp, impKindType, toggleImpDecision, confirmImport,
       teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
-      fmtValid, fmtCerts, wst, rowClass, validTip, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
+      fmtValid, fmtCerts, wst, rowClass, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
   },
   template: `
   <div>
@@ -311,7 +305,6 @@ const WorkersPanel = {
           <el-table-column label="准入有效期" min-width="210">
             <template #default="{row}">
               <span class="wk-valid" :class="fmtValid(row) ? '' : 'wk-empty'">{{ fmtValid(row) || '-' }}</span>
-              <span v-if="validTip(row)" class="wk-warn-text">{{ validTip(row) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="100">
@@ -382,7 +375,6 @@ const WorkersPanel = {
         <el-table-column label="准入有效期" min-width="220">
           <template #default="{row}">
             <span class="wk-valid" :class="fmtValid(row) ? '' : 'wk-empty'">{{ fmtValid(row) || '-' }}</span>
-            <span v-if="validTip(row)" class="wk-warn-text">{{ validTip(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="身份证号" min-width="180"><template #default="{row}"><span :class="row.idNumber ? '' : 'wk-empty'">{{ emptyText(row.idNumber) }}</span></template></el-table-column>
