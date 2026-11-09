@@ -49,7 +49,7 @@ const InitView = {
       try {
         await api.put('/api/settings', { initialized: true });
         ElementPlus.ElMessage.success('初始化完成，欢迎使用');
-        // 刷新顶栏企业名/标题，并标记初始化完成（App 监听到后放行并进入用户中心）
+        // 刷新顶栏企业名/标题，并标记初始化完成（App 监听到后放行并进入首页）
         window.dispatchEvent(new CustomEvent('brand-changed'));
         window.dispatchEvent(new CustomEvent('init-done'));
       } catch (e) { ElementPlus.ElMessage.error(e.message); }

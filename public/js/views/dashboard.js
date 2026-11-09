@@ -5,6 +5,7 @@ const Dashboard = {
   setup() {
     const stats = reactive({ projects: 0, materials: 0, requisitions: 0, documents: 0, borrow: 0 });
     const me = ref({});
+    const alerts = ref([]);
     async function load() {
       try {
         const [p, m, r, d, b] = await Promise.all([
@@ -15,9 +16,24 @@ const Dashboard = {
         stats.documents = d.files.length; stats.borrow = b.length;
       } catch (e) {}
       try { me.value = (await api.get('/api/me')).user; } catch (e) {}
+      // 准入到期预警：全部由作业人员现有数据派生，不新建集合/字段，超期在前、其余按到期日升序
+      try {
+        const w = await api.get('/api/workers');
+        const arr = Array.isArray(w) ? w : (w.data || []);
+        alerts.value = WorkerStatus.alerts(arr, ServerTime.ymd());
+      } catch (e) { alerts.value = []; }
+    }
+    function alertText(a) {
+      if (a.overdue) return '已过期 ' + a.overdueDays + ' 天';
+      return a.days === 0 ? '今天到期' : '剩 ' + a.days + ' 天';
+    }
+    function focusWorker(a) {
+      window.__pendingUsersTab = 'workers';
+      window.__pendingFocusWorker = { id: a.id, name: a.name };
+      window.dispatchEvent(new CustomEvent('nav-to', { detail: 'users' }));
     }
     onMounted(load);
-    return { stats, me };
+    return { stats, me, alerts, alertText, focusWorker };
   },
   template: `
   <div>
@@ -29,5 +45,17 @@ const Dashboard = {
       <el-col :span="4" :xs="12"><div class="stat-card"><div class="num">{{ stats.borrow }}</div><div class="label">借工记录</div></div></el-col>
       <el-col :span="4" :xs="12"><div class="stat-card"><div class="num" style="color:var(--ok-text)">在线</div><div class="label">当前用户：{{ me.name || me.username || '-' }}</div></div></el-col>
     </el-row>
+
+    <div class="stat-card wk-alert-card">
+      <div class="wk-alert-head">准入到期预警<span class="wk-alert-count">{{ alerts.length }}</span></div>
+      <div v-if="!alerts.length" class="wk-alert-empty">暂无准入到期预警</div>
+      <div v-else class="wk-alert-list">
+        <div v-for="a in alerts" :key="a.id" class="wk-alert-item" @click="focusWorker(a)">
+          <span class="wk-alert-name">{{ a.name }}（{{ a.team || '未分组' }}）</span>
+          <span class="wk-alert-date">{{ a.validEnd }}</span>
+          <span :class="a.overdue ? 'wk-alert-bad' : 'wk-alert-soon'">{{ alertText(a) }}</span>
+        </div>
+      </div>
+    </div>
   </div>`
 };

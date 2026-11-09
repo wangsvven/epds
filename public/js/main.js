@@ -98,7 +98,7 @@ const App = {
     // 首次初始化未完成时仅以下页面可访问，其余点击一律转跳初始化向导
     const INIT_ALLOWED = ['init', 'documents', 'settings', 'users', 'workers'];
     const allMenu = [
-      { key: 'home', label: '用户中心', sub: '数据概览与常用入口', comp: 'Dashboard' },
+      { key: 'home', label: '首页', sub: '数据概览与常用入口', comp: 'Dashboard' },
       { key: 'projects', label: '项目列表', sub: '工程项目台账 · 进度与资料', comp: 'ProjectsView' },
       { key: 'materials', label: '材料台账', sub: '材料明细 · 领料出库与库存', comp: 'MaterialsView' },
       { key: 'plans', label: '计划管理', sub: '周计划 / 月计划 / 当日施工量', comp: 'PlansView' },
@@ -186,7 +186,7 @@ const App = {
     watch(route, (v) => { if (initMode.value && !INIT_ALLOWED.includes(v)) route.value = 'init'; });
     // 星期开始于：设置变更时同步到 Element Plus 日期选择器（dayjs locale weekStart），下次打开即生效
     watch(() => WeekStart.value, (v) => applyWeekStartToDayjs(v));
-    // 初始化完成：放行业务页面并进入用户中心（不依赖 fetchMe 异步时序）
+    // 初始化完成：放行业务页面并进入首页（不依赖 fetchMe 异步时序）
     function onInitDone() { initialized.value = true; route.value = 'home'; }
 
     onMounted(() => {
