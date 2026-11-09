@@ -370,6 +370,17 @@
     .rq-main .el-table__expand-icon--expanded::after { content:'⊖'; }
     /* 展开图标自带 rotate(-90deg)，会把自定义 +/− 字符转成竖线，这里关掉 */
     .rq-main .el-table__expand-icon, .rq-main .el-table__expand-icon--expanded { transform:none !important; }
+    /* 暂存清单：统计条可换行；领料总数随输入框实时联动 */
+    .stg-chips { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px; }
+    .stg-chips > span { display:inline-block; }
+    .stg-chips b { font-variant-numeric:tabular-nums; font-weight:600; }
+    /* 领料单列表：涉及项目 / 物料描述完整折行，不省略、不截断 */
+    .rq-main .rq-wrapcell .cell { white-space:normal; overflow:visible; text-overflow:clip; word-break:break-word; line-height:1.5; }
+    .rq-main .rq-wrapcell .rq-cell-item { display:block; color:var(--text-1); }
+    @media (max-width: 768px) {
+      .stg-chips { gap:6px; margin-bottom:10px; }
+      .rq-main .rq-wrapcell .cell { padding-left:6px; padding-right:6px; }
+    }
     /* ===== 领料单展开明细：标题条 + 紧凑明细表 ===== */
     .rq-exp { padding:2px 16px 16px 44px; background:var(--surface-2); border-radius:0 0 10px 10px; }
     .rq-exp-head { display:flex; align-items:center; gap:8px; margin:0 0 8px; font-size:12.5px; color:var(--text-3); }
@@ -1524,6 +1535,29 @@
   .mat-acts .el-button { margin-left: 0; }
   @media (max-width: 768px) {
     .mat-table .el-table__cell { padding: 9px 0; }
+  }
+  /* 作业人员名单：准入到期预警（派生状态、不写库）与显示优化 */
+  .wk-table .wk-warn-row td { background: var(--danger-bg) !important; }
+  .wk-table .wk-valid { white-space: nowrap; }
+  .wk-table .wk-warn-text { margin-left: 6px; color: var(--danger-text); font-size: 11.5px; white-space: nowrap; }
+  .wk-empty { color: var(--text-3); }
+  .wk-table .wk-acts-cell .cell { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .wk-table .wk-acts-cell .el-button { margin-left: 0; }
+  /* 首页：准入到期预警公告栏 */
+  .wk-alert-card { margin-top: 16px; }
+  .wk-alert-head { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+  .wk-alert-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--danger-bg); border: 1px solid var(--danger-line); color: var(--danger-text); font-size: 11.5px; text-align: center; }
+  .wk-alert-empty { color: var(--text-3); font-size: 13px; padding: 6px 0; }
+  .wk-alert-list { display: flex; flex-direction: column; gap: 6px; }
+  .wk-alert-item { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .wk-alert-item:hover { border-color: var(--danger-line); background: var(--danger-bg); }
+  .wk-alert-name { font-weight: 600; }
+  .wk-alert-date { color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .wk-alert-bad { color: var(--danger-text); font-weight: 600; }
+  .wk-alert-soon { color: var(--warn-text); }
+  @media (max-width: 768px) {
+    .wk-alert-item { gap: 6px; padding: 8px; }
+    .wk-alert-card { padding: 12px; }
   }
 </style>
   <!--LOGIN_BG-->

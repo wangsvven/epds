@@ -97,15 +97,25 @@ const WorkersPanel = {
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize));
     function resetFilters() { filters.name = ''; filters.identity = ''; filters.team = ''; page.value = 1; }
 
-    function fmtCN(d) {
-      if (!d) return '';
-      const [y, m, dd] = d.split('-');
-      return `${y}年${m}月${dd}日`;
-    }
+    // 准入到期预警：全部为派生计算，不改存储状态、不写库。
+    // 今天按北京时间唯一时间源 ServerTime.ymd()，与纯函数的 todayStr 口径一致。
+    function wst(row) { return window.WorkerStatus.of(row, ServerTime.ymd()); }
+    function rowClass({ row }) { return wst(row).highlight ? 'wk-warn-row' : ''; }
     function fmtValid(row) {
-      if (!row.validStart && !row.validEnd) return '-';
-      return (fmtCN(row.validStart) || '?') + (row.validEnd ? ' - ' + fmtCN(row.validEnd) : '');
+      if (!row.validStart && !row.validEnd) return '';
+      return (row.validStart || '?') + ' ~ ' + (row.validEnd || '?');
     }
+    function validTip(row) {
+      const s = wst(row);
+      if (s.warn) return s.days === 0 ? '今天到期' : '剩 ' + s.days + ' 天';
+      if (s.overdue) return '已过期 ' + s.overdueDays + ' 天';
+      return '';
+    }
+    function statusTag(row) {
+      const s = wst(row);
+      return { text: s.derived, type: s.derived === '已准入' ? 'success' : 'warning' };
+    }
+    function emptyText(v) { return v ? v : '-'; }
     function fmtCerts(row) {
       return (row.certTypes && row.certTypes.length) ? row.certTypes.join('；') : '-';
     }
@@ -237,12 +247,21 @@ const WorkersPanel = {
       finally { imp.busy = false; }
     }
 
-    onMounted(load);
+    // 首页公告栏点击进入：优先直接打开该人员编辑弹窗，找不到时降级为按姓名填好筛选
+    onMounted(async () => {
+      await load();
+      const f = window.__pendingFocusWorker;
+      if (!f) return;
+      window.__pendingFocusWorker = null;
+      const row = list.value.find(w => w.id === f.id);
+      if (row) openEdit(row);
+      else if (f.name) { filters.name = f.name; page.value = 1; }
+    });
     return { isTab, list, teams, sortedTeams, loading, filters, page, pageSize, filtered, paged, resetFilters, dialogVisible, editing, form, fileInput,
       openAdd, openEdit, submit, togglePending, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
       imp, impKindType, toggleImpDecision, confirmImport,
       teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
-      fmtValid, fmtCerts, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
+      fmtValid, fmtCerts, wst, rowClass, validTip, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
   },
   template: `
   <div>
@@ -283,19 +302,22 @@ const WorkersPanel = {
           <el-button @click="resetFilters">重置</el-button>
         </div>
 
-        <el-table class="flat-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员">
+        <el-table class="flat-table wk-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员" :row-class-name="rowClass">
           <el-table-column prop="name" label="姓名" min-width="90" />
-          <el-table-column prop="identity" label="身份" min-width="185" />
-          <el-table-column prop="team" label="班组" min-width="100" />
-          <el-table-column prop="phone" label="电话" min-width="120" />
-          <el-table-column label="证件" min-width="120"><template #default="{row}">{{ fmtCerts(row) }}</template></el-table-column>
-          <el-table-column label="准入有效期" min-width="190"><template #default="{row}">{{ fmtValid(row) }}</template></el-table-column>
-          <el-table-column label="状态" width="95">
+          <el-table-column label="身份" min-width="185"><template #default="{row}"><span :class="row.identity ? '' : 'wk-empty'">{{ emptyText(row.identity) }}</span></template></el-table-column>
+          <el-table-column label="班组" min-width="100"><template #default="{row}"><span :class="row.team ? '' : 'wk-empty'">{{ emptyText(row.team) }}</span></template></el-table-column>
+          <el-table-column label="电话" min-width="120"><template #default="{row}"><span :class="row.phone ? '' : 'wk-empty'">{{ emptyText(row.phone) }}</span></template></el-table-column>
+          <el-table-column label="证件" min-width="120"><template #default="{row}"><span :class="fmtCerts(row)==='-' ? 'wk-empty' : ''">{{ fmtCerts(row) }}</span></template></el-table-column>
+          <el-table-column label="准入有效期" min-width="210">
             <template #default="{row}">
-              <el-tag :type="row.status==='待定' ? 'warning' : 'success'" size="small">{{ row.status || '已准入' }}</el-tag>
+              <span class="wk-valid" :class="fmtValid(row) ? '' : 'wk-empty'">{{ fmtValid(row) || '-' }}</span>
+              <span v-if="validTip(row)" class="wk-warn-text">{{ validTip(row) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="170">
+          <el-table-column label="状态" width="100">
+            <template #default="{row}"><el-tag :type="statusTag(row).type" size="small">{{ statusTag(row).text }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="170" class-name="wk-acts-cell">
             <template #default="{row}">
               <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
               <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>
@@ -352,20 +374,23 @@ const WorkersPanel = {
         <span class="ck-note">由资料员维护，无需为每名作业人员创建登录账号</span>
       </div>
 
-      <el-table class="flat-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员">
+      <el-table class="flat-table wk-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员" :row-class-name="rowClass">
         <el-table-column prop="name" label="姓名" min-width="90" />
-        <el-table-column prop="identity" label="身份" min-width="190" />
-        <el-table-column prop="team" label="班组" min-width="100" />
-        <el-table-column label="证件类型" min-width="170"><template #default="{row}">{{ fmtCerts(row) }}</template></el-table-column>
-        <el-table-column label="准入有效期" min-width="200"><template #default="{row}">{{ fmtValid(row) }}</template></el-table-column>
-        <el-table-column prop="idNumber" label="身份证号" min-width="180" />
-        <el-table-column prop="phone" label="电话号码" min-width="140" />
-        <el-table-column label="状态" width="100">
+        <el-table-column label="身份" min-width="190"><template #default="{row}"><span :class="row.identity ? '' : 'wk-empty'">{{ emptyText(row.identity) }}</span></template></el-table-column>
+        <el-table-column label="班组" min-width="100"><template #default="{row}"><span :class="row.team ? '' : 'wk-empty'">{{ emptyText(row.team) }}</span></template></el-table-column>
+        <el-table-column label="证件类型" min-width="170"><template #default="{row}"><span :class="fmtCerts(row)==='-' ? 'wk-empty' : ''">{{ fmtCerts(row) }}</span></template></el-table-column>
+        <el-table-column label="准入有效期" min-width="220">
           <template #default="{row}">
-            <el-tag :type="row.status==='待定' ? 'warning' : 'success'" size="small">{{ row.status || '已准入' }}</el-tag>
+            <span class="wk-valid" :class="fmtValid(row) ? '' : 'wk-empty'">{{ fmtValid(row) || '-' }}</span>
+            <span v-if="validTip(row)" class="wk-warn-text">{{ validTip(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170">
+        <el-table-column label="身份证号" min-width="180"><template #default="{row}"><span :class="row.idNumber ? '' : 'wk-empty'">{{ emptyText(row.idNumber) }}</span></template></el-table-column>
+        <el-table-column label="电话号码" min-width="140"><template #default="{row}"><span :class="row.phone ? '' : 'wk-empty'">{{ emptyText(row.phone) }}</span></template></el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{row}"><el-tag :type="statusTag(row).type" size="small">{{ statusTag(row).text }}</el-tag></template>
+        </el-table-column>
+        <el-table-column label="操作" width="170" class-name="wk-acts-cell">
           <template #default="{row}">
             <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>

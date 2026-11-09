@@ -117,7 +117,15 @@ const PlansView = {
         const arr = Array.isArray(r) ? r : (r.data || []);
         teams.value = arr.slice().sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0)).map(t => t.name).filter(Boolean);
       } catch (e) {}
-      try { const r = await api.get('/api/workers'); const arr = Array.isArray(r) ? r : (r.data || []); workersFull.value = arr; workers.value = arr.map(w => w.name).filter(Boolean); } catch (e) {}
+      try {
+        const r = await api.get('/api/workers');
+        const arr = Array.isArray(r) ? r : (r.data || []);
+        // 选人只列派生状态为已准入者（已准入且准入有效期未超期），与「移入待定后不再供周计划选择」同口径
+        const today = ServerTime.ymd();
+        const admitted = arr.filter(w => w && w.name && WorkerStatus.of(w, today).admitted);
+        workersFull.value = admitted;
+        workers.value = admitted.map(w => w.name);
+      } catch (e) {}
       // 班组长候选改为取登录账号（作业人员名单不再作为班组长来源）：用户组=班组长 且 状态=启用，按姓名去重
       try {
         const r = await api.get('/api/users');
@@ -608,8 +616,8 @@ const PlansView = {
         surveyDate: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : ''
       };
     }
-    // 小组人员选项：作业人员名单（GET /api/workers，即「用户管理-作业人员名单」那套数据），排除状态「待定」
-    const surveyPeople = computed(() => workersFull.value.filter(w => w.name && w.status !== '待定'));
+    // 小组人员选项：作业人员名单，只列派生状态为已准入者（含超期自动转待定排除）
+    const surveyPeople = computed(() => workersFull.value.filter(w => w.name && WorkerStatus.of(w, ServerTime.ymd()).admitted));
     // 勘察单位下拉选项：单位维护「勘察单位」类别（按维护排序）+ 当前值回显保护；
     // 模板侧保留 allow-create 手填，手填/改选值徽标按现行比对语义计「人工填写」。
     const svUnitOpts = computed(() => {
@@ -1151,7 +1159,7 @@ const PlansView = {
     const staffPick = reactive({ visible: false, checked: {} });
     function staffKey(w) { return w.id || ((w.name || '') + '|' + (w.phone || '')); }
     const groupedTeams = computed(() => {
-      const admitted = workersFull.value.filter(w => w.status !== '待定');
+      const admitted = workersFull.value.filter(w => WorkerStatus.of(w, ServerTime.ymd()).admitted);
       const byTeam = {};
       admitted.forEach(w => { const t = w.team || '未分组'; (byTeam[t] = byTeam[t] || []).push(w); });
       return Object.keys(byTeam).sort().map(team => ({

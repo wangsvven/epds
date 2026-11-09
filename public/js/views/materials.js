@@ -1272,7 +1272,10 @@ const Outbounds = {
       } catch (e) {}
       try {
         const r = await api.get('/api/workers');
-        workers.value = (Array.isArray(r) ? r : (r.data || [])).map(w => w.name).filter(Boolean);
+        // 领取人只列派生状态为已准入者（已准入且准入有效期未超期）
+        const arr = Array.isArray(r) ? r : (r.data || []);
+        const today = ServerTime.ymd();
+        workers.value = arr.filter(w => w && w.name && WorkerStatus.of(w, today).admitted).map(w => w.name);
       } catch (e) {}
     }
     async function load() {
