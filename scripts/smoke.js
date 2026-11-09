@@ -1699,7 +1699,8 @@ async function listOk(p, token) {
     const doImport = async name => {
       const fd = new FormData();
       fd.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name);
-      const r = await fetch(base + '/api/contacts/import', {
+      fd.append('mode', 'replace'); // 主批后单步直导已废除，快照机制由两段式的确认端点触发
+      const r = await fetch(base + '/api/contacts/import/confirm', {
         method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
         signal: AbortSignal.timeout(15000)
       });
@@ -1774,6 +1775,179 @@ async function listOk(p, token) {
     } finally {
       // 成功或失败都尽力还原数据；只删本 step 新增的快照，保留 step 前已有文件
       try { await putBackInitial(); } catch (e) { /* 不掩盖主体的错误 */ }
+      bkFiles().forEach(f => {
+        if (!preFiles.includes(f)) { try { fs.unlinkSync(path.join(bkDir, f)); } catch (e) { } }
+      });
+      if (!preFiles.length && fs.existsSync(bkDir) && bkFiles().length === 0) {
+        try { fs.rmSync(bkDir, { recursive: true, force: true }); } catch (e) { }
+      }
+      try { fs.rmSync(privateDir, { recursive: true, force: true }); } catch (e) { }
+    }
+  });
+
+  /* ---------- 通讯录导入改造：常驻回归（主批新增） ---------- */
+  await step('system', '通讯录导入校验与预览：手机格式/文件内判重/双模式分类', async () => {
+    const cH = ['部门', '姓名', '职务', '手机', '移动短号', '备注'];
+    const cMk = rows => {
+      const wb = xlsx.utils.book_new();
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(rows), '员工');
+      return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    };
+    const cPreview = async (rows, mode) => {
+      const fd = new FormData();
+      fd.append('file', new Blob([cMk(rows)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'c.xlsx');
+      fd.append('mode', mode || 'merge');
+      const r = await fetch(base + '/api/contacts/import/preview', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
+        signal: AbortSignal.timeout(15000)
+      });
+      return { status: r.status, data: await r.json().catch(() => ({})) };
+    };
+    const errText = r => JSON.stringify(r.data || {});
+
+    const badPhone = await cPreview([cH, ['部门甲', '冒烟校验甲', '', '1380000001', '', '']]);
+    need(badPhone.status === 400 && /第2行/.test(errText(badPhone)) && /手机号/.test(errText(badPhone)),
+      '10 位手机号应整批拒并指行：' + brief(badPhone.data));
+    const dupSame = await cPreview([cH, ['部门甲', '同名', '', '13800000001', '', ''], ['部门乙', '同名', '', '13800000001', '', '']]);
+    need(dupSame.status === 400 && /第2行与第3行/.test(errText(dupSame)),
+      '文件内同名同号应拒且报错含两行行号：' + brief(dupSame.data));
+    const dupPhone = await cPreview([cH, ['部门甲', '甲', '', '13800000002', '', ''], ['部门乙', '乙', '', '13800000002', '', '']]);
+    need(dupPhone.status === 400 && /第2行与第3行/.test(errText(dupPhone)) && /姓名不同/.test(errText(dupPhone)),
+      '文件内同号异名应拒且报错含两行行号：' + brief(dupPhone.data));
+    const sameNameDiff = await cPreview([cH, ['部门甲', '同名', '', '13800000003', '', ''], ['部门乙', '同名', '', '13800000004', '', '']]);
+    need(sameNameDiff.status === 200, '同名不同号不应报错、应正常进分类：' + brief(sameNameDiff.data));
+
+    const mix = await cPreview([
+      cH,
+      ['冒烟部门', '冒烟新人甲', '', '13700000011', '', ''],
+      ['冒烟单位', '李四', '新职务', '13900139000', '', ''],
+      ['冒烟部门', '李四', '', '13700000012', '', '']
+    ], 'merge');
+    need(mix.status === 200, '增量预览失败：' + brief(mix.data));
+    const s = mix.data.summary || {};
+    need(s['新增'] === 1 && s['更新'] === 1 && s['同名待确认'] === 1,
+      '增量分类应为 新增1/更新1/同名待确认1：' + brief(s));
+    const upd = (mix.data.rows || []).find(r => r.kind === '更新');
+    need(upd && upd.diffs.length === 1 && upd.diffs[0].field === '职务',
+      '更新差异应只列职务：' + brief(upd));
+    const noChange = await cPreview([cH, ['冒烟单位', '李四', '', '13900139000', '', '']], 'merge');
+    need(noChange.status === 200 && noChange.data.summary['无变化'] === 1,
+      '同名同号且无字段变化应为无变化：' + brief(noChange.data));
+    const conflict = await cPreview([cH, ['冒烟部门', '冒烟异名', '', '13900139000', '', '']], 'merge');
+    need(conflict.status === 200 && conflict.data.summary['冲突'] === 1,
+      '同号异名应为冲突：' + brief(conflict.data));
+    const rep = await cPreview([cH, ['冒烟部门', '冒烟新人乙', '', '13700000021', '', '']], 'replace');
+    need(rep.status === 200 && rep.data.summary['将删除'] === 1 && (rep.data.deleteList || []).some(x => x.name === '李四'),
+      '覆盖预览应列出将删除名单：' + brief(rep.data));
+    return '4 类行校验 + 增量五类分类 + 覆盖将删除名单（预览全程不写库）';
+  });
+
+  await step('system', '通讯录导入确认：增量有值更新/不删人、覆盖整表、快照回滚', async () => {
+    const cH = ['部门', '姓名', '职务', '手机', '移动短号', '备注'];
+    const cMk = rows => {
+      const wb = xlsx.utils.book_new();
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(rows), '员工');
+      return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    };
+    const bkDir = path.join(TMP, 'data', 'backups', 'contacts');
+    const SNAP_RE = /^contacts-\d{14}(?:-\d+)?\.json$/;
+    const bkFiles = () => fs.existsSync(bkDir) ? fs.readdirSync(bkDir).filter(n => SNAP_RE.test(n)) : [];
+    const preFiles = bkFiles();
+    const privateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'erp-smoke-cimp-'));
+    const dbPath = path.join(TMP, 'data', 'db.json');
+    const initial = JSON.parse(fs.readFileSync(dbPath, 'utf8')).contacts || [];
+    let firstSnap = '';
+    const confirmBuf = async (buf, mode, decisions, name) => {
+      const fd = new FormData();
+      fd.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name || 'c.xlsx');
+      fd.append('mode', mode || 'merge');
+      fd.append('decisions', JSON.stringify(decisions || []));
+      const r = await fetch(base + '/api/contacts/import/confirm', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
+        signal: AbortSignal.timeout(15000)
+      });
+      return { status: r.status, data: await r.json().catch(() => ({})) };
+    };
+    const restore = file => api('POST', '/api/contacts/restore-snapshot', { token, body: { file } });
+    // 快照名按秒生成且上限会清理最早份：用私有副本覆盖回目标文件名再恢复，保证回到初始数组
+    const putBack = async () => {
+      if (!firstSnap) return;
+      fs.mkdirSync(bkDir, { recursive: true });
+      fs.copyFileSync(path.join(privateDir, firstSnap), path.join(bkDir, firstSnap));
+      needOk(await restore(firstSnap), '收尾还原初始通讯录');
+    };
+    try {
+      // 1) 导出回灌（覆盖）：生成初始快照，同时验证 imported 口径
+      const exp = await fetch(base + '/api/contacts/export', { headers: { Authorization: 'Bearer ' + token } });
+      const expBuf = Buffer.from(await exp.arrayBuffer());
+      const r0 = await confirmBuf(expBuf, 'replace', [], 'export.xlsx');
+      need(r0.status === 200 && r0.data.added === 1 && r0.data.imported === 1,
+        '导出回灌覆盖应 imported=1：' + brief(r0.data));
+      firstSnap = String(r0.data.snapshot || '');
+      need(SNAP_RE.test(firstSnap) && fs.existsSync(path.join(bkDir, firstSnap)), '覆盖前快照应生成');
+      fs.copyFileSync(path.join(bkDir, firstSnap), path.join(privateDir, firstSnap));
+      const list0 = await listOk('/api/contacts', token);
+
+      // 2) 增量新增 2 人
+      const r1 = await confirmBuf(cMk([
+        cH,
+        ['部门甲', '增量甲', '专责', '13700000031', '', '备注甲'],
+        ['部门乙', '增量乙', '主任', '13700000032', '', '备注乙']
+      ]), 'merge');
+      need(r1.status === 200 && r1.data.added === 2 && r1.data.updated === 0,
+        '增量应新增 2 人：' + brief(r1.data));
+      const before = await listOk('/api/contacts', token);
+      const jia = before.find(c => c.name === '增量甲'), yi = before.find(c => c.name === '增量乙');
+      need(jia && yi, '新增后应能查到两人');
+
+      // 3) 增量有值更新：只改甲的职务，文件外的人（乙 / 李四）完全不动
+      const r2 = await confirmBuf(cMk([cH, ['部门甲', '增量甲', '班长', '13700000031', '', '备注甲']]), 'merge');
+      need(r2.status === 200 && r2.data.added === 0 && r2.data.updated === 1,
+        '增量应只更新 1 人：' + brief(r2.data));
+      const after = await listOk('/api/contacts', token);
+      const jia2 = after.find(c => c.id === jia.id), yi2 = after.find(c => c.id === yi.id);
+      const li2 = after.find(c => c.name === '李四');
+      need(jia2 && jia2.post === '班长' && jia2.id === jia.id && jia2.createdAt === jia.createdAt,
+        '更新者应保留 id/createdAt 且职务变更：' + brief(jia2));
+      need(yi2 && JSON.stringify(yi2) === JSON.stringify(yi), '文件外联系人应完全不变');
+      need(li2 && JSON.stringify(li2) === JSON.stringify(list0.find(c => c.name === '李四')),
+        '文件外的库内原联系人应完全不变');
+
+      // 4) 同名待确认：默认新增 / 库内两个同名时指明目标更新号码
+      const r3 = await confirmBuf(cMk([cH, ['部门丙', '增量甲', '', '13900000099', '', '']]), 'merge',
+        [{ rowNo: 2, action: 'add' }]);
+      need(r3.status === 200 && r3.data.added === 1, '同名默认新增应 added=1：' + brief(r3.data));
+      const r4 = await confirmBuf(cMk([cH, ['部门丙', '增量甲', '', '13900000098', '', '']]), 'merge',
+        [{ rowNo: 2, action: 'update', targetId: jia.id }]);
+      need(r4.status === 200 && r4.data.updated === 1 && r4.data.added === 0,
+        '指明目标更新号码应 updated=1 且不新增：' + brief(r4.data));
+      const after4 = await listOk('/api/contacts', token);
+      const jia4 = after4.find(c => c.id === jia.id);
+      need(jia4 && jia4.phone === '13900000098' && jia4.createdAt === jia.createdAt,
+        '更新号码后 id/createdAt 不变、手机应为新号码：' + brief(jia4));
+
+      // 5) 导出回灌增量：全部无变化
+      const exp2 = await fetch(base + '/api/contacts/export', { headers: { Authorization: 'Bearer ' + token } });
+      const r5 = await confirmBuf(Buffer.from(await exp2.arrayBuffer()), 'merge', [], 'export2.xlsx');
+      need(r5.status === 200 && r5.data.added === 0 && r5.data.updated === 0,
+        '导出回灌增量应全部无变化：' + brief(r5.data));
+
+      // 6) 覆盖模式：整表与文件一致、deleted 计数、快照生成
+      const r6 = await confirmBuf(cMk([
+        cH, ['部门X', '覆盖甲', '', '13700000041', '', ''], ['部门Y', '覆盖乙', '', '13700000042', '', '']
+      ]), 'replace');
+      need(r6.status === 200 && r6.data.added === 2 && r6.data.deleted === after4.length &&
+        SNAP_RE.test(String(r6.data.snapshot || '')), '覆盖应 added=2 / deleted 为导入前人数 / 生成快照：' + brief(r6.data));
+      const list6 = await listOk('/api/contacts', token);
+      need(list6.length === 2 && list6.every(c => /^覆盖/.test(c.name)), '覆盖后整表应与文件一致');
+
+      // 7) 恢复初始快照：新增与更新全部回滚
+      await putBack();
+      const cur = JSON.parse(fs.readFileSync(dbPath, 'utf8')).contacts || [];
+      need(JSON.stringify(cur) === JSON.stringify(initial), '恢复快照后 contacts 应逐字段回到初始状态');
+      return '导出回灌 / 增量有值更新 / 文件外不动 / 同名决策 / 覆盖整表 / 快照回滚 + 清理';
+    } finally {
+      try { await putBack(); } catch (e) { /* 不掩盖主体错误 */ }
       bkFiles().forEach(f => {
         if (!preFiles.includes(f)) { try { fs.unlinkSync(path.join(bkDir, f)); } catch (e) { } }
       });
