@@ -485,64 +485,250 @@ app.get('/api/contacts/export', (req, res) => {
   res.send(buf);
 });
 
-app.post('/api/contacts/import', upload.single('file'), (req, res) => {
+/* ---------- 通讯录导入：解析 + 整批校验（预览 / 确认、两种模式共用） ---------- */
+const CONTACT_SEP = String.fromCharCode(1);
+const CONTACT_KINDS = ['新增', '更新', '无变化', '同名待确认', '冲突'];
+function contactImportError(errors) {
+  return `存在错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处错误` : ''}`;
+}
+function parseContactFile(file) {
+  let rows;
+  if (/\.csv$/i.test(file.originalname || '')) {
+    rows = parseCSVBuffer(file.buffer);
+  } else {
+    const wb = xlsx.read(file.buffer, { type: 'buffer' });
+    // 优先取名为「员工」的 sheet，否则取第一个
+    const sheetName = wb.SheetNames.find(n => String(n).trim() === '员工') || wb.SheetNames[0];
+    const ws = sheetName ? wb.Sheets[sheetName] : null;
+    if (!ws) throw new Error('文件中没有可读取的工作表');
+    rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+  }
+  if (!rows.length) throw new Error('文件内容为空');
+
+  // 识别表头行：首个含已知表头文字的行；识别不到则按位置解析 6 列
+  let headerIdx = -1, idxMap = null;
+  for (let i = 0; i < Math.min(rows.length, 5); i++) {
+    const cells = (rows[i] || []).map(c => String(c || '').trim());
+    const hit = cells.filter(c => CONTACT_HEADER_MAP[c]);
+    if (hit.length >= 2) {
+      headerIdx = i; idxMap = {};
+      cells.forEach((c, ci) => { const f = CONTACT_HEADER_MAP[c]; if (f && idxMap[f] === undefined) idxMap[f] = ci; });
+      break;
+    }
+  }
+  const fields = ['dept', 'name', 'post', 'phone', 'shortNo', 'remark'];
+  if (!idxMap) { idxMap = {}; fields.forEach((f, i) => { idxMap[f] = i; }); }
+
+  const errors = [], parsed = [];
+  rows.forEach((r, i) => {
+    if (i <= headerIdx) return;
+    const get = f => String((idxMap[f] !== undefined && r[idxMap[f]] !== undefined) ? r[idxMap[f]] : '').trim();
+    const dept = get('dept'), name = get('name'), post = get('post');
+    const phone = get('phone'), shortNo = get('shortNo'), remark = get('remark');
+    if (!dept && !name && !post && !phone && !shortNo && !remark) return; // 空行
+    if (!name) { errors.push(`第${i + 1}行：姓名为空`); return; }
+    // 手机非空须合 11 位手机号规则（与作业人员导入同一正则）；空号合法
+    if (phone && !WORKER_PHONE_RE.test(phone)) errors.push(`第${i + 1}行：手机号格式错误（需11位手机号）`);
+    parsed.push({ rowNo: i + 1, dept, name, post, phone, shortNo, remark });
+  });
+
+  // 文件内判重：同名同号 / 同号异名均整批拒绝，报错须同时指出冲突的两行行号
+  const seenPhone = new Map(), seenNamePhone = new Map();
+  parsed.forEach(p => {
+    if (!p.phone) return;
+    const np = p.name + CONTACT_SEP + p.phone;
+    if (seenNamePhone.has(np)) errors.push(`第${seenNamePhone.get(np)}行与第${p.rowNo}行：姓名与手机号完全相同`);
+    else seenNamePhone.set(np, p.rowNo);
+    if (seenPhone.has(p.phone)) {
+      const first = seenPhone.get(p.phone);
+      if (first.name !== p.name) {
+        errors.push(`第${first.rowNo}行与第${p.rowNo}行：手机号「${p.phone}」相同但姓名不同（${first.name} / ${p.name}）`);
+      }
+    } else seenPhone.set(p.phone, p);
+  });
+  if (!parsed.length && !errors.length) errors.push('未解析到有效联系人（姓名列不能为空）');
+  return { errors, parsed };
+}
+
+/* 有值更新：部门 / 职务 / 移动短号 / 备注，手机仅「更新此人号码」路径可改。
+   空值不覆盖；姓名永不通过导入修改；无差异即无变化。 */
+const CONTACT_UPDATABLE = [['dept', '部门'], ['post', '职务'], ['shortNo', '移动短号'], ['remark', '备注']];
+function contactUpdatePlan(p, existing, opts) {
+  const next = {}, diffs = [];
+  const put = (key, label, fileVal, dbVal) => {
+    if (fileVal === '' || fileVal === null || fileVal === undefined) return;
+    const a = String(dbVal == null ? '' : dbVal), b = String(fileVal);
+    if (a !== b) diffs.push({ field: label, old: a, next: b });
+    next[key] = fileVal;
+  };
+  CONTACT_UPDATABLE.forEach(([k, label]) => put(k, label, p[k], k === 'dept' ? contactDept(existing) : existing[k]));
+  if (opts && opts.updatePhone) put('phone', '手机', p.phone, existing.phone);
+  return { diffs, next };
+}
+// 认人键：姓名 + 手机；手机为空时以 姓名 + 移动短号 代替；两者皆空不自动认人
+function contactKey(p) {
+  const name = String(p.name || '').trim();
+  const phone = String(p.phone || '').trim();
+  if (phone) return name + CONTACT_SEP + 'P' + CONTACT_SEP + phone;
+  const shortNo = String(p.shortNo || '').trim();
+  if (shortNo) return name + CONTACT_SEP + 'S' + CONTACT_SEP + shortNo;
+  return '';
+}
+function contactNewRecord(p) {
+  return {
+    id: genId('c'), createdAt: nowISO(),
+    dept: p.dept, name: p.name, post: p.post, phone: p.phone, shortNo: p.shortNo, remark: p.remark,
+    deleted: false
+  };
+}
+function contactPublicRow(r) {
+  return {
+    rowNo: r.rowNo, name: r.name, phone: r.phone, shortNo: r.shortNo,
+    dept: r.dept, post: r.post, remark: r.remark, kind: r.kind,
+    diffs: r.diffs, reason: r.reason, existingId: r.existingId, candidates: r.candidates
+  };
+}
+
+function classifyContactRows(parsed, mode) {
+  const alive = DB.contacts.filter(c => c && !c.deleted);
+  const byKey = new Map(), byPhone = new Map(), byName = new Map();
+  alive.forEach(c => {
+    const k = contactKey(c);
+    if (k && !byKey.has(k)) byKey.set(k, c);
+    const ph = String(c.phone || '').trim();
+    if (ph && !byPhone.has(ph)) byPhone.set(ph, c);
+    const nm = String(c.name || '').trim();
+    if (nm) { if (!byName.has(nm)) byName.set(nm, []); byName.get(nm).push(c); }
+  });
+
+  // 覆盖模式：差异汇总（落库语义仍是整表替换），把将删除名单在确认前摊开
+  if (mode === 'replace') {
+    const fileKeys = new Set(parsed.map(contactKey).filter(Boolean));
+    const deleteList = [], changeList = [];
+    let willChange = 0, unchanged = 0;
+    alive.forEach(c => {
+      const k = contactKey(c);
+      if (!k || !fileKeys.has(k)) { deleteList.push({ name: c.name || '', phone: c.phone || '' }); return; }
+      const p = parsed.find(x => contactKey(x) === k);
+      const plan = p ? contactUpdatePlan(p, c) : { diffs: [] };
+      if (plan.diffs.length) { willChange++; changeList.push({ name: c.name || '', phone: c.phone || '', diffs: plan.diffs }); }
+      else unchanged++;
+    });
+    const willAdd = parsed.filter(p => !byKey.has(contactKey(p))).length;
+    return { mode, rows: [], deleteList, changeList,
+      summary: { '新增': willAdd, '将删除': deleteList.length, '将变更': willChange, '无变化': unchanged } };
+  }
+
+  // 增量模式：逐行分类（比对库内未删除联系人）
+  const rows = parsed.map(p => {
+    const key = contactKey(p);
+    const row = {
+      rowNo: p.rowNo, name: p.name, phone: p.phone, shortNo: p.shortNo,
+      dept: p.dept, post: p.post, remark: p.remark,
+      kind: '', diffs: [], reason: '', existingId: '', candidates: [], next: null, parsed: p
+    };
+    const phoneHit = p.phone ? byPhone.get(p.phone) : null;
+    if (phoneHit && String(phoneHit.name || '').trim() !== String(p.name).trim()) {
+      row.kind = '冲突';
+      row.reason = `手机号已属于库内「${phoneHit.name}」，与文件姓名「${p.name}」不一致，默认跳过`;
+      row.existingId = phoneHit.id;
+      return row;
+    }
+    const hit = key ? byKey.get(key) : null;
+    if (hit) {
+      row.existingId = hit.id;
+      const plan = contactUpdatePlan(p, hit);
+      row.diffs = plan.diffs; row.next = plan.next;
+      row.kind = plan.diffs.length ? '更新' : '无变化';
+      if (!plan.diffs.length) row.reason = '各字段与库内一致';
+      return row;
+    }
+    const sameName = byName.get(String(p.name).trim()) || [];
+    if (sameName.length) {
+      row.kind = '同名待确认';
+      row.candidates = sameName.map(c => ({
+        id: c.id, name: c.name || '', phone: c.phone || '', dept: contactDept(c), post: c.post || ''
+      }));
+      row.reason = '库内存在同名联系人但号码对不上，需选择新增或更新此人号码';
+      return row;
+    }
+    row.kind = '新增';
+    return row;
+  });
+  const summary = {};
+  CONTACT_KINDS.forEach(k => { summary[k] = rows.filter(r => r.kind === k).length; });
+  return { mode, rows, summary };
+}
+
+// 预览：解析 + 整批校验 + 分类，不写库、不生成快照；有错返回错误清单且不给可确认数据
+app.post('/api/contacts/import/preview', upload.single('file'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '未收到文件' });
-    let rows;
-    if (/\.csv$/i.test(req.file.originalname || '')) {
-      rows = parseCSVBuffer(req.file.buffer);
-    } else {
-      const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
-      // 优先取名为「员工」的 sheet，否则取第一个
-      const sheetName = wb.SheetNames.find(n => String(n).trim() === '员工') || wb.SheetNames[0];
-      const ws = sheetName ? wb.Sheets[sheetName] : null;
-      if (!ws) return res.status(400).json({ error: '文件中没有可读取的工作表' });
-      rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
-    }
-    if (!rows.length) return res.status(400).json({ error: '文件内容为空' });
+    const mode = String((req.body && req.body.mode) || 'merge') === 'replace' ? 'replace' : 'merge';
+    const { errors, parsed } = parseContactFile(req.file);
+    if (errors.length) return res.status(400).json({ error: contactImportError(errors), errors });
+    const plan = classifyContactRows(parsed, mode);
+    res.json({ ok: true, mode, rows: plan.rows.map(contactPublicRow), summary: plan.summary,
+      deleteList: plan.deleteList || [], changeList: plan.changeList || [] });
+  } catch (e) { res.status(500).json({ error: '预览失败：' + e.message }); }
+});
 
-    // 识别表头行：首个含已知表头文字的行；识别不到则按位置解析（部门/姓名/职务/手机/移动短号）
-    let headerIdx = -1, idxMap = null;
-    for (let i = 0; i < Math.min(rows.length, 5); i++) {
-      const cells = (rows[i] || []).map(c => String(c || '').trim());
-      const hit = cells.filter(c => CONTACT_HEADER_MAP[c]);
-      if (hit.length >= 2) {
-        headerIdx = i; idxMap = {};
-        cells.forEach((c, ci) => { const f = CONTACT_HEADER_MAP[c]; if (f && idxMap[f] === undefined) idxMap[f] = ci; });
-        break;
+// 确认：重传同一文件 + 同名待确认处置决策；以确认时刻库状态重新解析分类后落库
+app.post('/api/contacts/import/confirm', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    const mode = String((req.body && req.body.mode) || 'merge') === 'replace' ? 'replace' : 'merge';
+    let decisions = [];
+    try {
+      const d = JSON.parse(String((req.body && req.body.decisions) || '[]'));
+      if (Array.isArray(d)) decisions = d;
+    } catch (e) { decisions = []; }
+    const { errors, parsed } = parseContactFile(req.file);
+    if (errors.length) return res.status(400).json({ error: contactImportError(errors), errors });
+    const plan = classifyContactRows(parsed, mode);
+
+    // 两种模式都在落库前按现行机制生成导入前快照；写盘失败中止落库
+    let snapshot;
+    try { snapshot = writeContactSnapshot(); }
+    catch (e) { return res.status(500).json({ error: '导入前快照保存失败，已中止导入：' + e.message }); }
+
+    if (mode === 'replace') {
+      const replaced = DB.contacts.filter(c => !c.deleted).length;
+      DB.contacts = [];
+      parsed.forEach(p => DB.contacts.push(contactNewRecord(p)));
+      saveDB();
+      return res.json({ ok: true, mode, added: parsed.length, updated: 0, unchanged: 0, skipped: 0,
+        deleted: replaced, imported: parsed.length, replaced, snapshot });
+    }
+
+    // 增量：新增插入；更新保留原 id / createdAt 有值更新；无变化、冲突跳过；文件外的库内联系人一律不动
+    let added = 0, updated = 0, unchanged = 0, skipped = 0;
+    plan.rows.forEach(r => {
+      if (r.kind === '新增') { DB.contacts.push(contactNewRecord(r.parsed)); added++; return; }
+      if (r.kind === '更新') {
+        const c = DB.contacts.find(x => x.id === r.existingId && !x.deleted);
+        if (!c) { skipped++; return; }
+        Object.assign(c, r.next); updated++; return;
       }
-    }
-    // 无表头时按位置解析：部门/姓名/职务/手机/移动短号/备注（旧 5 列文件备注自动为空）
-    const fields = ['dept', 'name', 'post', 'phone', 'shortNo', 'remark'];
-    if (!idxMap) { idxMap = {}; fields.forEach((f, i) => { idxMap[f] = i; }); }
-
-    const errors = [];
-    const parsed = [];
-    rows.forEach((r, i) => {
-      if (i <= headerIdx) return;
-      const get = f => String((idxMap[f] !== undefined && r[idxMap[f]] !== undefined) ? r[idxMap[f]] : '').trim();
-      const dept = get('dept'), name = get('name'), post = get('post'), phone = get('phone'), shortNo = get('shortNo'), remark = get('remark');
-      if (!dept && !name && !post && !phone && !shortNo && !remark) return; // 空行
-      if (!name) { errors.push(`第${i + 1}行：姓名为空`); return; }
-      parsed.push({ dept, name, post, phone, shortNo, remark });
+      if (r.kind === '同名待确认') {
+        const d = decisions.find(x => Number(x.rowNo) === r.rowNo) || {};
+        // 未指明更新目标（或目标不在同名候选内）→ 只能按默认「新增联系人」执行
+        const validTarget = String(d.action || '') === 'update' && d.targetId &&
+          r.candidates.some(c => c.id === d.targetId)
+          ? DB.contacts.find(x => x.id === d.targetId && !x.deleted &&
+              String(x.name || '').trim() === String(r.name).trim())
+          : null;
+        if (validTarget) {
+          Object.assign(validTarget, contactUpdatePlan(r.parsed, validTarget, { updatePhone: true }).next);
+          updated++;
+        } else { DB.contacts.push(contactNewRecord(r.parsed)); added++; }
+        return;
+      }
+      if (r.kind === '无变化') unchanged++;
+      skipped++;
     });
-    if (errors.length) {
-      return res.status(400).json({ error: `存在错误，整批不导入。${errors.slice(0, 5).join('；')}${errors.length > 5 ? `……共${errors.length}处` : ''}` });
-    }
-    if (!parsed.length) return res.status(400).json({ error: '未解析到有效联系人（姓名列不能为空）' });
-
-    // 覆盖式导入：整表替换为本次导入的通讯录。先留快照，写盘失败则中止，不得在无快照时替换。
-    const snapshot = writeContactSnapshot();
-    const replaced = DB.contacts.filter(c => !c.deleted).length;
-    DB.contacts = [];
-    const added = parsed.map(p => ({
-      id: genId('c'), createdAt: nowISO(),
-      dept: p.dept, name: p.name, post: p.post, phone: p.phone, shortNo: p.shortNo, remark: p.remark,
-      deleted: false
-    }));
-    DB.contacts.push(...added);
     saveDB();
-    res.json({ ok: true, imported: added.length, replaced, snapshot });
+    res.json({ ok: true, mode, added, updated, unchanged, skipped, snapshot });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 
