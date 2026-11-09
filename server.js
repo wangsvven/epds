@@ -3,7 +3,8 @@
  * 本地自托管「电网生产ERP」复刻 — 后端入口
  * 技术栈：Node + Express + 本地 JSON 存储（data/db.json）
  * 结构：server/core（db / auth / crud / upload / util …）+ server/routes（system / materials /
- *      projects / plans / documents / workticket）；本文件只负责加载顺序、静态托管与监听。
+ *      projects / borrow / monthPlans / plans / documents / workticket）；
+ *      本文件只负责加载顺序、静态托管与监听。
  */
 const express = require('express');
 const path = require('path');
@@ -29,6 +30,9 @@ system.registerAuthed();
 
 require('./server/routes/materials');
 require('./server/routes/projects');
+// 专用路由须早于 routes/plans.js 的通用 /:id 与静态路径注册（顺序不可随意调整）
+require('./server/routes/borrow');       // 借工：佐证 / 借工单 / 前置校验 + borrowWorks CRUD
+require('./server/routes/monthPlans');  // 月计划 xlsx：/api/workPlans/month-plan.xlsx
 require('./server/routes/plans');
 require('./server/routes/documents');
 require('./server/routes/workticket');
