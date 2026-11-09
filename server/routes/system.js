@@ -194,7 +194,7 @@ const WORKER_ID_RE = /^\d{17}[\dXx]$/;
 const WORKER_PHONE_RE = /^1\d{10}$/;
 const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工', '其他技工（不计入高处作业人员）'];
 // 作业人员状态合法值（与 public/js/views/users.js 的 togglePending / 状态标签一致）
-const WORKER_STATUS = ['已准入', '待定', '已退场'];
+const WORKER_STATUS = ['已准入', '待定'];
 
 
 // 解析 + 整批校验：单步端点与两段式（preview/confirm）共用；错误全量返回、不落半截数据。
@@ -400,13 +400,18 @@ app.post('/api/workers/import/confirm', upload.single('file'), (req, res) => {
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
 
+// 导出映射：库内「已退场」在文件里写「待定」，其余原值不变。
+// 导入白名单只有两值，这样「导出即模板」的文件可直接回导入而不被整批拒绝；只改文件、不改库内值。
+function workerExportStatus(w) {
+  return (w && w.status === '已退场') ? '待定' : ((w && w.status) || '已准入');
+}
 app.get('/api/workers/export', (req, res) => {
   const header = ['姓名', '身份证号', '电话号码', '身份', '班组', '证件类型', '准入有效期', '状态'];
   const rows = DB.workers.filter(aliveFilter()).map(w => [
     w.name || '', w.idNumber || '', w.phone || '', w.identity || '', w.team || '',
     (w.certTypes || []).join('、'),
     w.validStart ? (w.validStart + (w.validEnd ? ' - ' + w.validEnd : '')) : '',
-    w.status || '已准入'
+    workerExportStatus(w)
   ]);
   const wb = xlsx.utils.book_new();
   xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet([header, ...rows]), '作业人员名单');

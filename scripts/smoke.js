@@ -2111,7 +2111,7 @@ async function listOk(p, token) {
   await step('users', '退场能力：exitedAt 落库/清空 + 已退场派生不可选 + 导入状态枚举', async () => {
     const vm = require('vm');
     const sys = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'system.js'), 'utf8');
-    need(/const WORKER_STATUS = \['已准入', '待定', '已退场'\]/.test(sys), '后端导入状态枚举应含「已退场」');
+    need(/const WORKER_STATUS = \['已准入', '待定'\]/.test(sys), '后端导入状态白名单应恰为两值（不含「已退场」）');
     const sb = { window: {} };
     vm.createContext(sb);
     vm.runInContext(fs.readFileSync(path.join(ROOT, 'public', 'js', 'utils.js'), 'utf8'), sb);
@@ -2152,6 +2152,59 @@ async function listOk(p, token) {
     need(dash.includes('工作动态') && dash.includes('暂无工作动态') && dash.includes('WorkFeed.build'), '标题 / 空态 / 聚合入口');
     need(!dash.includes('__pendingFocusWorker = {'), '预警点击不得再直开编辑弹窗');
     return '脚本顺序 / 五色浅深两套 / 5 条滚动 / 1/3 宽 / 标题空态 / 点击口径';
+  });
+
+  await step('users', '导入白名单两值 + 已退场导出映射为待定（导出回导入闭环）', async () => {
+    const mkBuf = rows => {
+      const wb = xlsx.utils.book_new();
+      xlsx.utils.book_append_sheet(wb, xlsx.utils.aoa_to_sheet(rows), '作业人员名单');
+      return xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    };
+    const HEAD = ['姓名', '身份证号', '电话号码', '身份', '班组', '证件类型', '准入有效期', '状态'];
+    const saved = workerMixBuf;
+    const before = (await listOk('/api/workers', token)).length;
+
+    // 1) 含「已退场」的文件整批拒绝，报错文案回到两值，且不写库
+    workerMixBuf = mkBuf([HEAD,
+      ['冒烟退场行', '510301199001010010', '13800000099', '', '', '', '', '已退场']]);
+    const bad = await workerUpload('/api/workers/import/preview');
+    need(bad.status === 400 && /仅支持：已准入 \/ 待定/.test(String((bad.data || {}).error || '')),
+      '含已退场行应整批拒绝且报错回到两值：' + brief(bad.data));
+    need((await listOk('/api/workers', token)).length === before, '被拒文件不得写库');
+
+    // 2) 纯已准入 / 待定文件预览如常
+    workerMixBuf = mkBuf([HEAD,
+      ['冒烟白名单甲', '510301199001010002', '13800000091', '', '', '', '', '已准入'],
+      ['冒烟白名单乙', '510301199001010029', '13800000092', '', '', '', '', '待定']]);
+    const good = await workerUpload('/api/workers/import/preview');
+    need(good.status === 200 && good.data && good.data.ok, '纯两值文件应正常预览：' + brief(good.data));
+
+    // 3) 库内含已退场人员时导出：该行写「待定」，其余原值、库内值不变
+    needOk(await api('POST', '/api/workers', { token, body: {
+      name: '冒烟已退场导出', idNumber: '510301199001010002', phone: '13800000088',
+      status: '已退场', exitedAt: '2026-11-09 21:00:00'
+    } }), 'POST 已退场人员');
+    const er = await fetch(base + '/api/workers/export', { headers: { Authorization: 'Bearer ' + token } });
+    need(er.ok, '导出 GET 应 2xx，实际 ' + er.status);
+    const buf = Buffer.from(await er.arrayBuffer());
+    const ewb = xlsx.read(buf, { type: 'buffer' });
+    const rows = xlsx.utils.sheet_to_json(ewb.Sheets[ewb.SheetNames[0]], { header: 1 });
+    const ni = rows[0].indexOf('姓名'), si = rows[0].indexOf('状态');
+    const exitedRow = rows.slice(1).find(r => r[ni] === '冒烟已退场导出');
+    need(exitedRow && exitedRow[si] === '待定', '已退场行导出状态应为「待定」：' + brief(exitedRow));
+    const statuses = rows.slice(1).map(r => r[si]);
+    need(!statuses.includes('已退场') && statuses.includes('待定') && statuses.includes('已准入'),
+      '导出文件不应出现「已退场」且其余行保持原值：' + brief([...new Set(statuses)]));
+    const dbRow = (await listOk('/api/workers', token)).find(w => w.name === '冒烟已退场导出');
+    need(dbRow && dbRow.status === '已退场', '导出映射不得改库内值：' + brief(dbRow));
+
+    // 4) 这份导出文件直接回导入：不因状态被拒
+    workerMixBuf = buf;
+    const loop = await workerUpload('/api/workers/import/preview');
+    need(loop.status === 200 && loop.data && loop.data.ok,
+      '导出文件回导入应正常走完（不因状态被拒）：' + brief(loop.data));
+    workerMixBuf = saved;
+    return '已退场行整批拒绝 + 两值文件放行 + 导出写待定/其余原值/库内不变 + 导出回导入 200';
   });
 
   /* ---------- 汇总 ---------- */
