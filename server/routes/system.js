@@ -194,7 +194,7 @@ const WORKER_ID_RE = /^\d{17}[\dXx]$/;
 const WORKER_PHONE_RE = /^1\d{10}$/;
 const WORKER_IDENTITY_OPTIONS = ['技工（计入高处作业人员）', '民工', '其他技工（不计入高处作业人员）'];
 // 作业人员状态合法值（与 public/js/views/users.js 的 togglePending / 状态标签一致）
-const WORKER_STATUS = ['已准入', '待定'];
+const WORKER_STATUS = ['已准入', '待定', '已退场'];
 
 
 // 解析 + 整批校验：单步端点与两段式（preview/confirm）共用；错误全量返回、不落半截数据。

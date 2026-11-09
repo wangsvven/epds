@@ -150,11 +150,20 @@ const WorkersPanel = {
         dialogVisible.value = false; load();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
+    // 「恢复准入」：写入已准入并清空退场时刻；「待定库」：仅改存储状态。
     async function togglePending(row) {
-      const to = row.status === '待定' ? '已准入' : '待定';
+      const to = (row.status === '待定' || row.status === '已退场') ? '已准入' : '待定';
       try {
-        await api.put('/api/workers/' + row.id, { status: to });
+        await api.put('/api/workers/' + row.id, to === '已准入' ? { status: to, exitedAt: null } : { status: to });
         ElementPlus.ElMessage.success(to === '待定' ? '已移入待定库，该人员不再供周计划选择' : '已恢复准入');
+        load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+    }
+    // 「退场」：记录退场时刻（唯一新增字段 exitedAt，取北京时间，与全系统时间源一致）。
+    async function exitWorker(row) {
+      try {
+        await api.put('/api/workers/' + row.id, { status: '已退场', exitedAt: ServerTime.ymdhms() });
+        ElementPlus.ElMessage.success('已标记人员退场');
         load();
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
@@ -252,7 +261,7 @@ const WorkersPanel = {
       else if (f.name) { filters.name = f.name; page.value = 1; }
     });
     return { isTab, list, teams, sortedTeams, loading, filters, page, pageSize, filtered, paged, resetFilters, dialogVisible, editing, form, fileInput,
-      openAdd, openEdit, submit, togglePending, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
+      openAdd, openEdit, submit, togglePending, exitWorker, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
       imp, impKindType, toggleImpDecision, confirmImport,
       teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
       fmtValid, fmtCerts, wst, rowClass, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_CERT_OPTIONS };
@@ -310,10 +319,11 @@ const WorkersPanel = {
           <el-table-column label="状态" width="100">
             <template #default="{row}"><el-tag :type="statusTag(row).type" size="small">{{ statusTag(row).text }}</el-tag></template>
           </el-table-column>
-          <el-table-column label="操作" width="170" class-name="wk-acts-cell">
+          <el-table-column label="操作" width="200" class-name="wk-acts-cell">
             <template #default="{row}">
               <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-              <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>
+              <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ (row.status==='待定'||row.status==='已退场') ? '恢复准入' : '待定库' }}</el-button>
+              <el-button v-if="canWrite('users') && row.status!=='已退场'" link type="primary" size="small" @click="exitWorker(row)">退场</el-button>
               <el-button v-if="canWrite('users')" link type="danger" size="small" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
@@ -382,10 +392,11 @@ const WorkersPanel = {
         <el-table-column label="状态" width="100">
           <template #default="{row}"><el-tag :type="statusTag(row).type" size="small">{{ statusTag(row).text }}</el-tag></template>
         </el-table-column>
-        <el-table-column label="操作" width="170" class-name="wk-acts-cell">
+        <el-table-column label="操作" width="200" class-name="wk-acts-cell">
           <template #default="{row}">
             <el-button v-if="canWrite('users')" link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ row.status==='待定' ? '恢复准入' : '待定库' }}</el-button>
+            <el-button v-if="canWrite('users')" link type="primary" size="small" @click="togglePending(row)">{{ (row.status==='待定'||row.status==='已退场') ? '恢复准入' : '待定库' }}</el-button>
+            <el-button v-if="canWrite('users') && row.status!=='已退场'" link type="primary" size="small" @click="exitWorker(row)">退场</el-button>
             <el-button v-if="canWrite('users')" link type="danger" size="small" @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>

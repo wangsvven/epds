@@ -76,6 +76,106 @@
     };
   }
 
+  /* ---------- 来源二：人员动态（按天汇总退场） ----------
+     只认 status='已退场' 且 exitedAt 落在窗口内的记录；存量无 exitedAt 的不显示。 */
+  function personMessages(workers, today) {
+    var byDay = {};
+    (workers || []).forEach(function (w) {
+      if (!w || w.deleted || w.status !== '已退场') return;
+      var day = bjDay(w.exitedAt);
+      if (!inWindow(day, today)) return;
+      (byDay[day] = byDay[day] || []).push(w);
+    });
+    return Object.keys(byDay).map(function (day) {
+      var arr = techFirst(byDay[day], 'exitedAt');
+      var n = arr.length;
+      var who = n <= 3
+        ? arr.map(function (x) { return x.name; }).join('、')
+        : arr.slice(0, 3).map(function (x) { return x.name; }).join('、') + '等' + n + '人';
+      return {
+        kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers',
+        day: day, text: dayLabel(day, today) + who + '已退场'
+      };
+    });
+  }
+
+  /* ---------- 来源三：材料动态（按天汇总，批次优先） ----------
+     批次：rowsTotal 求和 = 录入总行数；materialIds.length（回退 rows）求和 = 实际新增。
+     无批次的当日手工新增：materials 中 createdAt 在窗口内且无 importId 的条数。 */
+  function materialMessages(imports, materials, today) {
+    var byDay = {};
+    function slot(day) {
+      return byDay[day] || (byDay[day] = { rowsTotal: 0, added: 0, manual: 0, hasBatch: false });
+    }
+    (imports || []).forEach(function (b) {
+      if (!b || b.deleted) return;
+      var day = bjDay(b.importedAt);
+      if (!inWindow(day, today)) return;
+      var e = slot(day);
+      e.hasBatch = true;
+      e.rowsTotal += Number(b.rowsTotal) || 0;
+      e.added += Array.isArray(b.materialIds) ? b.materialIds.length : (Number(b.rows) || 0);
+    });
+    (materials || []).forEach(function (m) {
+      if (!m || m.deleted || m.importId) return;
+      var day = bjDay(m.createdAt);
+      if (!inWindow(day, today)) return;
+      slot(day).manual += 1;
+    });
+    return Object.keys(byDay).map(function (day) {
+      var e = byDay[day], label = dayLabel(day, today);
+      return {
+        kind: 'material', label: '材料动态', nav: 'materials', day: day,
+        text: e.hasBatch
+          ? label + '录入材料 ' + e.rowsTotal + ' 条，新增 ' + e.added + ' 条'
+          : label + '新增材料 ' + e.manual + ' 条'
+      };
+    });
+  }
+
+  /* ---------- 来源四：计划动态（按天、按 planType 分行） ---------- */
+  function planMessages(plans, today) {
+    var byDay = {};
+    (plans || []).forEach(function (p) {
+      if (!p || p.deleted) return;
+      var day = bjDay(p.createdAt);
+      if (!inWindow(day, today)) return;
+      var t = String(p.planType || '');
+      if (t !== '周计划' && t !== '月计划') return;
+      var e = byDay[day] || (byDay[day] = {});
+      e[t] = (e[t] || 0) + 1;
+    });
+    var out = [];
+    Object.keys(byDay).forEach(function (day) {
+      var label = dayLabel(day, today);
+      ['周计划', '月计划'].forEach(function (t, i) {
+        if (!byDay[day][t]) return;
+        out.push({
+          kind: 'plan', label: '计划动态', nav: 'plans', day: day, order: i,
+          text: label + '新增' + t + ' ' + byDay[day][t] + ' 条'
+        });
+      });
+    });
+    return out;
+  }
+
+  /* ---------- 来源五：借工动态（按天一行） ---------- */
+  function borrowMessages(borrow, today) {
+    var byDay = {};
+    (borrow || []).forEach(function (b) {
+      if (!b || b.deleted) return;
+      var day = bjDay(b.createdAt);
+      if (!inWindow(day, today)) return;
+      byDay[day] = (byDay[day] || 0) + 1;
+    });
+    return Object.keys(byDay).map(function (day) {
+      return {
+        kind: 'borrow', label: '借工动态', nav: 'borrow', day: day,
+        text: dayLabel(day, today) + '新增借工记录 ' + byDay[day] + ' 条'
+      };
+    });
+  }
+
   var KIND_ORDER = { person: 0, material: 1, plan: 2, borrow: 3 };
   /* 聚合层：预警置顶，其余按日期倒序，同日内 人员 → 材料 → 计划 → 借工。 */
   function collect(parts) {
@@ -96,10 +196,10 @@
     var alerts = o.alerts || [];
     var parts = {
       alert: alertMessage(alerts, o.workers),
-      person: typeof personMessages === 'function' ? personMessages(o.workers, o.today) : [],
-      material: typeof materialMessages === 'function' ? materialMessages(o.imports, o.materials, o.today) : [],
-      plan: typeof planMessages === 'function' ? planMessages(o.plans, o.today) : [],
-      borrow: typeof borrowMessages === 'function' ? borrowMessages(o.borrow, o.today) : []
+      person: personMessages(o.workers, o.today),
+      material: materialMessages(o.imports, o.materials, o.today),
+      plan: planMessages(o.plans, o.today),
+      borrow: borrowMessages(o.borrow, o.today)
     };
     return { messages: collect(parts), alertCount: alerts.length };
   }
@@ -107,7 +207,9 @@
   var api = {
     TECH_IDENTITY: TECH_IDENTITY, bjDay: bjDay, shiftDay: shiftDay,
     dayLabel: dayLabel, inWindow: inWindow, techFirst: techFirst,
-    alertMessage: alertMessage, collect: collect, build: build
+    alertMessage: alertMessage, personMessages: personMessages,
+    materialMessages: materialMessages, planMessages: planMessages,
+    borrowMessages: borrowMessages, collect: collect, build: build
   };
   if (typeof window !== 'undefined') window.WorkFeed = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

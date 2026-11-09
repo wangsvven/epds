@@ -131,6 +131,7 @@ if (typeof window !== 'undefined') window.MatName = { short: matShortName, list:
 /* 作业人员派生状态（准入到期预警的唯一口径，前后端需要处与冒烟共用同一份代码）。
    只计算、不写库：todayStr 由调用方按北京时间传 YYYY-MM-DD（ServerTime.ymd() / bjStr()）。
    - 存储状态 待定 → 派生 待定（不参与预警）
+   - 存储状态 已退场 → 派生 已退场（不参与预警、不可被选人；由名单「退场」按钮写入）
    - 存储状态 已准入 且有效期结束日 < 今天 → 派生 待定（超期自动转）
    - 有效期为空 → 不触发自动转换，按存储状态
    - 到期距离 days = 结束日 - 今天（自然日）；结束日当天 0，次日起为负 */
@@ -145,7 +146,8 @@ function workerStatusOf(w, todayStr) {
   }
   const overdue = stored === '已准入' && days !== null && days < 0;
   const warn = stored === '已准入' && days !== null && days >= 0 && days <= 30;
-  const derived = overdue ? '待定' : (stored === '待定' ? '待定' : '已准入');
+  const derived = stored === '已退场' ? '已退场'
+    : ((stored === '待定' || overdue) ? '待定' : '已准入');
   return {
     stored, derived, days,
     overdueDays: overdue ? -days : 0,

@@ -2051,6 +2051,91 @@ async function listOk(p, token) {
     return '点名排序 5/3/1/0 四种句式 + ISO/北京时间转换 + 日期标签 + 窗口边界';
   });
 
+  await step('feed', '四类动态来源：3 天窗口边界 / 同日多批次合并 / 排序 / 退场口径', async () => {
+    const vm = require('vm');
+    const sb = { window: {}, module: { exports: {} } };
+    vm.createContext(sb);
+    vm.runInContext(fs.readFileSync(path.join(ROOT, 'public', 'js', 'work-feed.js'), 'utf8'), sb);
+    const F = sb.window.WorkFeed;
+    const T = '2026-11-09';
+    const iso = d => d + 'T04:00:00.000Z';      // 对应北京时间当天 12:00
+    const workers = [
+      { id: 'p1', name: '甲', identity: '技工（计入高处作业人员）', status: '已退场', exitedAt: '2026-11-09 08:00' },
+      { id: 'p2', name: '乙', identity: '民工', status: '已退场', exitedAt: '2026-11-09 09:00' },
+      { id: 'p3', name: '丙', identity: '民工', status: '已退场', exitedAt: '2026-11-08 10:00' },
+      { id: 'p4', name: '丁', identity: '民工', status: '已退场', exitedAt: '2026-11-06 10:00' },
+      { id: 'p5', name: '戊', identity: '民工', status: '已退场' },
+      { id: 'p6', name: '己', identity: '民工', status: '已准入', exitedAt: '2026-11-09 11:00' },
+      { id: 'w1', name: '预警甲', identity: '技工（计入高处作业人员）', status: '已准入', validEnd: '2026-11-10' }
+    ];
+    const imports = [
+      { id: 'i1', importedAt: '2026-11-09 08:10', rowsTotal: 10, materialIds: ['a', 'b', 'c'] },
+      { id: 'i2', importedAt: '2026-11-09 09:10', rowsTotal: 20, materialIds: ['d', 'e', 'f', 'g'] },
+      { id: 'i3', importedAt: '2026-11-08 08:10', rowsTotal: 5, materialIds: ['h', 'i'] },
+      { id: 'i4', importedAt: '2026-11-06 08:10', rowsTotal: 99, materialIds: ['x'] }
+    ];
+    const materials = [
+      { id: 'm0', createdAt: iso('2026-11-07') },
+      { id: 'm1', createdAt: iso(T), importId: 'i1' },
+      { id: 'm2', createdAt: iso('2026-11-06') }
+    ];
+    const plans = [
+      { id: 'q1', createdAt: iso(T), planType: '周计划' },
+      { id: 'q2', createdAt: iso(T), planType: '周计划' },
+      { id: 'q3', createdAt: iso(T), planType: '月计划' },
+      { id: 'q4', createdAt: iso('2026-11-06'), planType: '周计划' },
+      { id: 'q5', createdAt: iso(T), planType: '其他' }
+    ];
+    const borrow = [{ id: 'b1', createdAt: iso(T) }, { id: 'b2', createdAt: iso('2026-11-06') }];
+    const alerts = [{ id: 'w1', name: '预警甲', validEnd: '2026-11-10' }];
+    const out = F.build({ workers, alerts, imports, materials, plans, borrow, today: T });
+    const texts = out.messages.map(m => m.text);
+    need(out.alertCount === 1 && out.messages[0].kind === 'alert', '预警应置顶且徽标人数=1：' + brief(out.messages.slice(0, 2)));
+    const expect = [
+      '今日甲、乙已退场',
+      '今日录入材料 30 条，新增 7 条',
+      '今日新增周计划 2 条',
+      '今日新增月计划 1 条',
+      '今日新增借工记录 1 条',
+      '昨日丙已退场',
+      '昨日录入材料 5 条，新增 2 条',
+      '11-07新增材料 1 条'
+    ];
+    need(JSON.stringify(texts.slice(1)) === JSON.stringify(expect),
+      '动态文案 / 排序 / 窗口 / 同日合并应完全匹配：' + brief(texts.slice(1)));
+    need(!/丁|戊|己/.test(texts.join('|')), '窗口外、无 exitedAt、已恢复准入的人员都不应出现');
+    need(!/99 条|11-06/.test(texts.join('|')), '第 4 天前的批次 / 计划 / 借工不应出现');
+    return '8 条动态（今日 5 / 昨日 2 / 前天 1）+ 3 天窗口 + 同日两批合并 10+20→30、3+4→7';
+  });
+
+  await step('users', '退场能力：exitedAt 落库/清空 + 已退场派生不可选 + 导入状态枚举', async () => {
+    const vm = require('vm');
+    const sys = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'system.js'), 'utf8');
+    need(/const WORKER_STATUS = \['已准入', '待定', '已退场'\]/.test(sys), '后端导入状态枚举应含「已退场」');
+    const sb = { window: {} };
+    vm.createContext(sb);
+    vm.runInContext(fs.readFileSync(path.join(ROOT, 'public', 'js', 'utils.js'), 'utf8'), sb);
+    const WS = sb.window.WorkerStatus;
+    const s = WS.of({ status: '已退场', validEnd: '2026-12-31' }, '2026-11-09');
+    need(s.derived === '已退场' && s.admitted === false && !s.warn && !s.highlight,
+      '已退场应派生为已退场、不可选、不预警：' + brief(s));
+    need(WS.alerts([{ id: 'x', name: 'x', status: '已退场', validEnd: '2026-11-10' }], '2026-11-09').length === 0,
+      '已退场不计入准入预警');
+
+    const legacy = (await listOk('/api/workers', token)).find(w => !('exitedAt' in w));
+    need(legacy, '应存在无 exitedAt 的存量记录');
+    const t1 = '2026-11-09 21:00:00';
+    needOk(await api('PUT', '/api/workers/' + legacy.id, { token, body: { status: '已退场', exitedAt: t1 } }), '退场 PUT');
+    const g1 = needOk(await api('GET', '/api/workers/' + legacy.id, { token }), '退场后 GET');
+    need(g1.status === '已退场' && g1.exitedAt === t1, '退场后 exitedAt 应落库：' + brief(g1));
+    needOk(await api('PUT', '/api/workers/' + legacy.id, { token, body: { status: '已准入', exitedAt: null } }), '恢复准入 PUT');
+    const g2 = needOk(await api('GET', '/api/workers/' + legacy.id, { token }), '恢复后 GET');
+    need(g2.status === '已准入' && g2.exitedAt === null, '恢复准入后 exitedAt 应清空：' + brief(g2));
+    const others = await listOk('/api/workers', token);
+    need(others.some(w => !('exitedAt' in w)), '其余存量无 exitedAt 记录仍可正常读取');
+    return '退场写入 / 恢复清空 / 派生不可选 / 导入枚举对齐 / 存量无字段不报错';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
