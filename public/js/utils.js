@@ -68,3 +68,112 @@ function cmpReqNo(a, b) {
   return 0;
 }
 if (typeof window !== 'undefined') window.MaterialNo = { key: reqNoKey, cmp: cmpReqNo };
+
+/* ---------------- 物料简称（领料单列表「物料描述」列用） ----------------
+ * 目标：只保留物料名称主体，去掉后面的型号 / 规格 / 参数。
+ * 例：直角挂板Z-7 → 直角挂板；预应力混凝土电杆(Z)Φ190×12M×GY（法兰）→ 预应力混凝土电杆；
+ *    低压JP柜50kVA（双回、无补偿）→ 低压JP柜；10kV氧化锌避雷器HY5WS-17/50 → 10kV氧化锌避雷器。
+ * 做法：从左向右扫描，中文 / 中文标点 / 名称型拉丁前缀（PVC、JP、10kV、2.1m，后面紧跟中文）属于名称；
+ *      遇到规格符号（Φ □ ∠ × 等）、英文数字型号串、非中文括注即截断；纯中文括注（如「耐张双杆」）保留。
+ * 纯函数、无依赖；window.MatName 供冒烟脚本（vm 加载）与前端共用。 */
+const MAT_NAME_CJK = /[\u3400-\u9fff\u3007\u2160-\u217f]/;            // 汉字 / 〇 / Ⅰ-Ⅻ
+const MAT_NAME_PUNCT = /[，、·：；]/;                                   // 名称内部允许的中文标点
+const MAT_SPEC_CHAR = /[Φφ□∠［\[×∽=*＊²]/;                            // 规格起始符号
+const MAT_OPEN = /[（(]/, MAT_CLOSE = /[）)]/;
+const MAT_PREFIX_UNIT = /^\d+(?:\.\d+)?(?:kV|KV|kVA|KVA|m|mm|M)$/;    // 「10kV」「2.1m」这类量词前缀
+const MAT_PREFIX_LATIN = /^[A-Za-z]{1,5}$/;                            // 「PVC」「JP」「U」「ZBG」
+function matShortName(desc) {
+  const s = String(desc == null ? '' : desc).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const n = s.length;
+  let i = 0;
+  while (i < n) {
+    const c = s[i];
+    if (MAT_NAME_CJK.test(c) || MAT_NAME_PUNCT.test(c)) { i++; continue; }
+    // 名称中间的空格：后面还跟中文才保留（如「M垫铁 隔离刀闸」）
+    if (c === ' ') { if (i + 1 < n && MAT_NAME_CJK.test(s[i + 1])) { i++; continue; } break; }
+    if (MAT_OPEN.test(c)) {
+      let j = i + 1;
+      while (j < n && !MAT_CLOSE.test(s[j])) j++;
+      const inner = s.slice(i + 1, j);
+      const chineseOnly = inner.length > 0 && inner.length <= 14
+        && /^[\u4e00-\u9fff，、·：；\s]+$/.test(inner);
+      if (chineseOnly) { i = j < n ? j + 1 : n; continue; }
+      break;                                                            // 非中文括注 = 型号 / 规格
+    }
+    if (MAT_SPEC_CHAR.test(c)) break;
+    if (/[A-Za-z0-9]/.test(c)) {
+      let j = i;
+      while (j < n && /[A-Za-z0-9.\/+\-]/.test(s[j])) j++;
+      const tok = s.slice(i, j);
+      const followedByCJK = j < n && MAT_NAME_CJK.test(s[j]);
+      const isPrefix = followedByCJK && tok.length <= 8
+        && (MAT_PREFIX_LATIN.test(tok) || MAT_PREFIX_UNIT.test(tok));
+      if (isPrefix) { i = j; continue; }
+      break;                                                            // 型号串起点
+    }
+    break;
+  }
+  const name = s.slice(0, i).replace(/[\s，、·：；]+$/, '').trim();
+  return name || s;                                                      // 纯型号描述时原样兜底
+}
+// 领料单明细 → 去重后的物料简称列表
+function matNamesOf(items) {
+  const out = [];
+  (items || []).forEach(it => {
+    const name = matShortName(it && it.description);
+    if (name && out.indexOf(name) < 0) out.push(name);
+  });
+  return out;
+}
+if (typeof window !== 'undefined') window.MatName = { short: matShortName, list: matNamesOf };
+
+/* 作业人员派生状态（准入到期预警的唯一口径，前后端需要处与冒烟共用同一份代码）。
+   只计算、不写库：todayStr 由调用方按北京时间传 YYYY-MM-DD（ServerTime.ymd() / bjStr()）。
+   - 存储状态 待定 → 派生 待定（不参与预警）
+   - 存储状态 已准入 且有效期结束日 < 今天 → 派生 待定（超期自动转）
+   - 有效期为空 → 不触发自动转换，按存储状态
+   - 到期距离 days = 结束日 - 今天（自然日）；结束日当天 0，次日起为负 */
+function workerStatusOf(w, todayStr) {
+  const stored = String((w && w.status) || '已准入').trim();
+  const today = String(todayStr || '').slice(0, 10);
+  const end = String((w && w.validEnd) || '').trim().slice(0, 10);
+  const dayRe = /^\d{4}-\d{2}-\d{2}$/;
+  let days = null;
+  if (end && dayRe.test(end) && dayRe.test(today)) {
+    days = Math.round((Date.parse(end + 'T00:00:00Z') - Date.parse(today + 'T00:00:00Z')) / 86400000);
+  }
+  const overdue = stored === '已准入' && days !== null && days < 0;
+  const warn = stored === '已准入' && days !== null && days >= 0 && days <= 30;
+  const derived = overdue ? '待定' : (stored === '待定' ? '待定' : '已准入');
+  return {
+    stored, derived, days,
+    overdueDays: overdue ? -days : 0,
+    warn, overdue,
+    highlight: warn || overdue,
+    admitted: derived === '已准入'
+  };
+}
+
+/* 首页公告栏：汇总存储状态为已准入且（0–30 天内到期或已超期）的人员。
+   超期排最前，其余按到期日升序；只派生不落库。 */
+function workerAlerts(list, todayStr) {
+  const out = [];
+  (list || []).forEach(w => {
+    if (!w || w.deleted) return;
+    const s = workerStatusOf(w, todayStr);
+    if (s.stored !== '已准入' || !(s.warn || s.overdue)) return;
+    out.push({
+      id: w.id, name: String(w.name || ''), team: String(w.team || ''),
+      validEnd: String(w.validEnd || ''), days: s.days,
+      overdueDays: s.overdueDays, overdue: s.overdue
+    });
+  });
+  out.sort((a, b) => {
+    if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+    const d = a.validEnd.localeCompare(b.validEnd);
+    return d || a.name.localeCompare(b.name);
+  });
+  return out;
+}
+if (typeof window !== 'undefined') window.WorkerStatus = { of: workerStatusOf, alerts: workerAlerts };

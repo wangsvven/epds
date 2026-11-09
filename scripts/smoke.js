@@ -1958,6 +1958,53 @@ async function listOk(p, token) {
     }
   });
 
+  await step('users', '准入到期预警派生状态：日期边界/自动转待定/公告栏排序（前端共用纯函数）', async () => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'utils.js'), 'utf8');
+    const sb = { window: {} };
+    vm.createContext(sb);
+    vm.runInContext(code, sb);
+    const WS = sb.window.WorkerStatus;
+    need(WS && typeof WS.of === 'function' && typeof WS.alerts === 'function', 'utils.js 应导出 WorkerStatus.of / alerts');
+    const T = '2026-11-09';
+    const d = off => new Date(Date.parse(T + 'T00:00:00Z') + off * 86400000).toISOString().slice(0, 10);
+    const mk = (status, end, extra) => Object.assign({
+      id: 'x', name: 'n', status, validStart: '2026-01-01', validEnd: end
+    }, extra || {});
+
+    const s30 = WS.of(mk('已准入', d(30)), T);
+    need(s30.days === 30 && s30.warn === true && s30.highlight === true && s30.derived === '已准入',
+      '结束日=今天+30 应预警：' + brief(s30));
+    const s31 = WS.of(mk('已准入', d(31)), T);
+    need(s31.days === 31 && s31.warn === false && s31.highlight === false,
+      '结束日=今天+31 不应预警：' + brief(s31));
+    const s0 = WS.of(mk('已准入', T), T);
+    need(s0.days === 0 && s0.warn === true && s0.admitted === true,
+      '结束日=今天应剩 0 天且仍预警：' + brief(s0));
+    const sNeg = WS.of(mk('已准入', d(-1)), T);
+    need(sNeg.derived === '待定' && sNeg.overdue === true && sNeg.overdueDays === 1 && sNeg.admitted === false,
+      '昨天到期应自动转待定、超期 1 天：' + brief(sNeg));
+    const sEmpty = WS.of(mk('已准入', ''), T);
+    need(sEmpty.days === null && sEmpty.derived === '已准入' && sEmpty.highlight === false,
+      '有效期为空按存储状态、不触发转换：' + brief(sEmpty));
+    const sPending = WS.of(mk('待定', d(10)), T);
+    need(sPending.derived === '待定' && sPending.highlight === false && sPending.admitted === false,
+      '存储待定 + 未来有效期仍待定且不预警：' + brief(sPending));
+
+    const al = WS.alerts([
+      mk('已准入', d(10), { id: 'b', name: 'B' }),
+      mk('已准入', d(-3), { id: 'a', name: 'A' }),
+      mk('已准入', d(2), { id: 'c', name: 'C' }),
+      mk('已准入', d(31), { id: 'd', name: 'D' }),
+      mk('待定', d(1), { id: 'e', name: 'E' })
+    ], T);
+    need(al.length === 3 && al[0].id === 'a' && al[1].id === 'c' && al[2].id === 'b',
+      '公告栏应超期在前、其余按到期日升序，排除 +31 与存储待定：' + brief(al));
+    need(al[0].overdueDays === 3 && al[1].days === 2 && al[2].days === 10,
+      '公告栏超期天数 / 剩余天数应正确：' + brief(al));
+    return '+30/+31/今天/昨天/空有效期/存储待定 6 个边界 + 公告栏排序';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
