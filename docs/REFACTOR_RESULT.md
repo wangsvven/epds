@@ -109,3 +109,60 @@ init → contacts → users → projects → plans → actualWorks → main`
 
 1. `seedHazardLibraryFromNorm()`（`server/routes/documents.js`）定义了但从未被调用，疑似死代码，按「只搬不改」原样保留，本次不动。
 2. ~~金具及铁附件材料包在「工程实际施工量」中不出现，业务口径待确认。~~ **已关闭（2026-10-24 验收确认）**：金具及铁附件包不出现在「工程实际施工量」是正确的业务口径，属正常行为而非缺陷。
+
+---
+
+## 7. 后续演进快照（2026-11-07）
+
+> 第 1–6 章是 **2026-10-24 定版当时的历史快照**，其中的行数、文件数、冒烟步数已不代表当前状态。
+> 本节记录定版之后的模块演进，作为当前结构的对照依据。
+
+### 7.1 架构纪律（逐项复核，全部保持）
+
+| 约定 | 当前状态 |
+|---|---|
+| `server.js` 纯入口 | **54 行**，仍只做加载顺序、静态托管、listen |
+| `core/` + `routes/` 两层 | 保持；`core` **13** 个 / `routes` **8** 个 |
+| 依赖方向 routes → core | 全部 routes 只 require `../core/*` 与内置/第三方模块；**无 routes↔routes、无 core→routes** |
+| 跨区共用函数下沉 core | 保持；本次又把 `safeFileName` / `INLINE_MIME` 从 plans 下沉到 `core/util.js` |
+| 前端零构建全局脚本 | 保持；`public/app.js` 仍删除，`main.js` 最后加载并统一注册 22 个组件 |
+| `node scripts/smoke.js` 回归 | 保持，现有 **79** 步（定版 44 步） |
+
+### 7.2 定版之后的模块化演进
+
+| 时间 | 新增能力 | 后端归属 | 前端归属 |
+|---|---|---|---|
+| 10-31 | 月计划 20 列导入/导出模板 | `core/month-plan-xlsx.js`（生成逻辑） | `views/monthPlans.js` |
+| 11-02 | 版本化数据迁移框架 | `core/migrations.js`（由 `core/db.js` 调用，不循环依赖） | — |
+| 11-02 | 服务器北京时间唯一时间源 | `core/util.js` | `js/server-time.js` |
+| 11-03 | 借工管理整体重构 | `core/borrow-doc.js`（docx） | `views/borrow.js`（独立菜单 key=`borrow`） |
+| 11-03 | 勘察单 / 施工资料 docx | `core/survey-doc.js` | — |
+| 其它 | 到货统计、计划编号规则 | — | `js/arrival-calc.js`、`js/plan-no.js`、`views/arrivalStats.js` |
+
+前端脚本 **15 → 21**（顶层 4 → 7，views 11 → 14）；后端 `core` **9 → 13**。前端加载顺序仍是 `api → utils → auth → views → main` 的大框架，中间插入了 `server-time` / `arrival-calc` / `plan-no`。
+
+### 7.3 本次拆分（2026-11-07）：补齐后端模块粒度
+
+定版时 `routes/plans.js` 仅 114 行，后续新增功能都往里追加端点，到 v2.19.0 已膨胀到 **923 行**，一个文件混装周计划、月计划导出、借工、施工资料、勘察单五类端点，与前端已独立的 `views/borrow.js` / `views/monthPlans.js` 不对称。
+
+本次为**纯结构搬迁**，不改任何 API 路径、请求/响应结构、`db.json` 数据与业务行为：
+
+| 原位置 | 新文件 | 内容 |
+|---|---|---|
+| `plans.js:717–743` | **`routes/monthPlans.js`**（36 行） | `GET /api/workPlans/month-plan.xlsx` |
+| `plans.js:745–918` | **`routes/borrow.js`**（192 行） | 佐证上传/下载/删除、借工单生成/下载、字段前置校验，以及 `borrowWorks` 通用 CRUD |
+| `plans.js:354 / 379` | **`core/util.js`** | `safeFileName` / `INLINE_MIME`（原 `planFileSafeName` / `DRAWING_INLINE_MIME`），供 plans 与 borrow 共用 |
+
+拆分后 `routes/plans.js` = **717 行**（周计划 + 施工资料 + 勘察单 + `plans`/`workPlans` CRUD）。
+
+**挂载顺序（不可调整）**：`server.js` 中 `borrow` 与 `monthPlans` 必须先于 `plans` 加载——
+- `GET /api/workPlans/month-plan.xlsx` 是静态路径，若晚于 `GET /api/workPlans/:id` 会被 `:id` 抢先匹配；
+- 借工专用端点与全局前置校验中间件须早于通用 CRUD。
+
+校验：拆分前后 **21 个显式端点集合完全一致**、3 个通用 CRUD 集合（`plans` / `borrowWorks` / `workPlans`）完全一致、`app.use` 数量 1→1。`scripts/smoke.js` 基线 77 → **79**：新增「独立路由回归」运行时断言（月计划 xlsx 导出 PK 头、借工单生成与下载）与「结构」静态断言（模块归属、挂载顺序、单向依赖），防止回退。
+
+### 7.4 仍存在的粒度问题（未处理，待确认）
+
+1. 前端 `views/plans.js` **2588 行**、`views/monthPlans.js` 1025 行、`views/materials.js` 1720 行、`views/documents.js` 1201 行，均为单文件大组件；本次只收敛后端，未拆前端（需改 `index.html` 加载顺序与组件注册，风险面更大）。
+2. 月计划的**导入**仍与周计划共用 `POST /api/workPlans/import`（同一路径按 `planType` 分流），无法整块搬到 `routes/monthPlans.js`，属业务耦合而非模块划分问题。
+3. `core/migrations.js` 的迁移项注册表随版本追加，属预期增长。
