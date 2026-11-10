@@ -33,6 +33,7 @@ require('./server/routes/projects');
 // 专用路由须早于 routes/plans.js 的通用 /:id 与静态路径注册（顺序不可随意调整）
 require('./server/routes/borrow');       // 借工：佐证 / 借工单 / 前置校验 + borrowWorks CRUD
 require('./server/routes/monthPlans');  // 月计划 xlsx：/api/workPlans/month-plan.xlsx
+require('./server/routes/plan-split');  // 周计划拆分：/api/workPlans/:id/split|unsplit（须早于 plans 的通用 /:id）
 require('./server/routes/plans');
 require('./server/routes/documents');
 require('./server/routes/workticket');

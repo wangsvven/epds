@@ -31,7 +31,7 @@ function crud(collection, prefix, opts) {
     if (idx < 0) return res.status(404).json({ error: '未找到' });
     const cur = DB[collection][idx];
     if (biz && cur.deleted) return res.status(404).json({ error: '未找到' });
-    const merged = { ...cur, ...req.body, id: req.params.id };
+    const merged = { ...cur, ...req.body, id: req.params.id, updatedAt: nowISO() };
     if (biz) { merged.deleted = cur.deleted; }
     DB[collection][idx] = merged;
     saveDB();
