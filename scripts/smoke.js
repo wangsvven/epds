@@ -2760,7 +2760,7 @@ async function runSmoke() {
     return '四类拦截各 1 条（状态/编辑/工程量/勘察）+ 另建勘察 1 条 + 正常撤销恢复快照、删 1 条子计划并逻辑删除';
   });
 
-  await step('结构', '周计划拆分前端接线与列表样式：脚本顺序/组件注册/入口守卫/徽标/改期拦截/窄屏卡片/操作列平铺/票种底色', async () => {
+  await step('结构', '周计划拆分前端接线与列表样式：脚本顺序/组件注册/入口守卫/徽标/改期拦截/窄屏卡片/操作列平铺/莫兰迪五色/全黑字', async () => {
     const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
     const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
     const d = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plan-split.js'), 'utf8');
@@ -2784,11 +2784,20 @@ async function runSmoke() {
     need(/tr\[class\*="tk-a"\] > td\.el-table__cell \{ background-color:var\(--tk-bg\)/.test(html)
       && !/tr\[class\*="tk-a"\][^{]*\{[^}]*linear-gradient/.test(html),
       '票种底色应为纯色浅底，不使用渐变');
+    need(['#BEC5D2', '#CEDEE5', '#E7E8EC', '#F3EDEF', '#FFF2F2'].every(c => html.includes(c))
+      && !/#F8DFDB|#FAE5CE|#F7EFC4|#E1EFDD|#DAEBF3/.test(html),
+      '票种底色应换成 Dopely 色板调浅版（不再用红橙黄绿青）');
+    need(/\.plan-table th\.el-table__cell,[\s\S]{0,400}color:#000 !important/.test(html)
+      && /\.plans-view \{ color:#000; \}/.test(html)
+      && /html\.dark \.plan-table th\.el-table__cell,/.test(html),
+      '周计划表格与视图文字应统统黑色（深色主题保留浅字）');
+    need(/background:#6E7F9A;color:#fff/.test(p) && !/#3370ff/.test(p),
+      '日历徽标应改用色板蓝灰底白字');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
     need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
     need(/qtyTouched/.test(d) && /rebuildContent/.test(d), '重新解析应保留用户改过的工程量');
-    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留/操作列平铺/票种五色';
+    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留/操作列平铺/莫兰迪五色/统统黑字';
   });
 
   await step('结构', '材料台账·出库管理四框：默认值/选项内容/三框联动过滤工程候选', async () => {

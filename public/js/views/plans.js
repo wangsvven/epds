@@ -237,13 +237,13 @@ const PlansView = {
       if (!s) return '-';
       return s.replace(/(\d+(?:\.\d+)?)\s*k\s*v$/i, '$1kV');
     }
-    // 工作票类型 → 行底色（中国风红/橙/黄/绿/青，一处定义，样式在 index.html 的 .tk-aN）
+    // 工作票类型 → 行底色（Dopely 莫兰迪色板 6E7F9A/93B5C6/C9CCD5/E4D8DC/FFE3E3 调浅版，样式在 index.html 的 .tk-aN）
     const TICKET_TONE = [
-      ['配电：配电第一种工作票', 'tk-a1'],   // 红 · 胭脂
-      ['配电：配电第二种工作票', 'tk-a2'],   // 橙 · 橘红
-      ['配电：低压工作票', 'tk-a3'],         // 黄 · 缃黄
-      ['线路：线路第一种工作票', 'tk-a4'],   // 绿 · 竹绿
-      ['线路：线路第二种工作票', 'tk-a5']    // 青 · 天青
+      ['配电：配电第一种工作票', 'tk-a1'],   // 雾蓝灰
+      ['配电：配电第二种工作票', 'tk-a2'],   // 浅水蓝
+      ['配电：低压工作票', 'tk-a3'],         // 淡灰紫
+      ['线路：线路第一种工作票', 'tk-a4'],   // 藕粉灰
+      ['线路：线路第二种工作票', 'tk-a5']    // 浅樱粉
     ];
     function ticketTone(row) {
       const t = String((row && row.ticketType) || '').trim();
@@ -1564,22 +1564,22 @@ const PlansView = {
     return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, isOngoing, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, unsplit, splitBadge, canSplit };
   },
   template: `
-  <div>
+  <div class="plans-view">
     <!-- 日计划日历只在「周计划管理」页签显示；月计划 / 已归档 / 已执行 / 已结算 / 已取消这五个页签与日历无关 -->
     <div v-if="tab === 'week'" style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:17px;font-weight:600">日计划日历</div>
       </div>
-      <div style="color:var(--text-3);font-size:12px;margin-top:6px">未来 21 天共 {{ upcoming.length }} 个日历安排，跨日计划按覆盖日期展示</div>
-      <div v-if="!calendarDays.length" style="margin-top:12px;background:var(--surface-3);border:1px solid var(--line);border-radius:6px;padding:16px;font-size:13px;color:var(--text-3)">未来 21 天暂无施工计划</div>
+      <div style="font-size:12px;margin-top:6px">未来 21 天共 {{ upcoming.length }} 个日历安排，跨日计划按覆盖日期展示</div>
+      <div v-if="!calendarDays.length" style="margin-top:12px;background:var(--surface-3);border:1px solid var(--line);border-radius:6px;padding:16px;font-size:13px">未来 21 天暂无施工计划</div>
       <div v-else style="display:flex;gap:12px;overflow-x:auto;padding:12px 2px 4px">
         <div v-for="d in calendarDays" :key="d.ds" style="min-width:250px;max-width:280px;flex:0 0 auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:12px 14px">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <b style="font-size:14px">{{ d.label }}</b>
-            <span style="background:#3370ff;color:#fff;border-radius:10px;font-size:12px;padding:1px 9px">{{ d.plans.length }} 条</span>
+            <span style="background:#6E7F9A;color:#fff;border-radius:10px;font-size:12px;padding:1px 9px">{{ d.plans.length }} 条</span>
           </div>
-          <div style="color:var(--text-2);font-size:13px;margin-top:8px">班组长：{{ d.plans[0].leader || d.plans[0].team || '-' }}</div>
-          <div v-for="p in d.plans" :key="p.id" style="color:var(--text-2);font-size:13px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          <div style="font-size:13px;margin-top:8px">班组长：{{ d.plans[0].leader || d.plans[0].team || '-' }}</div>
+          <div v-for="p in d.plans" :key="p.id" style="font-size:13px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
             <span v-if="(p.startDate || '').length > 10" style="margin-right:4px">{{ p.startDate.slice(11, 16) }}</span>{{ p.name }}
           </div>
         </div>
