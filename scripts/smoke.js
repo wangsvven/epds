@@ -2784,9 +2784,11 @@ async function runSmoke() {
     need(/tr\[class\*="tk-a"\] > td\.el-table__cell \{ background-color:var\(--tk-bg\)/.test(html)
       && !/tr\[class\*="tk-a"\][^{]*\{[^}]*linear-gradient/.test(html),
       '票种底色应为纯色浅底，不使用渐变');
-    need(['#BEC5D2', '#CEDEE5', '#E7E8EC', '#F3EDEF', '#FFF2F2'].every(c => html.includes(c))
+    need(['#E9ECF0', '#EFF4F6', '#F7F7F9', '#FBF9FA', '#FFFBFB'].every(c => html.includes(c))
       && !/#F8DFDB|#FAE5CE|#F7EFC4|#E1EFDD|#DAEBF3/.test(html),
-      '票种底色应换成 Dopely 色板调浅版（不再用红橙黄绿青）');
+      '票种底色应为 Dopely 色板极淡版（接近白，不再用红橙黄绿青）');
+    need(/#E9ECF0; --tk-bg-hover:#DBDFE6/.test(html) && /#FFFBFB; --tk-bg-hover:#FFF7F7/.test(html),
+      '悬停色应比底色深一档但不过浓');
     need(/\.plan-table th\.el-table__cell,[\s\S]{0,400}color:#000 !important/.test(html)
       && /\.plans-view \{ color:#000; \}/.test(html)
       && /html\.dark \.plan-table th\.el-table__cell,/.test(html),

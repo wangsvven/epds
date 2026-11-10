@@ -1038,13 +1038,14 @@
   .plan-act-line { display:flex; align-items:center; flex-wrap:wrap; gap:0 8px; }
   .plan-acts .el-button { margin-left:0; padding-left:0; padding-right:0; height:20px; font-weight:450; font-size:12.5px; }
   .plan-split-badge { margin-left:6px; font-size:11.5px; color:var(--text-3); white-space:nowrap; }
-  /* 工作票类型 → Dopely 莫兰迪色板（6E7F9A / 93B5C6 / C9CCD5 / E4D8DC / FFE3E3）整体调浅，
-     纯色浅底 + 首列 3px 色条；不使用渐变 */
-  .plan-table .el-table__body tr.tk-a1 { --tk-bg:#BEC5D2; --tk-bg-hover:#A8B2C2; --tk-edge:#58667B; } /* 雾蓝灰 */
-  .plan-table .el-table__body tr.tk-a2 { --tk-bg:#CEDEE5; --tk-bg-hover:#BED3DD; --tk-edge:#76919E; } /* 浅水蓝 */
-  .plan-table .el-table__body tr.tk-a3 { --tk-bg:#E7E8EC; --tk-bg-hover:#DFE0E6; --tk-edge:#A1A3AA; } /* 淡灰紫 */
-  .plan-table .el-table__body tr.tk-a4 { --tk-bg:#F3EDEF; --tk-bg-hover:#EFE8EA; --tk-edge:#B7ADB0; } /* 藕粉灰 */
-  .plan-table .el-table__body tr.tk-a5 { --tk-bg:#FFF2F2; --tk-bg-hover:#FFEEEE; --tk-edge:#CCB6B6; } /* 浅樱粉 */
+  /* 工作票类型 → Dopely 莫兰迪色板（6E7F9A / 93B5C6 / C9CCD5 / E4D8DC / FFE3E3）极淡版：
+     底色约 15% 原色 + 85% 白（接近白，只留隐约色相），票种识别交给首列 3px 色条；
+     悬停用上一档淡色作反馈；纯色浅底，不使用渐变 */
+  .plan-table .el-table__body tr.tk-a1 { --tk-bg:#E9ECF0; --tk-bg-hover:#DBDFE6; --tk-edge:#58667B; } /* 雾蓝灰 */
+  .plan-table .el-table__body tr.tk-a2 { --tk-bg:#EFF4F6; --tk-bg-hover:#DFE9EE; --tk-edge:#76919E; } /* 浅水蓝 */
+  .plan-table .el-table__body tr.tk-a3 { --tk-bg:#F7F7F9; --tk-bg-hover:#EFF0F2; --tk-edge:#A1A3AA; } /* 淡灰紫 */
+  .plan-table .el-table__body tr.tk-a4 { --tk-bg:#FBF9FA; --tk-bg-hover:#F7F3F5; --tk-edge:#B7ADB0; } /* 藕粉灰 */
+  .plan-table .el-table__body tr.tk-a5 { --tk-bg:#FFFBFB; --tk-bg-hover:#FFF7F7; --tk-edge:#CCB6B6; } /* 浅樱粉 */
   .plan-table .el-table__body tr[class*="tk-a"] > td.el-table__cell { background-color:var(--tk-bg); }
   .plan-table .el-table__body tr[class*="tk-a"]:hover > td.el-table__cell { background-color:var(--tk-bg-hover); }
   .plan-table .el-table__body tr[class*="tk-a"] > td.el-table__cell:first-child { box-shadow:inset 3px 0 0 var(--tk-edge); }
