@@ -1189,6 +1189,10 @@ const PlansView = {
       }));
     });
     function openStaffPick() {
+      // 先有起止时间才允许选人：冲突判定依赖时间窗，时间为空时选人毫无约束
+      const f = dlg.form || {};
+      if (!String(f.startDate || '').trim()) { ElementPlus.ElMessage.warning('请先填写计划开始时间'); return; }
+      if (!String(f.endDate || '').trim()) { ElementPlus.ElMessage.warning('请先填写计划结束时间'); return; }
       if (!workersFull.value.length) loadMeta();
       staffPick.checked = {};
       refreshStaffConflicts();   // 每次打开按当前表单时间重算（含时间改动后重开）

@@ -2283,7 +2283,12 @@ async function listOk(p, token) {
     need(/<el-checkbox[^>]*:disabled="staffConflict\(w\)\.length > 0"/.test(p) &&
       !/staffConflictText|staffConflictTitle/.test(p) && !/已参与：/.test(p) && !/:title="staffConflict/.test(p),
       '选人弹窗对冲突人员只置灰，不得渲染「已参与」标注或悬停提示（2026-11-10 裁定）');
-    return '脚本顺序 / 日历四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注';
+    const op = p.slice(p.indexOf('function openStaffPick'), p.indexOf('function toggleIdentity'));
+    need(op.indexOf('请先填写计划开始时间') > -1 && op.indexOf('请先填写计划结束时间') > -1 &&
+      op.indexOf('请先填写计划开始时间') < op.indexOf('staffPick.visible = true') &&
+      op.indexOf('请先填写计划结束时间') < op.indexOf('staffPick.visible = true'),
+      '选人弹窗必须在填完计划开始/结束时间后才允许打开（空时间先提示）');
+    return '脚本顺序 / 日历四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注 / 选人先校验时间';
   });
 
   /* ---------- 汇总 ---------- */
