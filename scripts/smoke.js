@@ -202,6 +202,7 @@ function splitPureChecks(PS) {
   need(snap.items[1] === '冒烟线01号杆|电杆组立||3|根|已解析', '电压等级应从地点剔除：' + snap.items[1]);
   need(snap.items[2] === '低压线路|导线安装||800|米|已解析', '0.4kV 地点应只留「低压线路」：' + snap.items[2]);
   need(snap.items[3] === '|||null||未解析', '抽不出工序/数量应标未解析：' + snap.items[3]);
+  need(it('电杆组立3根') === '|电杆组立||3|根|已解析', '只有工序没有地点也应可解析：' + it('电杆组立3根'));
 
   // 5) 七类工程量：电压分流、米折千米、多工序汇总、抽不出不产生
   const mapQ = s => PS.quantitiesOf(PS.parseDayItems(s, []));
@@ -219,6 +220,10 @@ function splitPureChecks(PS) {
   need(J(snap.qty[3]) === J({ wlLine1035: 2.5 }), '10kV 导线应计 10/35kV 档：' + brief(snap.qty[3]));
   need(J(snap.qty[4]) === J({ wlLine04: 0.8 }), '0.4kV 导线应计 0.4kV 档：' + brief(snap.qty[4]));
   need(J(snap.qty[5]) === J({}), '抽不出工序不应产生工程量：' + brief(snap.qty[5]));
+  const unmItems = PS.parseDayItems('拉线制作2组', []);
+  PS.quantitiesOf(unmItems);
+  snap.unmapped = [unmItems[0].工序, unmItems[0].数量, unmItems[0].unparsed === true, unmItems[0].unmapped === true];
+  need(J(snap.unmapped) === J(['拉线制作', 2, false, true]), '解析成功但映射不上应标 unmapped：' + brief(snap.unmapped));
 
   // 6) 「同上」展开 + 确认稿覆盖（数字覆盖 / 空串删除 / 未传沿用）
   const prevItems = PS.parseDayItems('电杆组立3根', []);
@@ -244,6 +249,10 @@ function splitPureChecks(PS) {
   const dCross = PS.parseDailyContent('30日：电杆组立3根\n31日：电缆敷设1200米\n1日：清理现场', '2026-12-30', '2027-01-01');
   snap.cross = dCross.days.map(d => d.date);
   need(dCross.ok === true && J(snap.cross) === J(['2026-12-30', '2026-12-31', '2027-01-01']), '「DD日」应跨月跨年进位：' + brief(snap.cross));
+  const dCross2 = PS.parseDailyContent('29日：电杆组立3根\n30日：电缆敷设1200米\n1日：导线架设2.5km\n2日：清理现场', '2026-11-29', '2026-12-02');
+  snap.cross2 = dCross2.days.map(d => d.date);
+  need(dCross2.ok === true && J(snap.cross2) === J(['2026-11-29', '2026-11-30', '2026-12-01', '2026-12-02']),
+    '11-29→12-02 跨月推断应正确：' + brief(snap.cross2));
   const dInline = PS.parseDailyContent('11日：电杆组立3根；12日：电缆敷设1200米；13日：导线架设2.5km', '2026-11-11', '2026-11-13');
   need(dInline.ok === true && dInline.days.length === 3, '同行连写多天应切开：' + brief(dInline.errors));
   snap.inline = dInline.days.map(d => d.date + '|' + J(d.quantities));
@@ -2595,6 +2604,81 @@ async function runSmoke() {
     need(!still.splitBatchId && still.endDate === '2026-11-12 10:00:00', '校验失败不得落库：' + brief(still.endDate));
     await api('DELETE', '/api/workPlans/' + guard.id, { token });
     return '父收缩为 08:00–10:00 首日 / 子计划（11月12日）未执行 + 编号沿用 / 勘察克隆重发 id / 再拆 409 与 400 / 三类提交校验 400 不落库';
+  });
+
+  await step('plans', '拆分用例矩阵：七天/两天字段沿用/跨月/只有工序无地点/单日拒/幂等总数不变', async () => {
+    const mk = async (body, label) => needOk(await api('POST', '/api/workPlans', { token, body }), label || 'plan POST').id;
+    const pvOf = async id => needOk(await api('POST', '/api/workPlans/' + id + '/split/preview', { token, body: {} }), 'preview');
+    const daysOf = pv => pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }));
+
+    // ① 七天完整 → 父 + 6 子，各日内容一一对应
+    const seven = await mk({ planType: '周计划', name: '冒烟七天计划', status: '未执行',
+      startDate: '2026-11-01 08:00:00', endDate: '2026-11-07 10:00:00',
+      content: '1日：电杆组立3根\n2日：电缆敷设1200米\n3日：导线架设2.5km\n4日：环网柜安装1台\n5日：真空开关安装2台\n6日：变压器安装1台\n7日：清理现场' });
+    const pv7 = await pvOf(seven);
+    need(pv7.ok === true && pv7.days.length === 7, '七天应切出 7 行：' + brief(pv7.errors));
+    const sp7 = needOk(await api('POST', '/api/workPlans/' + seven + '/split', { token, body: { days: daysOf(pv7) } }), 'split 7 天');
+    need(sp7.children.length === 6, '七天应生成 6 条子计划：' + sp7.children.length);
+    const kids = [];
+    for (const c of sp7.children) kids.push(needOk(await api('GET', '/api/workPlans/' + c.id, { token }), '七天子计划'));
+    need(kids.map(k => k.startDate.slice(0, 10)).join(',') === '2026-11-02,2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-07',
+      '子计划应逐日递增：' + brief(kids.map(k => k.startDate)));
+    need(kids[0].content === '电缆敷设1200米' && kids[5].content === '清理现场',
+      '子计划内容应去掉日期前缀并逐日对应：' + brief(kids.map(k => k.content)));
+    need(kids.map(k => k.name).join('|') === '冒烟七天计划（11月2日）|冒烟七天计划（11月3日）|冒烟七天计划（11月4日）|冒烟七天计划（11月5日）|冒烟七天计划（11月6日）|冒烟七天计划（11月7日）',
+      '七天子计划命名错：' + brief(kids.map(k => k.name)));
+
+    // ② 两天每天一行 → 父 1 + 子 1，票种/班组/负责人/作业人员/地址/双编号逐项沿用
+    const two = await mk({ planType: '周计划', name: '冒烟字段沿用计划', status: '未执行',
+      startDate: '2026-11-20 08:00:00', endDate: '2026-11-21 10:00:00',
+      content: '20日：电杆组立3根；21日：电缆敷设1200米',
+      ticketType: '配电：配电第一种工作票', team: '冒烟班组', chargePerson: '李四', chargePersonPhone: '13900000009',
+      staffText: '张三/13800138000；李四/13900000009', station: '冒烟变电站', voltage: '10kV',
+      planNote: '沿用备注', surveyNo: '202611003', workTicketNo: '202611680003' });
+    const pv2 = await pvOf(two);
+    need(pv2.ok === true && pv2.days.length === 2, '两天应切出 2 行：' + brief(pv2.errors));
+    const sp2 = needOk(await api('POST', '/api/workPlans/' + two + '/split', { token, body: { days: daysOf(pv2) } }), 'split 2 天');
+    need(sp2.children.length === 1, '两天应生成 1 条子计划：' + sp2.children.length);
+    const k2 = needOk(await api('GET', '/api/workPlans/' + sp2.children[0].id, { token }), '两天子计划');
+    const keepFields = {
+      ticketType: '配电：配电第一种工作票', team: '冒烟班组', chargePerson: '李四', chargePersonPhone: '13900000009',
+      staffText: '张三/13800138000；李四/13900000009', station: '冒烟变电站', voltage: '10kV',
+      planNote: '沿用备注', surveyNo: '202611003', workTicketNo: '202611680003'
+    };
+    Object.keys(keepFields).forEach(f =>
+      need(String(k2[f]) === keepFields[f], '子计划应沿用父计划字段 ' + f + '：' + k2[f]));
+    need(k2.content === '电缆敷设1200米' && k2.name === '冒烟字段沿用计划（11月21日）', '子计划内容/名称错：' + brief({ c: k2.content, n: k2.name }));
+
+    // ③ 跨月 11-29→12-02：月份按段落顺序推断
+    const cross = await mk({ planType: '周计划', name: '冒烟跨月计划', status: '未执行',
+      startDate: '2026-11-29 08:00:00', endDate: '2026-12-02 10:00:00',
+      content: '29日：电杆组立3根；30日：电缆敷设1200米；1日：导线架设2.5km；2日：清理现场' });
+    const pvc = await pvOf(cross);
+    need(pvc.ok === true && pvc.days.map(d => d.date).join(',') === '2026-11-29,2026-11-30,2026-12-01,2026-12-02',
+      '跨月推断应为 11-29→12-02：' + brief(pvc.days.map(d => d.date)));
+
+    // ④ 只有工序没有地点（内容本身无地点）也能拆
+    const noLoc = await mk({ planType: '周计划', name: '冒烟无地点计划', status: '未执行',
+      startDate: '2026-11-25 08:00:00', endDate: '2026-11-26 10:00:00',
+      content: '25日：电杆组立3根\n26日：电缆敷设1200米' });
+    const pv4 = await pvOf(noLoc);
+    need(pv4.ok === true && pv4.days.length === 2 && pv4.days[0].items[0]['地点'] === '' && pv4.days[0].items[0].unparsed !== true,
+      '无地点条目应可解析（地点留空、不算未解析）：' + brief(pv4.days[0] && pv4.days[0].items));
+
+    // ⑤ 单日计划 split（不只是 preview）也拒
+    const one = await mk({ planType: '周计划', name: '冒烟单日拆分', status: '未执行',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-11 10:00:00', content: '11日：电杆组立3根' });
+    const r1 = await api('POST', '/api/workPlans/' + one + '/split', { token, body: { days: [{ date: '2026-11-11', content: '电杆组立3根' }] } });
+    need(r1.status === 400 && /单日计划无需拆分/.test(r1.data.error), '单日计划 split 应 400：' + r1.status + ' ' + brief(r1.data));
+
+    // ⑥ 幂等：同一计划连调两次 split → 第二次 409，workPlans 总数不变
+    const before = (await listOk('/api/workPlans', token)).length;
+    const again = await api('POST', '/api/workPlans/' + two + '/split', { token, body: { days: daysOf(pv2) } });
+    const after = (await listOk('/api/workPlans', token)).length;
+    need(again.status === 409 && before === after, '重复拆分应 409 且总数不变：' + again.status + ' ' + before + '→' + after);
+
+    for (const id of [seven, two, cross, noLoc, one]) await api('DELETE', '/api/workPlans/' + id, { token });
+    return '七天父+6子逐日对应 / 两天 10 字段沿用 + 内容去前缀 / 跨月 11-29→12-02 / 无地点可解析 / 单日 400 / 幂等 409 总数不变';
   });
 
   await step('plans', '撤销拆分：四类拦截（状态/编辑/工程量/勘察）+ 通过后恢复快照并删子计划', async () => {
