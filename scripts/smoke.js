@@ -2280,7 +2280,10 @@ async function listOk(p, token) {
       !/w\.team \|\| '未分组'/.test(p), 'groupedTeams 应先滤掉无班组人员且不再兜「未分组」');
     need(/findConflicts\(/.test(p) && /staffConflict\(/.test(p) && /ElMessageBox\.alert/.test(p),
       '视图层应调用 findConflicts / staffConflict 并有保存兜底弹窗');
-    return '脚本顺序 / 日历四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线';
+    need(/<el-checkbox[^>]*:disabled="staffConflict\(w\)\.length > 0"/.test(p) &&
+      !/staffConflictText|staffConflictTitle/.test(p) && !/已参与：/.test(p) && !/:title="staffConflict/.test(p),
+      '选人弹窗对冲突人员只置灰，不得渲染「已参与」标注或悬停提示（2026-11-10 裁定）');
+    return '脚本顺序 / 日历四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注';
   });
 
   /* ---------- 汇总 ---------- */

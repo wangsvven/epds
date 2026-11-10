@@ -1168,15 +1168,9 @@ const PlansView = {
     };
     const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     function staffKey(w) { return w.id || ((w.name || '') + '|' + (w.phone || '')); }
-    // 冲突判定只在 window.PlanStaff 里，视图层只按「姓名|电话」查表与格式化展示
+    // 冲突判定只在 window.PlanStaff 里，视图层只按「姓名|电话」查表；
+    // 冲突人员仅置灰不可勾选，弹窗内不渲染任何「已参与…」标注（2026-11-10 用户裁定：满屏灰字太吵）
     function staffConflict(w) { return staffConflicts.value[PlanStaff.keyOf(w.name, w.phone)] || []; }
-    function staffConflictText(w) {
-      const cf = staffConflict(w);
-      if (!cf.length) return '';
-      const p = cf[0];
-      return '已参与：' + p.name + '（' + planSpan(p) + '）' + (cf.length > 1 ? ' 等 ' + cf.length + ' 条' : '');
-    }
-    function staffConflictTitle(w) { return staffConflict(w).map(p => p.name + '（' + planSpan(p) + '）').join('；'); }
     function refreshStaffConflicts() {
       const f = dlg.form;
       if (!f || !f.startDate || !f.endDate) { staffConflicts.value = {}; return; }
@@ -1477,7 +1471,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, staffConflictText, staffConflictTitle, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1994,7 +1988,7 @@ const PlansView = {
           <div style="font-weight:600;margin-bottom:8px">班组：{{ g.team }}</div>
           <div v-for="it in g.identities" :key="it.identity" style="margin-bottom:8px">
             <div style="margin-bottom:4px">身份：{{ it.identity }}<el-link type="primary" :underline="false" style="margin-left:10px" @click="toggleIdentity(it)">全选</el-link></div>
-            <el-checkbox v-for="w in it.list" :key="w.id" v-model="staffPick.checked[staffKey(w)]" :disabled="staffConflict(w).length > 0" style="margin-right:16px">{{ w.name }} / {{ w.phone || '-' }}<span v-if="staffConflict(w).length" :title="staffConflictTitle(w)" style="margin-left:6px;color:var(--text-3);font-size:11px;display:inline-block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">{{ staffConflictText(w) }}</span></el-checkbox>
+            <el-checkbox v-for="w in it.list" :key="w.id" v-model="staffPick.checked[staffKey(w)]" :disabled="staffConflict(w).length > 0" style="margin-right:16px">{{ w.name }} / {{ w.phone || '-' }}</el-checkbox>
           </div>
         </div>
         <div v-if="!groupedTeams.length" style="color:var(--text-3);font-size:13px;text-align:center;padding:20px 0">暂无已准入的作业人员，请先在「用户管理-作业人员名单」中维护</div>
