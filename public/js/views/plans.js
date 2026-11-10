@@ -1479,8 +1479,8 @@ const PlansView = {
   },
   template: `
   <div>
-    <!-- 月计划管理走专用面板（见 views/monthPlans.js），不显示周计划的日计划日历 -->
-    <div v-if="tab !== 'month'" style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
+    <!-- 日计划日历只在「周计划管理」页签显示；月计划 / 已归档 / 已执行 / 已结算 / 已取消这五个页签与日历无关 -->
+    <div v-if="tab === 'week'" style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:17px;font-weight:600">日计划日历</div>
       </div>

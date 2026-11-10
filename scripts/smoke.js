@@ -2309,7 +2309,7 @@ async function listOk(p, token) {
     return '解析 3 项/空值/最后斜杠 + 相接边界（含混写）+ 占用方类型/状态/自排除/时间窗';
   });
 
-  await step('结构', '计划管理优化批：日历口径 / 高处全等 / 无班组排除 / 冲突接线静态防回归', async () => {
+  await step('结构', '计划管理优化批：日历页签与口径 / 高处全等 / 无班组排除 / 冲突接线静态防回归', async () => {
     const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
     const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
     const iS = html.indexOf('<script src="/js/plan-staff.js"></script>');
@@ -2318,6 +2318,10 @@ async function listOk(p, token) {
     need(/p\.planType === '周计划'/.test(p) &&
       /!\['已归档', '已取消', '已执行', '已结算'\]\.includes\(p\.status\)/.test(p) &&
       /const upcoming = computed/.test(p), '日历 upcoming 应限周计划且排除归档/取消/执行/结算');
+    // 日计划日历是周计划管理的东西：月计划/已归档/已执行/已结算/已取消五个页签一律不渲染
+    need(/v-if="tab === 'week'"/.test(p) && !/v-if="tab !== 'month'"/.test(p),
+      '日计划日历卡应只在 tab==="week" 显示，不得再用 tab !== "month"');
+    need(/日计划日历只在「周计划管理」页签显示/.test(p), '日历卡上方注释应写明显示范围');
     need(/=== '技工（计入高处作业人员）'/.test(p) &&
       !/\.includes\('计入高处作业人员'\)/.test(p), 'highStaff 应全等匹配，不得用子串 includes');
     need(/WorkerStatus\.of\(w, ServerTime\.ymd\(\)\)\.admitted && String\(w\.team \|\| ''\)\.trim\(\)/.test(p) &&
@@ -2332,7 +2336,7 @@ async function listOk(p, token) {
       op.indexOf('请先填写计划开始时间') < op.indexOf('staffPick.visible = true') &&
       op.indexOf('请先填写计划结束时间') < op.indexOf('staffPick.visible = true'),
       '选人弹窗必须在填完计划开始/结束时间后才允许打开（空时间先提示）');
-    return '脚本顺序 / 日历四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注 / 选人先校验时间';
+    return '脚本顺序 / 日历仅周计划页签 + 四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注 / 选人先校验时间';
   });
 
   /* ---------- 汇总 ---------- */
