@@ -66,7 +66,7 @@ const PlansView = {
     const teams = ref([]);                              // 班组管理（施工班组）→ 作业班组下拉源
     const filters = reactive({ startDate: '', endDate: '', name: '', content: '', noProject: false, team: '', leader: '', ticketType: '', projectScope: [] });
     const page = ref(1); const pageSize = ref(20);
-    const dlg = reactive({ visible: false, editingId: null, form: null, ticketNoDirty: false });
+    const dlg = reactive({ visible: false, editingId: null, form: null, ticketNoDirty: false, editSnapshot: null });
     // 表单班组长选项 = 账号候选 ∪ 当前值（回显保护：账号已删除/改组/停用，或历史值来自作业人员名单时，原样带上可存回）
     const leaderOptsForm = computed(() => {
       const out = leaderAccounts.value.slice();
@@ -214,7 +214,7 @@ const PlansView = {
     const upcoming = computed(() => {
       const today = fmtDate(ServerTime.now());
       const end21 = fmtDate(ServerTime.now(21));
-      return list.value.filter(p => !['已取消', '已归档'].includes(p.status) && p.startDate && p.endDate && daySlice(p.endDate) >= today && daySlice(p.startDate) <= end21);
+      return list.value.filter(p => p.planType === '周计划' && !['已归档', '已取消', '已执行', '已结算'].includes(p.status) && p.startDate && p.endDate && daySlice(p.endDate) >= today && daySlice(p.startDate) <= end21);
     });
     // 日历卡片：按有安排的日期展示（10月16日 周五 / 条数徽标 / 班组长 / 时间+计划名）
     const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -1157,11 +1157,35 @@ const PlansView = {
     const workersFull = ref([]);
     const contacts = ref([]);
     const staffPick = reactive({ visible: false, checked: {} });
+    const staffConflicts = ref({});
+    // 计划起止时间统一补秒：历史 HH:mm 与 HH:mm:ss 混写时「首尾相接」判定才不被字符串长度误导
+    const normDateTime = v => (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(String(v || '').trim()) ? String(v).trim() + ':00' : v);
+    // 负责人最终值：submit 中 chargePersons[0] 会覆盖 chargePerson，快照与兜底两处口径保持一致
+    const effectiveCharge = f => (Array.isArray(f.chargePersons) && f.chargePersons.length) ? f.chargePersons[0] : (f.chargePerson || '');
+    const planSpan = p => {
+      const f = v => { const s = String(v || ''); return s.length >= 16 ? s.slice(5, 16) : s; };
+      return f(p.startDate) + ' ~ ' + f(p.endDate);
+    };
+    const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     function staffKey(w) { return w.id || ((w.name || '') + '|' + (w.phone || '')); }
+    // 冲突判定只在 window.PlanStaff 里，视图层只按「姓名|电话」查表与格式化展示
+    function staffConflict(w) { return staffConflicts.value[PlanStaff.keyOf(w.name, w.phone)] || []; }
+    function staffConflictText(w) {
+      const cf = staffConflict(w);
+      if (!cf.length) return '';
+      const p = cf[0];
+      return '已参与：' + p.name + '（' + planSpan(p) + '）' + (cf.length > 1 ? ' 等 ' + cf.length + ' 条' : '');
+    }
+    function staffConflictTitle(w) { return staffConflict(w).map(p => p.name + '（' + planSpan(p) + '）').join('；'); }
+    function refreshStaffConflicts() {
+      const f = dlg.form;
+      if (!f || !f.startDate || !f.endDate) { staffConflicts.value = {}; return; }
+      staffConflicts.value = PlanStaff.findConflicts(list.value, dlg.editingId || '', f.startDate, f.endDate);
+    }
     const groupedTeams = computed(() => {
-      const admitted = workersFull.value.filter(w => WorkerStatus.of(w, ServerTime.ymd()).admitted);
+      const admitted = workersFull.value.filter(w => WorkerStatus.of(w, ServerTime.ymd()).admitted && String(w.team || '').trim());
       const byTeam = {};
-      admitted.forEach(w => { const t = w.team || '未分组'; (byTeam[t] = byTeam[t] || []).push(w); });
+      admitted.forEach(w => { const t = String(w.team || '').trim(); (byTeam[t] = byTeam[t] || []).push(w); });
       return Object.keys(byTeam).sort().map(team => ({
         team,
         identities: Object.entries(byTeam[team].reduce((m, w) => {
@@ -1173,10 +1197,15 @@ const PlansView = {
     function openStaffPick() {
       if (!workersFull.value.length) loadMeta();
       staffPick.checked = {};
+      refreshStaffConflicts();   // 每次打开按当前表单时间重算（含时间改动后重开）
       staffPick.visible = true;
     }
     function toggleIdentity(it) {
-      const keys = it.list.map(staffKey);
+      const blocked = it.list.filter(w => staffConflict(w).length);
+      const avail = it.list.filter(w => !staffConflict(w).length);
+      blocked.forEach(w => { staffPick.checked[staffKey(w)] = false; });
+      const keys = avail.map(staffKey);
+      if (!keys.length) return;
       const all = keys.every(k => staffPick.checked[k]);
       keys.forEach(k => { staffPick.checked[k] = !all; });
     }
@@ -1184,7 +1213,7 @@ const PlansView = {
       const sel = workersFull.value.filter(w => staffPick.checked[staffKey(w)]);
       dlg.form.staffText = sel.map(w => w.name + '/' + (w.phone || '')).join('；');
       dlg.form.staffCount = sel.length ? String(sel.length) : '';
-      dlg.form.highStaff = sel.filter(w => String(w.identity || '').includes('计入高处作业人员')).map(w => w.name).join('；');
+      dlg.form.highStaff = sel.filter(w => String(w.identity || '').trim() === '技工（计入高处作业人员）').map(w => w.name).join('；');
       staffPick.visible = false;
     }
     // 工作负责人：外部通讯录中匹配姓名自动带出手机号
@@ -1207,7 +1236,7 @@ const PlansView = {
     async function openAdd(prefill) {
       if (!unitsLoaded) { await loadHazards(); unitsLoaded = true; }
       if (!teams.value.length) await loadMeta();   // 新实例/刚维护完班组后打开，也能取到最新施工班组
-      dlg.editingId = null; dlg.form = emptyForm();
+      dlg.editingId = null; dlg.form = emptyForm(); dlg.editSnapshot = null;
       // 计划类型跟随当前所在 tab：月计划管理 tab 新增存为月计划，其余存周计划
       dlg.form.planType = tab.value === 'month' ? '月计划' : '周计划';
       // 从项目详情跳转过来时，关联项目默认带入（避免新增后因项目筛选而"消失"）
@@ -1238,6 +1267,14 @@ const PlansView = {
       // 字段规范化（老数据补齐）
       ['subcontractors', 'ccUnits', 'chargePersons'].forEach(k => { if (!Array.isArray(dlg.form[k])) dlg.form[k] = []; });
       ['staffText', 'teamLeader', 'staffCount', 'highStaff', 'gasTester', 'guardian', 'chargePerson', 'chargePersonPhone', 'arrivalPersons', 'safetyPatrol', 'wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04', 'outageRange', 'outageHours', 'surveyNo', 'workTicketNo', 'team'].forEach(k => { if (dlg.form[k] === undefined || dlg.form[k] === null) dlg.form[k] = ''; });
+      // 存量豁免基线：名单 + 负责人 + 起止时间的原记录快照（只在前端内存，不写库）
+      dlg.editSnapshot = {
+        staffText: String(dlg.form.staffText || ''),
+        chargePerson: String(effectiveCharge(dlg.form) || ''),
+        chargePersonPhone: String(dlg.form.chargePersonPhone || ''),
+        startDate: String(normDateTime(dlg.form.startDate) || ''),
+        endDate: String(normDateTime(dlg.form.endDate) || '')
+      };
     }
     // 月计划列表「新增周计划」：切到周计划管理页签，用月计划内容预填周计划表单
     async function makeWeekFromMonth(mp) {
@@ -1261,8 +1298,7 @@ const PlansView = {
     async function submit() {
       const f = dlg.form;
       // 统一为 YYYY-MM-DD HH:mm:ss（历史数据为 HH:mm），保证下面的字符串比较与导出稳定
-      const normDT = v => (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(String(v || '').trim()) ? String(v).trim() + ':00' : v);
-      f.startDate = normDT(f.startDate); f.endDate = normDT(f.endDate);
+      f.startDate = normDateTime(f.startDate); f.endDate = normDateTime(f.endDate);
       if (!String(f.name || '').trim()) { ElementPlus.ElMessage.warning('请填写作业计划名称'); return; }
       if (!f.startDate || !f.endDate) { ElementPlus.ElMessage.warning('请选择计划开始/结束日期'); return; }
       if (f.endDate < f.startDate) { ElementPlus.ElMessage.warning('计划结束日期不能早于开始日期'); return; }
@@ -1275,6 +1311,31 @@ const PlansView = {
       for (const [lb, v, re] of numChecks) {
         const s = String(v == null ? '' : v).trim();
         if (s && !re.test(s)) { ElementPlus.ElMessage.warning('「' + lb + '」格式不正确，请检查'); return; }
+      }
+      // 人员时间防冲突：用最终名单与最终起止时间全量校验；存量编辑若名单/负责人/时间均未改动则豁免
+      const snap = dlg.editSnapshot;
+      const chargeNow = String(effectiveCharge(f) || '');
+      const unchanged = !!(snap && dlg.editingId &&
+        String(f.staffText || '') === snap.staffText &&
+        chargeNow === snap.chargePerson &&
+        String(f.chargePersonPhone || '') === snap.chargePersonPhone &&
+        String(f.startDate || '') === snap.startDate &&
+        String(f.endDate || '') === snap.endDate);
+      if (!unchanged) {
+        const cf = PlanStaff.findConflicts(list.value, dlg.editingId || '', f.startDate, f.endDate);
+        const lines = [];
+        const finalPlan = { staffText: f.staffText, chargePerson: chargeNow, chargePersonPhone: f.chargePersonPhone };
+        PlanStaff.participantsOf(finalPlan).forEach(k => {
+          (cf[k] || []).forEach(p => {
+            lines.push('<div style="margin:4px 0">' + escHtml(k.split('|')[0]) + ' 已参与 ' + escHtml(p.name) +
+              '（' + escHtml(planSpan(p)) + '），同一时间段不能重复安排</div>');
+          });
+        });
+        if (lines.length) {
+          await ElementPlus.ElMessageBox.alert(lines.join(''), '人员时间冲突',
+            { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' });
+          return;
+        }
       }
       try {
         const body = { ...f, name: String(f.name).trim() };
@@ -1416,7 +1477,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, staffConflictText, staffConflictTitle, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
   },
   template: `
   <div>
@@ -1933,7 +1994,7 @@ const PlansView = {
           <div style="font-weight:600;margin-bottom:8px">班组：{{ g.team }}</div>
           <div v-for="it in g.identities" :key="it.identity" style="margin-bottom:8px">
             <div style="margin-bottom:4px">身份：{{ it.identity }}<el-link type="primary" :underline="false" style="margin-left:10px" @click="toggleIdentity(it)">全选</el-link></div>
-            <el-checkbox v-for="w in it.list" :key="w.id" v-model="staffPick.checked[staffKey(w)]" style="margin-right:16px">{{ w.name }} / {{ w.phone || '-' }}</el-checkbox>
+            <el-checkbox v-for="w in it.list" :key="w.id" v-model="staffPick.checked[staffKey(w)]" :disabled="staffConflict(w).length > 0" style="margin-right:16px">{{ w.name }} / {{ w.phone || '-' }}<span v-if="staffConflict(w).length" :title="staffConflictTitle(w)" style="margin-left:6px;color:var(--text-3);font-size:11px;display:inline-block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">{{ staffConflictText(w) }}</span></el-checkbox>
           </div>
         </div>
         <div v-if="!groupedTeams.length" style="color:var(--text-3);font-size:13px;text-align:center;padding:20px 0">暂无已准入的作业人员，请先在「用户管理-作业人员名单」中维护</div>
