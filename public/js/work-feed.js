@@ -76,27 +76,45 @@
     };
   }
 
-  /* ---------- 来源二：人员动态（按天汇总退场） ----------
-     只认 status='已退场' 且 exitedAt 落在窗口内的记录；存量无 exitedAt 的不显示。 */
+  /* ---------- 来源二：人员动态（按天汇总「新增」与「退场」） ----------
+     新增：createdAt 落在窗口内（存量无 createdAt 的老记录不显示，避免误报）。
+     退场：status='已退场' 且 exitedAt 落在窗口内；存量无 exitedAt 的不显示。
+     同一天既有新增又有退场时出两行，用 order 固定「先新增后退场」。 */
   function personMessages(workers, today) {
     var byDay = {};
+    function slot(day) {
+      return byDay[day] || (byDay[day] = { joined: [], left: [] });
+    }
     (workers || []).forEach(function (w) {
-      if (!w || w.deleted || w.status !== '已退场') return;
-      var day = bjDay(w.exitedAt);
-      if (!inWindow(day, today)) return;
-      (byDay[day] = byDay[day] || []).push(w);
+      if (!w || w.deleted) return;
+      var joinedDay = bjDay(w.createdAt);
+      if (inWindow(joinedDay, today)) slot(joinedDay).joined.push(w);
+      if (w.status !== '已退场') return;
+      var leftDay = bjDay(w.exitedAt);
+      if (inWindow(leftDay, today)) slot(leftDay).left.push(w);
     });
-    return Object.keys(byDay).map(function (day) {
-      var arr = techFirst(byDay[day], 'exitedAt');
-      var n = arr.length;
-      var who = n <= 3
-        ? arr.map(function (x) { return x.name; }).join('、')
-        : arr.slice(0, 3).map(function (x) { return x.name; }).join('、') + '等' + n + '人';
-      return {
-        kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers',
-        day: day, text: dayLabel(day, today) + who + '已退场'
-      };
+    var out = [];
+    Object.keys(byDay).forEach(function (day) {
+      var e = byDay[day], label = dayLabel(day, today);
+      if (e.joined.length) {
+        out.push({
+          kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers', day: day, order: 0,
+          text: label + '新增作业人员 ' + e.joined.length + ' 人'
+        });
+      }
+      if (e.left.length) {
+        var arr = techFirst(e.left, 'exitedAt');
+        var n = arr.length;
+        var who = n <= 3
+          ? arr.map(function (x) { return x.name; }).join('、')
+          : arr.slice(0, 3).map(function (x) { return x.name; }).join('、') + '等' + n + '人';
+        out.push({
+          kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers', day: day, order: 1,
+          text: label + who + '已退场'
+        });
+      }
     });
+    return out;
   }
 
   /* ---------- 来源三：材料动态（按天汇总，批次优先） ----------
@@ -176,10 +194,60 @@
     });
   }
 
-  var KIND_ORDER = { person: 0, material: 1, plan: 2, borrow: 3 };
-  /* 聚合层：预警置顶，其余按日期倒序，同日内 人员 → 材料 → 计划 → 借工。 */
+  /* ---------- 通用：按天汇总某集合的新增条数 ----------
+     cfg = { kind, label, nav, noun, unit, timeKeys }；同一自然日只出一行，避免刷屏。
+     timeKeys 按顺序取第一个非空字段（默认 createdAt）；施工量等老记录只有 submittedAt，用回退兼容。 */
+  function createdMessages(list, today, cfg) {
+    var keys = cfg.timeKeys || ['createdAt'];
+    var byDay = {};
+    (list || []).forEach(function (x) {
+      if (!x || x.deleted) return;
+      var raw = '';
+      for (var i = 0; i < keys.length; i++) {
+        if (x[keys[i]]) { raw = x[keys[i]]; break; }
+      }
+      var day = bjDay(raw);
+      if (!inWindow(day, today)) return;
+      byDay[day] = (byDay[day] || 0) + 1;
+    });
+    return Object.keys(byDay).map(function (day) {
+      return {
+        kind: cfg.kind, label: cfg.label, nav: cfg.nav, day: day,
+        text: dayLabel(day, today) + '新增' + cfg.noun + ' ' + byDay[day] + ' ' + cfg.unit
+      };
+    });
+  }
+  /* ---------- 来源六～十：项目 / 领料单 / 出库单 / 实际工作量 / 竣工资料 ----------
+     这些模块原先不进动态，导致「录了数据但首页毫无反应」；统一走 createdMessages。 */
+  function projectMessages(list, today) {
+    return createdMessages(list, today, { kind: 'project', label: '项目动态', nav: 'projects', noun: '项目', unit: '个' });
+  }
+  function requisitionMessages(list, today) {
+    return createdMessages(list, today, { kind: 'requisition', label: '领料动态', nav: 'materials', noun: '领料单', unit: '张' });
+  }
+  function outboundMessages(list, today) {
+    return createdMessages(list, today, { kind: 'outbound', label: '出库动态', nav: 'materials', noun: '出库单', unit: '张' });
+  }
+  function workMessages(list, today) {
+    // 施工量历史记录只有 submittedAt（北京时间串），新记录两者都有；createdAt 优先
+    return createdMessages(list, today, {
+      kind: 'work', label: '作业动态', nav: 'actualWorks', noun: '实际工作量记录', unit: '条',
+      timeKeys: ['createdAt', 'submittedAt']
+    });
+  }
+  function docMessages(list, today) {
+    // 竣工资料归档在菜单 key 'completion'（'documents' 是文档中心，不是这个集合）
+    return createdMessages(list, today, { kind: 'doc', label: '资料动态', nav: 'completion', noun: '竣工资料', unit: '份' });
+  }
+
+  var KIND_ORDER = { person: 0, material: 1, project: 2, plan: 3, work: 4, requisition: 5, outbound: 6, doc: 7, borrow: 8 };
+  /* 聚合层：预警置顶，其余按日期倒序，同日内按 KIND_ORDER 排。 */
   function collect(parts) {
-    var dyn = [].concat(parts.person || [], parts.material || [], parts.plan || [], parts.borrow || []);
+    var dyn = [];
+    Object.keys(parts || {}).forEach(function (k) {
+      if (k === 'alert') return;                       // 预警单独置顶，不参与日期排序
+      dyn = dyn.concat(parts[k] || []);
+    });
     dyn.sort(function (a, b) {
       if (a.day !== b.day) return a.day > b.day ? -1 : 1;
       var d = (KIND_ORDER[a.kind] === undefined ? 9 : KIND_ORDER[a.kind]) -
@@ -190,7 +258,9 @@
     return out.concat(dyn);
   }
 
-  /* build() 只做「取各来源 → 收集排序」，不含任何业务判断。 */
+  /* build() 只做「取各来源 → 收集排序」，不含任何业务判断。
+     新增入参（projects / requisitions / outbound / works / docs）缺失时各自为空数组，
+     老调用方不传也能正常工作。 */
   function build(input) {
     var o = input || {};
     var alerts = o.alerts || [];
@@ -198,7 +268,12 @@
       alert: alertMessage(alerts, o.workers),
       person: personMessages(o.workers, o.today),
       material: materialMessages(o.imports, o.materials, o.today),
+      project: projectMessages(o.projects, o.today),
       plan: planMessages(o.plans, o.today),
+      work: workMessages(o.works, o.today),
+      requisition: requisitionMessages(o.requisitions, o.today),
+      outbound: outboundMessages(o.outbound, o.today),
+      doc: docMessages(o.docs, o.today),
       borrow: borrowMessages(o.borrow, o.today)
     };
     return { messages: collect(parts), alertCount: alerts.length };
@@ -209,7 +284,10 @@
     dayLabel: dayLabel, inWindow: inWindow, techFirst: techFirst,
     alertMessage: alertMessage, personMessages: personMessages,
     materialMessages: materialMessages, planMessages: planMessages,
-    borrowMessages: borrowMessages, collect: collect, build: build
+    borrowMessages: borrowMessages, createdMessages: createdMessages,
+    projectMessages: projectMessages, requisitionMessages: requisitionMessages,
+    outboundMessages: outboundMessages, workMessages: workMessages, docMessages: docMessages,
+    collect: collect, build: build
   };
   if (typeof window !== 'undefined') window.WorkFeed = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

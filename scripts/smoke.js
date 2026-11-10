@@ -2136,22 +2136,66 @@ async function listOk(p, token) {
     return '退场写入 / 恢复清空 / 派生不可选 / 导入枚举对齐 / 存量无字段不报错';
   });
 
-  await step('结构', '首页工作动态：来源模块加载顺序 + 五色标签 + 卡片形态静态断言', async () => {
+  await step('feed', '工作动态九类来源：项目/领料/出库/作业/资料 + 新增人员 / 窗口与同天合并', async () => {
+    const vm = require('vm');
+    const sb = { window: {}, module: { exports: {} } };
+    vm.createContext(sb);
+    vm.runInContext(fs.readFileSync(path.join(ROOT, 'public', 'js', 'work-feed.js'), 'utf8'), sb);
+    const F = sb.window.WorkFeed;
+    const T = '2026-11-10';
+    const iso = d => d + 'T04:00:00.000Z';       // 对应北京时间当天 12:00
+    const out = F.build({
+      today: T, alerts: [],
+      workers: [
+        { id: 'u1', name: '新甲', status: '待定', createdAt: iso(T) },
+        { id: 'u2', name: '新乙', status: '已准入', createdAt: iso(T) },
+        { id: 'u3', name: '老丙', status: '已准入', createdAt: iso('2026-11-01') },   // 窗口外
+        { id: 'u4', name: '走丁', status: '已退场', exitedAt: '2026-11-09 09:00', createdAt: iso('2026-10-01') }
+      ],
+      imports: [], materials: [],
+      plans: [{ id: 'q1', planType: '周计划', createdAt: iso(T) }],
+      projects: [{ id: 'j1', createdAt: iso(T) }, { id: 'j2', createdAt: iso(T) }, { id: 'j3', createdAt: iso('2026-10-30') }],
+      requisitions: [{ id: 'r1', createdAt: iso(T) }, { id: 'r2', createdAt: iso(T) }, { id: 'r3', createdAt: iso(T) }],
+      outbound: [{ id: 'o1', createdAt: iso('2026-11-09') }],
+      works: [{ id: 'k1', createdAt: iso(T) }],
+      docs: [{ id: 'd1', createdAt: iso(T) }],
+      borrow: []
+    });
+    const texts = out.messages.map(m => m.text);
+    [
+      '今日新增作业人员 2 人', '今日新增项目 2 个', '今日新增领料单 3 张',
+      '今日新增周计划 1 条', '今日新增实际工作量记录 1 条', '今日新增竣工资料 1 份',
+      '昨日新增出库单 1 张', '昨日走丁已退场'
+    ].forEach(t => need(texts.indexOf(t) > -1, '缺少「' + t + '」，实际：' + brief(texts)));
+    need(!/老丙/.test(texts.join('|')) && !/10-30/.test(texts.join('|')), '窗口外的项目 / 新增人员不应出现');
+    need(!/新增作业人员 3/.test(texts.join('|')), '窗口外的新增人员不应计数');
+    const kinds = out.messages.map(m => m.kind);
+    ['project', 'requisition', 'outbound', 'work', 'doc'].forEach(k =>
+      need(kinds.indexOf(k) > -1, '九类来源缺 kind=' + k + '：' + brief(kinds)));
+    return '8 条（新增人员/项目/领料/计划/作业/资料 + 昨日出库/退场）+ 窗口过滤';
+  });
+
+  await step('结构', '首页工作动态：来源模块加载顺序 + 十类标签 + 卡片形态静态断言', async () => {
     const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
     const dash = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'dashboard.js'), 'utf8');
     const iU = html.indexOf('<script src="/js/utils.js"></script>');
     const iF = html.indexOf('<script src="/js/work-feed.js"></script>');
     const iD = html.indexOf('<script src="/js/views/dashboard.js"></script>');
     need(iU > -1 && iF > iU && iD > iF, 'work-feed.js 必须在 utils 之后、dashboard 之前加载');
-    ['alert', 'person', 'material', 'plan', 'borrow'].forEach(function (k) {
-      need(html.includes('.fd-tag-' + k + ' {'), '缺少五色标签样式 .fd-tag-' + k);
+    ['alert', 'person', 'material', 'plan', 'borrow', 'project', 'requisition', 'outbound', 'work', 'doc'].forEach(function (k) {
+      need(html.includes('.fd-tag-' + k + ' {'), '缺少标签样式 .fd-tag-' + k);
       need(html.includes('html.dark .fd-tag-' + k + ' {'), '缺少深色模式样式 .fd-tag-' + k);
     });
     need(html.includes('max-height: 186px') && html.includes('max-height: 176px'), '一屏 5 条（桌面 / 移动端）滚动高度');
     need(html.includes('flex: 0 0 33.3333%'), '卡片应保持约 1/3 宽');
-    need(dash.includes('工作动态') && dash.includes('暂无工作动态') && dash.includes('WorkFeed.build'), '标题 / 空态 / 聚合入口');
+    need(dash.includes('工作动态') && dash.includes('近 3 天无新增记录') && dash.includes('WorkFeed.build'), '标题 / 空态 / 聚合入口');
+    need(/const pick = async/.test(dash), '各接口应独立容错，不得再用 Promise.all 一处失败整块清空');
+    need(dash.includes("projects: p") && dash.includes("requisitions: r") && dash.includes("outbound: outs"),
+      '九类来源应全部接入 build()');
+    need(dash.includes('/api/materialOutbound') && dash.includes('/api/actualWorks') && dash.includes('/api/completionDocuments'),
+      '应取领料 / 出库 / 作业 / 资料接口');
     need(!dash.includes('__pendingFocusWorker = {'), '预警点击不得再直开编辑弹窗');
-    return '脚本顺序 / 五色浅深两套 / 5 条滚动 / 1/3 宽 / 标题空态 / 点击口径';
+    return '脚本顺序 / 十类浅深两套 / 5 条滚动 / 1/3 宽 / 标题空态 / 按源容错 / 九类接线';
   });
 
   await step('users', '导入白名单两值 + 已退场导出映射为待定（导出回导入闭环）', async () => {

@@ -169,6 +169,7 @@ app.post('/api/actualWorks', (req, res) => {
     })).filter(it => it.description && it.qty > 0) : [];
     const row = {
       id: genId('aw'), date, project, workTypes, workers, items,
+      createdAt: nowISO(),                                  // 与通用 CRUD 对齐，供首页「工作动态」按录入时间统计
       submitter: (req.user && (req.user.name || req.user.username)) || '',
       submittedAt: fmtNow(), deleted: false
     };

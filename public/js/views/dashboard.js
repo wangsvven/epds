@@ -8,32 +8,35 @@ const Dashboard = {
     const messages = ref([]);
     const alertCount = ref(0);
     async function load() {
-      let mats = [];
-      try {
-        const [p, m, r, d, b] = await Promise.all([
-          api.get('/api/projects'), api.get('/api/materials'), api.get('/api/materialRequisitions'),
-          api.get('/api/documents'), api.get('/api/borrowWorks')
-        ]);
-        mats = Array.isArray(m) ? m : [];
-        stats.projects = p.length; stats.materials = mats.length; stats.requisitions = r.length;
-        stats.documents = d.files.length; stats.borrow = b.length;
-      } catch (e) {}
+      // 每个接口独立容错：任一失败只让对应那一类缺席，不再整块清空。
+      // 旧写法用 Promise.all 包住五类来源，任何一个 401/403/超时都会让「工作动态」全空且无提示。
+      const pick = async (url, key) => {
+        try {
+          const r = await api.get(url);
+          if (Array.isArray(r)) return r;
+          if (key && r && Array.isArray(r[key])) return r[key];
+          return (r && Array.isArray(r.data)) ? r.data : [];
+        } catch (e) { return []; }
+      };
+      const [p, m, r, d, b] = await Promise.all([
+        pick('/api/projects'), pick('/api/materials'), pick('/api/materialRequisitions'),
+        pick('/api/documents', 'files'), pick('/api/borrowWorks')
+      ]);
+      stats.projects = p.length; stats.materials = m.length; stats.requisitions = r.length;
+      stats.documents = d.length; stats.borrow = b.length;
       try { me.value = (await api.get('/api/me')).user; } catch (e) {}
-      // 工作动态：五类来源各自只读自己模块的现有接口，聚合与排序交给 WorkFeed 纯函数
+      // 工作动态：九类来源各自只读自己模块的现有接口，聚合与排序交给 WorkFeed 纯函数
+      const [w, ims, plans, outs, works, docs] = await Promise.all([
+        pick('/api/workers'), pick('/api/materialImports'), pick('/api/workPlans'),
+        pick('/api/materialOutbound'), pick('/api/actualWorks'), pick('/api/completionDocuments')
+      ]);
       try {
-        const [w, ims, plans, borrow] = await Promise.all([
-          api.get('/api/workers'), api.get('/api/materialImports'),
-          api.get('/api/workPlans'), api.get('/api/borrowWorks')
-        ]);
-        const workers = Array.isArray(w) ? w : (w.data || []);
         const today = ServerTime.ymd();
-        const alerts = window.WorkerStatus.alerts(workers, today);
+        const alerts = window.WorkerStatus.alerts(w, today);
         const feed = window.WorkFeed.build({
-          workers, alerts, today,
-          imports: Array.isArray(ims) ? ims : [],
-          materials: mats,
-          plans: Array.isArray(plans) ? plans : [],
-          borrow: Array.isArray(borrow) ? borrow : []
+          workers: w, alerts, today,
+          imports: ims, materials: m, plans, borrow: b,
+          projects: p, requisitions: r, outbound: outs, works, docs
         });
         messages.value = feed.messages;
         alertCount.value = feed.alertCount;
@@ -63,7 +66,7 @@ const Dashboard = {
     <div class="wk-board-row">
       <div class="stat-card wk-alert-card">
         <div class="wk-alert-head">工作动态<span v-if="alertCount" class="wk-alert-count">{{ alertCount }}</span></div>
-        <div v-if="!messages.length" class="wk-alert-empty">暂无工作动态</div>
+        <div v-if="!messages.length" class="wk-alert-empty">近 3 天无新增记录</div>
         <div v-else class="wk-alert-list">
           <div v-for="(m,i) in messages" :key="i" class="wk-alert-item" :title="m.text" @click="goTo(m)">
             <span class="fd-tag" :class="'fd-tag-' + m.kind">{{ m.label }}</span>
