@@ -139,7 +139,121 @@ async function listOk(p, token) {
   return r.data;
 }
 
-(async () => {
+/* ---------- 周计划拆分：解析器纯函数断言 ----------
+ * 独立成函数，供本进程与 TZ=UTC 子进程各跑一遍（防服务器 UTC 时区下 Date 换算偏移）：
+ * 同样的断言、同样的快照，两侧逐字节比对。 */
+function splitPureChecks(PS) {
+  const snap = {};
+  const J = a => JSON.stringify(a);
+
+  // 1) 日期标题：四种写法 + 标题之后的正文
+  const head = s => {
+    const h = PS.matchHeading(s);
+    return h ? [h.kind, String(h.y), String(h.m), String(h.d), h.label, String(s).slice(h.len).trim()].join('|') : 'null';
+  };
+  snap.headings = ['2026-08-03：立杆', '2026年8月3日 立杆', '8月3号：立杆', '03日 立杆'].map(head);
+  need(snap.headings[0] === 'ymd|2026|8|3|2026-08-03|立杆', 'YYYY-MM-DD 标题解析错：' + snap.headings[0]);
+  need(snap.headings[1] === 'ymd|2026|8|3|2026年8月3日|立杆', '中文年月日标题解析错：' + snap.headings[1]);
+  need(snap.headings[2] === 'md|null|8|3|8月3号|立杆', '月日标题解析错：' + snap.headings[2]);
+  need(snap.headings[3] === 'd|null|null|3|03日|立杆', '日标题解析错：' + snap.headings[3]);
+  need(PS.matchHeading('立杆3根') === null, '无日期标题不应解析出标题');
+
+  // 2) 切段：分隔符「后紧跟日期标题」才切（前瞻），不跟标题的逗号不切
+  snap.segments = [
+    PS.segmentContent('11日：立杆3根；12日：放线1km'),
+    PS.segmentContent('11日：立杆3根，放线2km'),
+    PS.segmentContent('11日：立杆3根、12日：放线'),
+    PS.segmentContent('11日：A\n12日：B\n'),
+    PS.segmentContent('')
+  ];
+  need(J(snap.segments[0]) === J(['11日：立杆3根', '12日：放线1km']), '分号后紧跟标题应切开：' + brief(snap.segments[0]));
+  need(J(snap.segments[1]) === J(['11日：立杆3根，放线2km']), '逗号后不跟标题不应切：' + brief(snap.segments[1]));
+  need(J(snap.segments[2]) === J(['11日：立杆3根', '12日：放线']), '顿号后紧跟标题应切开：' + brief(snap.segments[2]));
+  need(snap.segments[3].length === 2 && snap.segments[3][1] === '12日：B', '按行切段错：' + brief(snap.segments[3]));
+  need(snap.segments[4].length === 0, '空内容应切出 0 段');
+
+  // 3) 日期序列 / 每日起止时刻 / 子计划名后缀
+  snap.dayList = [PS.dayList('2026-11-11', '2026-11-13'), PS.dayList('2026-11-13', '2026-11-11'), PS.dayList('2026-11-11', '')];
+  need(J(snap.dayList[0]) === J(['2026-11-11', '2026-11-12', '2026-11-13']), '三天序列错：' + brief(snap.dayList[0]));
+  need(snap.dayList[1].length === 0 && snap.dayList[2].length === 0, '反序/非法起止应返回空数组');
+  need(!PS.isRealDate(2026, 2, 30) && PS.isRealDate(2028, 2, 29), 'isRealDate 闰年/非法日期判定错');
+  snap.dayRange = [
+    PS.dayRange('2026-11-12', '2026-11-11 08:00:00', '2026-11-13 10:00:00'),
+    PS.dayRange('2026-12-31', '2026-12-30 22:00:00', '2027-01-01 06:00:00')
+  ];
+  need(snap.dayRange[0].start === '2026-11-12 08:00:00' && snap.dayRange[0].end === '2026-11-12 10:00:00',
+    '每天起止应沿用父计划时刻：' + brief(snap.dayRange[0]));
+  need(snap.dayRange[1].end === '2027-01-01 06:00:00', '结束时刻不晚于开始时应顺延次日：' + brief(snap.dayRange[1]));
+  snap.mdLabel = ['2026-11-12', '2026-01-05'].map(PS.mdLabel);
+  need(J(snap.mdLabel) === J(['11月12日', '1月5日']), '子计划名后缀应为「M月D日」且不补零：' + brief(snap.mdLabel));
+
+  // 4) 单条结构化：修饰词不进地点、电压等级不算地点、规格与数量分开
+  const it = s => {
+    const o = PS.parseItem(s);
+    return [o.地点, o.工序, o.规格, String(o.数量), o.单位, o.unparsed ? '未解析' : '已解析'].join('|');
+  };
+  snap.items = [
+    it('大坪街村#3台变机械开挖15米电杆坑洞5个'),
+    it('10kV冒烟线01号杆电杆组立3根'),
+    it('0.4kV低压线路导线展放800米'),
+    it('清理现场')
+  ];
+  need(snap.items[0] === '大坪街村#3台变|基础开挖|15米|5|个|已解析', '地名里的「台变」不应被判成工序：' + snap.items[0]);
+  need(snap.items[1] === '冒烟线01号杆|电杆组立||3|根|已解析', '电压等级应从地点剔除：' + snap.items[1]);
+  need(snap.items[2] === '低压线路|导线安装||800|米|已解析', '0.4kV 地点应只留「低压线路」：' + snap.items[2]);
+  need(snap.items[3] === '|||null||未解析', '抽不出工序/数量应标未解析：' + snap.items[3]);
+
+  // 5) 七类工程量：电压分流、米折千米、多工序汇总、抽不出不产生
+  const mapQ = s => PS.quantitiesOf(PS.parseDayItems(s, []));
+  snap.qty = [
+    mapQ('电杆组立3根'),
+    mapQ('电缆敷设1200米'),
+    mapQ('环网柜安装1台，真空开关安装2台，变压器安装1台'),
+    mapQ('10kV导线架设2.5km'),
+    mapQ('0.4kV低压线路导线展放800米'),
+    mapQ('清理现场')
+  ];
+  need(J(snap.qty[0]) === J({ wlPole: 3 }), '电杆组立应计 wlPole：' + brief(snap.qty[0]));
+  need(J(snap.qty[1]) === J({ wlCable: 1.2 }), '米应折算为千米：' + brief(snap.qty[1]));
+  need(J(snap.qty[2]) === J({ wlRing: 1, wlVacuum: 2, wlTransformer: 1 }), '多工序应逐条汇总：' + brief(snap.qty[2]));
+  need(J(snap.qty[3]) === J({ wlLine1035: 2.5 }), '10kV 导线应计 10/35kV 档：' + brief(snap.qty[3]));
+  need(J(snap.qty[4]) === J({ wlLine04: 0.8 }), '0.4kV 导线应计 0.4kV 档：' + brief(snap.qty[4]));
+  need(J(snap.qty[5]) === J({}), '抽不出工序不应产生工程量：' + brief(snap.qty[5]));
+
+  // 6) 「同上」展开 + 确认稿覆盖（数字覆盖 / 空串删除 / 未传沿用）
+  const prevItems = PS.parseDayItems('电杆组立3根', []);
+  snap.same = PS.parseDayItems('同上', prevItems).map(x => [x.expandedFrom, x.原文, x.工序, String(x.数量)].join('|'));
+  need(J(snap.same) === J(['同上|同上|电杆组立|3']), '「同上」应整条展开为上一天条目：' + brief(snap.same));
+  snap.merge = PS.mergeQuantities({ wlPole: 3, wlCable: 1.2 }, { wlPole: '5', wlCable: '', wlRing: 2 });
+  need(J(snap.merge) === J({ wlPole: 5, wlRing: 2 }), '确认稿覆盖：数字覆盖/空串删除/未传沿用：' + brief(snap.merge));
+
+  // 7) 主入口：六类校验一次性收集，不只报第一条
+  const dNoHead = PS.parseDailyContent('随便写点', '2026-11-11', '2026-11-12');
+  need(dNoHead.ok === false && dNoHead.days.length === 0 && /未识别到每日日期标题/.test(dNoHead.errors[0]),
+    '无任何标题应给格式提示：' + brief(dNoHead.errors));
+  const dMiss = PS.parseDailyContent('11日：立杆3根\n13日：放线1km', '2026-11-11', '2026-11-13');
+  need(dMiss.ok === false && dMiss.errors.some(e => e === '工作内容缺少计划日期：2026-11-12'), '缺天应逐天列全：' + brief(dMiss.errors));
+  const dRange = PS.parseDailyContent('10日：立杆3根\n11日：放线1km', '2026-11-11', '2026-11-12');
+  need(dRange.errors.some(e => /不在计划日期范围内/.test(e)), '超范围应报错：' + brief(dRange.errors));
+  const dDup = PS.parseDailyContent('11日：立杆3根\n11日：放线1km', '2026-11-11', '2026-11-12');
+  need(dDup.errors.some(e => /重复/.test(e)), '重复日期应报错：' + brief(dDup.errors));
+  const dEmpty = PS.parseDailyContent('11日：\n12日：放线1km', '2026-11-11', '2026-11-12');
+  need(dEmpty.errors.some(e => /内容为空/.test(e)), '空内容应报错：' + brief(dEmpty.errors));
+
+  // 8) 「DD日」跨月跨年进位 + 同行连写多天（日期与工程量逐天归属）
+  const dCross = PS.parseDailyContent('30日：电杆组立3根\n31日：电缆敷设1200米\n1日：清理现场', '2026-12-30', '2027-01-01');
+  snap.cross = dCross.days.map(d => d.date);
+  need(dCross.ok === true && J(snap.cross) === J(['2026-12-30', '2026-12-31', '2027-01-01']), '「DD日」应跨月跨年进位：' + brief(snap.cross));
+  const dInline = PS.parseDailyContent('11日：电杆组立3根；12日：电缆敷设1200米；13日：导线架设2.5km', '2026-11-11', '2026-11-13');
+  need(dInline.ok === true && dInline.days.length === 3, '同行连写多天应切开：' + brief(dInline.errors));
+  snap.inline = dInline.days.map(d => d.date + '|' + J(d.quantities));
+  need(J(dInline.days.map(d => d.quantities)) === J([{ wlPole: 3 }, { wlCable: 1.2 }, { wlLine1035: 2.5 }]),
+    '同行连写的工程量应逐天归属：' + brief(dInline.days.map(d => d.quantities)));
+
+  return snap;
+}
+
+async function runSmoke() {
   const t0 = Date.now();
   log('=== 电网ERP 冒烟测试（临时 DATA_DIR）===');
   try {
@@ -2339,6 +2453,251 @@ async function listOk(p, token) {
     return '脚本顺序 / 日历仅周计划页签 + 四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注 / 选人先校验时间';
   });
 
+  /* ---------- 周计划拆分 ---------- */
+  await step('plans', '拆分解析器纯函数：日期标题/切段/跨月/条目结构/七类工程量/校验收集', async () => {
+    const PS = require('../server/core/plan-split');
+    const snap = splitPureChecks(PS);
+    return '标题 4 形态 / 切段 5 例 / 日期 3 例 / 条目 4 例 / 工程量 6 例 / 校验 5 类 / 快照 ' + JSON.stringify(snap).length + ' 字节';
+  });
+
+  await step('plans', '拆分时间回归：同一组断言在 TZ=UTC 子进程复跑，结果一致', async () => {
+    const PS = require('../server/core/plan-split');
+    const here = JSON.stringify(splitPureChecks(PS));
+    const script = 'const m=require(' + JSON.stringify(path.join(ROOT, 'scripts', 'smoke.js')) + ');' +
+      'const PS=require(' + JSON.stringify(path.join(ROOT, 'server', 'core', 'plan-split.js')) + ');' +
+      'process.stdout.write(JSON.stringify(m.splitPureChecks(PS)));';
+    const out = await new Promise((resolve, reject) => {
+      const cp = spawn(process.execPath, ['-e', script], {
+        cwd: ROOT, env: { ...process.env, TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let o = '', e = '';
+      cp.stdout.on('data', d => { o += d; });
+      cp.stderr.on('data', d => { e += d; });
+      cp.on('error', reject);
+      cp.on('exit', code => code === 0 ? resolve(o)
+        : reject(new Error('TZ=UTC 子进程退出 ' + code + '：' + String(e).slice(0, 400))));
+    });
+    need(out === here, 'TZ=UTC 下与本地结果不一致：\n  本地（TZ=' + (process.env.TZ || '系统默认') + '）' +
+      here.slice(0, 260) + '\n  UTC ' + out.slice(0, 260));
+    return 'TZ=' + (process.env.TZ || '系统默认') + ' 与 TZ=UTC 快照逐字节一致（' + here.length + ' 字节）';
+  });
+
+  await step('plans', '拆分预览：单日/月计划/已执行 拒绝 + 时刻沿用 + 不落库 + 缺天逐天列全', async () => {
+    const mk = async (body, label) => needOk(await api('POST', '/api/workPlans', { token, body }), label || 'plan POST').id;
+    const base = { planType: '周计划', status: '未执行', startDate: '2026-11-11 08:00:00', endDate: '2026-11-12 10:00:00' };
+
+    const twoId = await mk({ ...base, name: '冒烟预览两日', content: '11日：电杆组立3根；12日：电缆敷设1200米' });
+    const pv = needOk(await api('POST', '/api/workPlans/' + twoId + '/split/preview', { token, body: {} }), 'preview');
+    need(pv.ok === true && pv.days.length === 2, '预览应通过且切出 2 天：' + brief(pv));
+    need(pv.days[0].start === '2026-11-11 08:00:00' && pv.days[0].end === '2026-11-11 10:00:00',
+      '第一天起止应沿用父计划时刻：' + brief(pv.days[0]));
+    need(pv.days[1].start === '2026-11-12 08:00:00' && pv.days[1].end === '2026-11-12 10:00:00',
+      '第二天起止时刻错：' + brief(pv.days[1]));
+    need(JSON.stringify(pv.days[0].quantities) === JSON.stringify({ wlPole: 3 }) &&
+      JSON.stringify(pv.days[1].quantities) === JSON.stringify({ wlCable: 1.2 }),
+      '预览工程量应按天归属：' + brief(pv.days.map(d => d.quantities)));
+    const keep1 = needOk(await api('GET', '/api/workPlans/' + twoId, { token }), '预览后详情');
+    need(!keep1.splitBatchId && !keep1.splitSnapshot && keep1.endDate === '2026-11-12 10:00:00',
+      '预览不得落库：' + brief({ b: keep1.splitBatchId, s: !!keep1.splitSnapshot, e: keep1.endDate }));
+
+    const oneId = await mk({ ...base, name: '冒烟预览单日', endDate: '2026-11-11 10:00:00', content: '11日：立杆3根' });
+    const r1 = await api('POST', '/api/workPlans/' + oneId + '/split/preview', { token, body: {} });
+    need(r1.status === 400 && /单日计划无需拆分/.test(r1.data.error), '单日计划应 400：' + r1.status + ' ' + brief(r1.data));
+
+    const monId = await mk({ ...base, planType: '月计划', name: '冒烟预览月计划' });
+    const r2 = await api('POST', '/api/workPlans/' + monId + '/split/preview', { token, body: {} });
+    need(r2.status === 400 && /仅周计划支持拆分/.test(r2.data.error), '非周计划应 400：' + r2.status + ' ' + brief(r2.data));
+
+    const doneId = await mk({ ...base, status: '已执行', name: '冒烟预览已执行' });
+    const r3 = await api('POST', '/api/workPlans/' + doneId + '/split/preview', { token, body: {} });
+    need(r3.status === 400 && /未执行/.test(r3.data.error), '已执行应 400：' + r3.status + ' ' + brief(r3.data));
+
+    const badId = await mk({ ...base, name: '冒烟预览缺天', endDate: '2026-11-13 10:00:00', content: '11日：电杆组立3根' });
+    const r4 = needOk(await api('POST', '/api/workPlans/' + badId + '/split/preview', { token, body: {} }), 'preview 缺天');
+    need(r4.ok === false && r4.errors.indexOf('工作内容缺少计划日期：2026-11-12') > -1 &&
+      r4.errors.indexOf('工作内容缺少计划日期：2026-11-13') > -1, '缺天应逐天列全：' + brief(r4.errors));
+    const r5 = needOk(await api('POST', '/api/workPlans/' + badId + '/split/preview', { token, body: { content: '随便写点内容' } }), 'preview 无标题');
+    need(r5.ok === false && /未识别到每日日期标题/.test(r5.errors[0]), '无标题应给格式提示：' + brief(r5.errors));
+    const r6 = needOk(await api('POST', '/api/workPlans/' + badId + '/split/preview', { token, body: { content: '10日：A；11日：B；12日：C' } }), 'preview 超范围');
+    need(r6.ok === false && r6.errors.some(e => /不在计划日期范围内/.test(e)), '超范围应报错：' + brief(r6.errors));
+
+    for (const id of [twoId, oneId, monId, doneId, badId]) await api('DELETE', '/api/workPlans/' + id, { token });
+    return '时刻沿用 08:00/10:00 + 按天工程量 + 预览不落库 + 三类 400 + 缺天逐天列全 + 无标题提示 + 超范围';
+  });
+
+  await step('plans', '拆分执行：父收缩首日 + 子计划命名/状态/编号沿用 + 勘察克隆 + 幂等与子计划再拆', async () => {
+    const survey = {
+      surveyNo: '202611001', team: '冒烟班组', dualName: '10kV冒烟线', workTask: '立杆', envDesc: '晴',
+      surveyDate: '2026-11-10', grouping: '不分小组', groups: [],
+      hazardPoints: [{ id: 'hz_seed_a', title: '高处坠落', measure: '系安全带', scope: '全组' },
+        { id: 'hz_seed_b', title: '触电', measure: '验电接地', scope: '全组' }],
+      createdAt: '2026-11-10 09:00:00', updatedAt: '2026-11-10 09:00:00'
+    };
+    const parent = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟拆分三日计划', status: '未执行',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-13 10:00:00',
+      content: '11日：电杆组立3根；12日：电缆敷设1200米；13日：导线架设2.5km',
+      surveyNo: '202611001', workTicketNo: '202611680001', team: '冒烟班组', leader: '张三',
+      wlPole: '9', wlCable: '9', generatedFiles: [{ id: 'gf1', name: '旧生成物.docx' }], survey
+    } }), 'POST 拆分父计划');
+    const sp = needOk(await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: { days: [
+      { date: '2026-11-11', content: '电杆组立3根', quantities: { wlPole: 3 } },
+      { date: '2026-11-12', content: '电缆敷设1200米', quantities: { wlCable: 1.2 } },
+      { date: '2026-11-13', content: '导线架设2.5km', quantities: { wlLine1035: 2.5 } }
+    ] } }), 'split');
+    need(sp.ok === true && sp.children.length === 2 && !!sp.batchId, '应生成 2 条子计划：' + brief(sp));
+
+    const p = needOk(await api('GET', '/api/workPlans/' + parent.id, { token }), '父计划详情');
+    need(p.endDate === '2026-11-11 10:00:00', '父计划应收缩为第一天：' + p.endDate);
+    need(p.content === '电杆组立3根' && p.wlPole === '3' && p.wlCable === '',
+      '父计划内容与工程量应换成第一天：' + brief({ c: p.content, w: p.wlPole, c2: p.wlCable }));
+    need(p.splitBatchId === sp.batchId && p.splitSnapshot && p.splitSnapshot.endDate === '2026-11-13 10:00:00',
+      '父计划快照应保留原起止：' + brief(p.splitSnapshot));
+    need(p.splitSnapshot.content.indexOf('12日') > -1 && p.splitSnapshot.wlPole === '9',
+      '快照应保留原内容与工程量：' + brief({ c: p.splitSnapshot.content, w: p.splitSnapshot.wlPole }));
+    need(!p.survey.splitBatchId && p.survey.updatedAt === '2026-11-10 09:00:00' && p.survey.hazardPoints[0].id === 'hz_seed_a',
+      '父计划勘察不应被拆分改动：' + brief({ b: p.survey.splitBatchId, u: p.survey.updatedAt }));
+
+    const c1 = needOk(await api('GET', '/api/workPlans/' + sp.children[0].id, { token }), '子计划1详情');
+    need(c1.name === '冒烟拆分三日计划（11月12日）', '子计划名应为原名 + （M月D日）：' + c1.name);
+    need(c1.startDate === '2026-11-12 08:00:00' && c1.endDate === '2026-11-12 10:00:00',
+      '子计划起止应为当天 + 父计划时刻：' + c1.startDate + ' ~ ' + c1.endDate);
+    need(c1.planType === '周计划' && c1.status === '未执行' && c1.parentPlanId === parent.id && c1.splitBatchId === sp.batchId,
+      '子计划类型/状态/父引用不符：' + brief({ t: c1.planType, s: c1.status, p: c1.parentPlanId }));
+    need(c1.surveyNo === '202611001' && c1.workTicketNo === '202611680001', '子计划应沿用父计划勘察/工作票编号，不生成子编号');
+    need(!c1.splitSnapshot && !c1.generatedFiles, '子计划不应继承快照与生成物：' + brief({ s: !!c1.splitSnapshot, g: !!c1.generatedFiles }));
+    need(c1.survey && c1.survey.splitBatchId === sp.batchId && c1.survey.hazardPoints.length === 2,
+      '子计划勘察应为克隆且带本批标记：' + brief(c1.survey && { b: c1.survey.splitBatchId, n: (c1.survey.hazardPoints || []).length }));
+    const hIds = c1.survey.hazardPoints.map(h => h.id);
+    need(hIds.every(id => id !== 'hz_seed_a' && id !== 'hz_seed_b') && hIds[0] !== hIds[1],
+      '克隆勘察的危险点应重发 id：' + brief(hIds));
+    need(c1.survey.createdAt !== '2026-11-10 09:00:00' && c1.survey.updatedAt === c1.survey.createdAt,
+      '克隆勘察时间戳应刷新为拆分时刻：' + brief({ c: c1.survey.createdAt, u: c1.survey.updatedAt }));
+
+    const again = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: { days: [] } });
+    need(again.status === 409 && /已拆分/.test(again.data.error), '已拆分的父计划再拆应 409：' + again.status + ' ' + brief(again.data));
+    const sub = await api('POST', '/api/workPlans/' + sp.children[0].id + '/split', { token, body: { days: [] } });
+    need(sub.status === 400 && /子计划不能再次拆分/.test(sub.data.error), '子计划再拆应 400：' + sub.status + ' ' + brief(sub.data));
+
+    // 提交天数与计划天数不一致时服务端重跑校验（不落库）
+    const guard = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟拆分校验', status: '未执行',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-12 10:00:00', content: '11日：立杆3根；12日：放线'
+    } }), 'POST 校验计划');
+    const g1 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-11', content: '立杆3根' }] } });
+    need(g1.status === 400 && g1.data.errors.indexOf('工作内容缺少计划日期：2026-11-12') > -1,
+      '缺天应 400 并逐天列全：' + g1.status + ' ' + brief(g1.data));
+    const g2 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-11', content: '  ' }, { date: '2026-11-12', content: '放线' }] } });
+    need(g2.status === 400 && g2.data.errors.some(e => /内容为空/.test(e)), '空内容应 400：' + g2.status + ' ' + brief(g2.data));
+    const g3 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-10', content: 'x' }, { date: '2026-11-12', content: '放线' }] } });
+    need(g3.status === 400 && g3.data.errors.some(e => /不在计划日期范围内/.test(e)), '超范围应 400：' + g3.status + ' ' + brief(g3.data));
+    const still = needOk(await api('GET', '/api/workPlans/' + guard.id, { token }), '校验后详情');
+    need(!still.splitBatchId && still.endDate === '2026-11-12 10:00:00', '校验失败不得落库：' + brief(still.endDate));
+    await api('DELETE', '/api/workPlans/' + guard.id, { token });
+    return '父收缩为 08:00–10:00 首日 / 子计划（11月12日）未执行 + 编号沿用 / 勘察克隆重发 id / 再拆 409 与 400 / 三类提交校验 400 不落库';
+  });
+
+  await step('plans', '撤销拆分：四类拦截（状态/编辑/工程量/勘察）+ 通过后恢复快照并删子计划', async () => {
+    const surveySeed = {
+      surveyNo: '202611002', team: '冒烟班组', dualName: '10kV冒烟线', workTask: '立杆', envDesc: '晴',
+      surveyDate: '2026-11-10', grouping: '不分小组', groups: [], hazardPoints: [],
+      createdAt: '2026-11-10 09:00:00', updatedAt: '2026-11-10 09:00:00'
+    };
+    // A：5 天 → 4 条子计划，各触发一类拦截
+    const aId = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟撤销拦截计划', status: '未执行',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-15 10:00:00',
+      content: '11日：电杆组立3根；12日：电缆敷设1200米；13日：导线架设2.5km；14日：环网柜安装1台；15日：清理现场',
+      survey: surveySeed
+    } }), 'POST 撤销拦截计划').id;
+    const sp = needOk(await api('POST', '/api/workPlans/' + aId + '/split', { token, body: { days: [
+      { date: '2026-11-11', content: '电杆组立3根' },
+      { date: '2026-11-12', content: '电缆敷设1200米' },
+      { date: '2026-11-13', content: '导线架设2.5km' },
+      { date: '2026-11-14', content: '环网柜安装1台' },
+      { date: '2026-11-15', content: '清理现场' }
+    ] } }), 'split 5 天');
+    need(sp.children.length === 4, '应拆出 4 条子计划：' + brief(sp.children));
+    const [c1, c2, c3, c4] = sp.children.map(c => c.id);
+
+    needOk(await api('PUT', '/api/workPlans/' + c1, { token, body: { status: '已执行' } }), '子计划改状态');
+    needOk(await api('PUT', '/api/workPlans/' + c2, { token, body: { content: '拆分后改过的工作内容' } }), '子计划改内容');
+    needOk(await api('PUT', '/api/workPlans/' + c3 + '/quantities', { token, body: { wlPole: '8' } }), '子计划改工程量');
+    needOk(await api('PUT', '/api/workPlans/' + c4 + '/survey', { token, body: { surveyUnit: '冒烟勘察单位' } }), '子计划改勘察');
+
+    const blocked = await api('POST', '/api/workPlans/' + aId + '/unsplit', { token });
+    need(blocked.status === 409 && Array.isArray(blocked.data.blocks) && blocked.data.blocks.length === 4,
+      '四条子计划应各报一条拦截：' + blocked.status + ' ' + brief(blocked.data));
+    const all = blocked.data.blocks.join('\n');
+    need(/状态为「已执行」/.test(all), '缺少「状态非未执行」拦截：' + all);
+    need(/拆分后被编辑过/.test(all), '缺少「拆分后被编辑」拦截：' + all);
+    need(/修改过工程量/.test(all), '缺少「修改过工程量」拦截：' + all);
+    need(/勘察记录被编辑过/.test(all), '缺少「勘察被编辑」拦截：' + all);
+
+    // B：未改动的两天计划 → 撤销应恢复快照并逻辑删除子计划
+    const bId = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟可撤销计划', status: '未执行',
+      startDate: '2026-12-01 08:00:00', endDate: '2026-12-02 10:00:00',
+      content: '1日：电杆组立3根；2日：电缆敷设1200米', wlPole: '7', survey: surveySeed
+    } }), 'POST 可撤销计划').id;
+    const sp2 = needOk(await api('POST', '/api/workPlans/' + bId + '/split', { token, body: { days: [
+      { date: '2026-12-01', content: '电杆组立3根', quantities: { wlPole: 3 } },
+      { date: '2026-12-02', content: '电缆敷设1200米', quantities: { wlCable: 1.2 } }
+    ] } }), 'split 2 天');
+    const childId = sp2.children[0].id;
+    const un = needOk(await api('POST', '/api/workPlans/' + bId + '/unsplit', { token }), 'unsplit');
+    need(un.ok === true && un.removed === 1, '撤销应删除 1 条子计划：' + brief(un));
+    const back = needOk(await api('GET', '/api/workPlans/' + bId, { token }), '撤销后父计划');
+    need(back.endDate === '2026-12-02 10:00:00' && back.content === '1日：电杆组立3根；2日：电缆敷设1200米' && back.wlPole === '7',
+      '撤销后应恢复拆分前起止/内容/工程量：' + brief({ e: back.endDate, c: back.content, w: back.wlPole }));
+    need(!back.splitBatchId && !back.splitSnapshot, '撤销后应清除批次与快照');
+    const gone = await api('GET', '/api/workPlans/' + childId, { token });
+    need(gone.status === 404, '撤销后子计划应不可见（逻辑删除）：' + gone.status);
+    const listed = (await listOk('/api/workPlans', token)).map(x => x.id);
+    need(listed.indexOf(bId) > -1 && listed.indexOf(childId) < 0, '列表应只剩父计划');
+
+    // C：拆分时父计划没有勘察 → 子计划另建勘察后，撤销应报「已有独立勘察记录」
+    const cId = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟无勘察计划', status: '未执行',
+      startDate: '2026-12-05 08:00:00', endDate: '2026-12-06 10:00:00',
+      content: '5日：电杆组立3根；6日：电缆敷设1200米'
+    } }), 'POST 无勘察计划').id;
+    const sp3 = needOk(await api('POST', '/api/workPlans/' + cId + '/split', { token, body: { days: [
+      { date: '2026-12-05', content: '电杆组立3根' },
+      { date: '2026-12-06', content: '电缆敷设1200米' }
+    ] } }), 'split 无勘察');
+    const noSv = needOk(await api('GET', '/api/workPlans/' + sp3.children[0].id, { token }), '子计划（无勘察）');
+    need(!noSv.survey, '父计划无勘察时子计划不应凭空生成勘察：' + JSON.stringify(noSv.survey || null));
+    needOk(await api('PUT', '/api/workPlans/' + sp3.children[0].id + '/survey',
+      { token, body: { surveyUnit: '冒烟单位', surveyDate: '2026-11-10' } }), '子计划新建勘察');
+    const b3 = await api('POST', '/api/workPlans/' + cId + '/unsplit', { token });
+    need(b3.status === 409 && (b3.data.blocks || []).some(x => /已有独立勘察记录/.test(x)),
+      '子计划另建勘察后撤销应报「已有独立勘察记录」：' + b3.status + ' ' + brief(b3.data));
+    return '四类拦截各 1 条（状态/编辑/工程量/勘察）+ 另建勘察 1 条 + 正常撤销恢复快照、删 1 条子计划并逻辑删除';
+  });
+
+  await step('结构', '周计划拆分前端接线：脚本顺序/组件注册/入口守卫/徽标/改期拦截/窄屏卡片', async () => {
+    const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+    const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
+    const d = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plan-split.js'), 'utf8');
+    const m = fs.readFileSync(path.join(ROOT, 'public', 'js', 'main.js'), 'utf8');
+    const iSplit = html.indexOf('<script src="/js/views/plan-split.js"></script>');
+    const iPlans = html.indexOf('<script src="/js/views/plans.js"></script>');
+    need(iSplit > -1 && iSplit < iPlans, 'views/plan-split.js 必须先于 views/plans.js 加载：' + iSplit + ' / ' + iPlans);
+    need(/app\.component\('PlanSplitDlg', PlanSplitDlg\)/.test(m), 'main.js 应注册 PlanSplitDlg 组件');
+    need(/window\.PlanSplitDlg = PlanSplitDlg/.test(d), 'plan-split.js 应挂到 window.PlanSplitDlg');
+    need(/\.plan-split-badge/.test(html) && /\.psp-card \{/.test(html), 'index.html 缺少拆分徽标或窄屏卡片样式');
+    need(/planType !== '周计划'[\s\S]{0,120}status !== '未执行'[\s\S]{0,160}parentPlanId \|\| row\.splitBatchId/.test(p),
+      'canSplit 应排除非周计划/非未执行/子计划/已拆分');
+    need(/v-if="canSplit\(row\)" command="split"/.test(p), '更多下拉的「拆分」应按 canSplit 显示');
+    need(/v-if="row\.splitBatchId" command="unsplit"/.test(p), '更多下拉的「撤销拆分」应只对已拆分父计划显示');
+    need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
+    need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
+    need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
+    need(/qtyTouched/.test(d) && /rebuildContent/.test(d), '重新解析应保留用户改过的工程量');
+    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
@@ -2351,9 +2710,16 @@ async function listOk(p, token) {
   if (KEEP) log('临时目录（已保留）：' + TMP);
   else { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { } }
   process.exit(fail ? 1 : 0);
-})().catch(async (e) => {
-  log('冒烟脚本异常：' + e.stack);
-  await stopServer();
-  if (TMP && !KEEP) { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (err) { } }
-  process.exit(1);
-});
+}
+
+if (require.main === module) {
+  runSmoke().catch(async (e) => {
+    log('冒烟脚本异常：' + e.stack);
+    await stopServer();
+    if (TMP && !KEEP) { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (err) { } }
+    process.exit(1);
+  });
+}
+
+// 供 TZ=UTC 子进程 require（只导出纯函数断言，不触发服务启动）
+module.exports = { splitPureChecks };
