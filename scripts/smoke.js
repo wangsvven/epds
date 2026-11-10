@@ -2800,6 +2800,11 @@ async function runSmoke() {
     need(/<span class="plan-idx">\{\{ \(page - 1\) \* pageSize/.test(p)
       && /\.plan-idx \{ font-variant-numeric:tabular-nums; \}/.test(html),
       '序号应只是纯数字文本，样式仅 tabular-nums（无底色/圆角）');
+    need(/tr\[class\*="tk-a"\] > td\.plan-act-col \{ box-shadow:inset 3px 0 0 var\(--tk-edge\)/.test(html)
+      && !/td\.el-table__cell:first-child \{ box-shadow/.test(html),
+      '票种色条应移到操作列左缘，序号列不再有色条');
+    need(['#BEC5D2', '#CEDEE5', '#E7E8EC', '#F3EDEF', '#FFF2F2'].every(c => html.includes(c)),
+      '色条颜色应为同色系 45% 原色（与底色同源、只比底色深）');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
     need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
