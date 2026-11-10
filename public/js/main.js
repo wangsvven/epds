@@ -350,6 +350,7 @@ app.component('ArrivalStats', ArrivalStats);
 app.component('PlanDateTime', PlanDateTime);
 app.component('MonthPlansPanel', MonthPlansPanel);
 app.component('PlansView', PlansView);
+app.component('PlanSplitDlg', PlanSplitDlg);
 app.component('ActualConstructionView', ActualConstructionView);
 // 首屏先与服务器对时（最多等 600ms），避免用本机时钟算出错误的「今天/此刻」
 (function bootWithServerTime() {

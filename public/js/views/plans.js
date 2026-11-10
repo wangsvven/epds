@@ -311,6 +311,55 @@ const PlansView = {
       else if (cmd === 'cancel') cancelPlan(row);
       else if (cmd === 'settle') monthSettle(row);
       else if (cmd === 'reopen') monthReopen(row);
+      else if (cmd === 'split') openSplit(row);
+      else if (cmd === 'unsplit') unsplit(row);
+    }
+
+    // ---------- 周计划拆分（解析与执行在 core/plan-split + routes/plan-split，这里只做入口与守卫） ----------
+    const splitDlg = reactive({ visible: false, plan: null });
+    // 可拆分：周计划 + 未执行 + 跨天 + 未拆分 + 非子计划
+    function canSplit(row) {
+      if (!row || row.deleted) return false;
+      if (row.planType !== '周计划' || row.status !== '未执行') return false;
+      if (row.parentPlanId || row.splitBatchId) return false;
+      return String(row.endDate || '').slice(0, 10) > String(row.startDate || '').slice(0, 10);
+    }
+    // 行内灰字：父计划显示本批天数，子计划显示来源
+    function splitBadge(row) {
+      if (!row) return '';
+      if (row.parentPlanId) return '拆分自周计划';
+      if (row.splitBatchId) {
+        const n = list.value.filter(x => !x.deleted && x.parentPlanId === row.id && x.splitBatchId === row.splitBatchId).length;
+        return '已拆分 · 共 ' + (n + 1) + ' 天';
+      }
+      return '';
+    }
+    function openSplit(row) {
+      if (!canSplit(row)) return;
+      splitDlg.plan = row;
+      splitDlg.visible = true;
+    }
+    async function onSplitDone() { await load(); await loadMeta(); }
+    async function unsplit(row) {
+      if (!row || !row.splitBatchId) return;
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          '撤销后本批子计划与其克隆勘察一并删除，父计划恢复拆分前的起止时间与工作内容。是否继续？',
+          '撤销拆分', { type: 'warning', confirmButtonText: '撤销拆分', cancelButtonText: '取消' });
+      } catch (e) { return; }
+      try {
+        const r = await api.post('/api/workPlans/' + row.id + '/unsplit', {});
+        ElementPlus.ElMessage.success('已撤销拆分，删除 ' + (r.removed || 0) + ' 条子计划');
+        await load();
+      } catch (e) {
+        const d = e.data || {};
+        if (Array.isArray(d.blocks) && d.blocks.length) {
+          const html = d.blocks.map(b => '<div style="margin:4px 0">' + escHtml(b) + '</div>').join('');
+          await ElementPlus.ElMessageBox.alert(html, '无法撤销拆分', { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' });
+        } else {
+          ElementPlus.ElMessage.error(e.message || '撤销失败');
+        }
+      }
     }
     // ---------- 施工资料弹窗（勘察记录 / 生成资料 / 图纸 / 压缩包均接真实接口） ----------
     const matDlg = reactive({
@@ -1300,6 +1349,15 @@ const PlansView = {
       if (!String(f.name || '').trim()) { ElementPlus.ElMessage.warning('请填写作业计划名称'); return; }
       if (!f.startDate || !f.endDate) { ElementPlus.ElMessage.warning('请选择计划开始/结束日期'); return; }
       if (f.endDate < f.startDate) { ElementPlus.ElMessage.warning('计划结束日期不能早于开始日期'); return; }
+      // 已拆分父计划：改起止时间会让子计划日期与父计划脱节，必须先撤销拆分（改名单等其他字段不拦）
+      const origRow = dlg.editingId ? list.value.find(x => x.id === dlg.editingId) : null;
+      if (origRow && origRow.splitBatchId) {
+        const snap0 = dlg.editSnapshot || {};
+        if (String(f.startDate) !== String(snap0.startDate || '') || String(f.endDate) !== String(snap0.endDate || '')) {
+          ElementPlus.ElMessage.warning('该计划已拆分，修改起止时间需先撤销拆分');
+          return;
+        }
+      }
       if (!f.team) { ElementPlus.ElMessage.warning('请选择作业班组'); return; }
       if (!String(f.staffText || '').trim()) { ElementPlus.ElMessage.warning('请选择作业实施（施工）人员'); return; }
       if (!f.teamLeader) { ElementPlus.ElMessage.warning('请选择班组长'); return; }
@@ -1475,7 +1533,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, unsplit, splitBadge, canSplit };
   },
   template: `
   <div>
@@ -1552,7 +1610,12 @@ const PlansView = {
 
       <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
         <el-table-column type="index" label="序号" width="52" align="center" />
-        <el-table-column prop="name" label="作业计划名称" min-width="180" class-name="plan-wrapcell" />
+        <el-table-column prop="name" label="作业计划名称" min-width="180" class-name="plan-wrapcell">
+          <template #default="{row}">
+            <span>{{ row.name }}</span>
+            <span v-if="splitBadge(row)" class="plan-split-badge">{{ splitBadge(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="team" label="作业班组" min-width="92" :formatter="(r,c,v)=>dash(v)" />
         <el-table-column prop="leader" label="班组长" width="76" :formatter="(r,c,v)=>dash(v)" />
         <el-table-column prop="startDate" label="计划开始" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
@@ -1592,7 +1655,9 @@ const PlansView = {
                     <el-dropdown-menu>
                       <el-dropdown-item command="copy">复制</el-dropdown-item>
                       <el-dropdown-item command="exec">执行</el-dropdown-item>
+                      <el-dropdown-item v-if="canSplit(row)" command="split">拆分</el-dropdown-item>
                       <el-dropdown-item command="note">备注</el-dropdown-item>
+                      <el-dropdown-item v-if="row.splitBatchId" command="unsplit">撤销拆分</el-dropdown-item>
                       <el-dropdown-item command="cancel" divided class="plan-dd-danger">取消</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
@@ -1615,6 +1680,8 @@ const PlansView = {
           </div>
         </template>
       </el-table>
+
+      <plan-split-dlg v-model="splitDlg.visible" :plan="splitDlg.plan" @done="onSplitDone" />
 
       <el-dialog title="填写工程实际施工量" v-model="qtyDlg.visible" width="620px" label-position="top">
         <div style="color:var(--text-2);font-size:13px;margin-bottom:12px">计划：{{ qtyDlg.name }}</div>

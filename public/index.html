@@ -1028,6 +1028,7 @@
   .plan-table .plan-act-col .cell { padding-left:4px; padding-right:4px; }
   .plan-acts { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; padding:3px 0; }
   .plan-acts .el-button { margin-left:0; padding-left:0; padding-right:0; height:22px; font-weight:450; }
+  .plan-split-badge { margin-left:6px; font-size:11.5px; color:var(--text-3); white-space:nowrap; }
   .plan-caret { width:11px; height:11px; margin-left:2px; vertical-align:-1px; }
   .plan-act-more .el-button { padding-left:0; padding-right:0; }
   .plan-dd-danger { color:#c62828 !important; }
@@ -1039,6 +1040,53 @@
   .pp-total { font-size:12.5px; color:var(--text-3); }
   .pp-size { width:110px; }
   .plan-pager .el-button { margin-left:0; }
+  /* ===== 周计划拆分弹窗（views/plan-split.js） ===== */
+  .psp-head { display:flex; flex-direction:column; gap:3px; margin-bottom:10px; }
+  .psp-title { font-size:15px; font-weight:600; color:var(--text-1); word-break:break-word; line-height:1.5; }
+  .psp-sub { font-size:12.5px; color:var(--text-3); font-variant-numeric:tabular-nums; }
+  .psp-errors { background:#fdecec; border:1px solid #f5c2c0; color:#a4262c; border-radius:6px; padding:9px 12px; margin-bottom:10px; max-height:148px; overflow:auto; }
+  html.dark .psp-errors { background:#3a2224; border-color:#5c3335; color:#f2a7a3; }
+  .psp-errors-title { font-weight:600; font-size:12.5px; margin-bottom:3px; }
+  .psp-err-line { font-size:12.5px; line-height:1.75; }
+  .psp-ok { display:flex; align-items:center; gap:6px; font-size:12.5px; color:#1a7f37; margin-bottom:10px; }
+  html.dark .psp-ok { color:#7ee08a; }
+  .psp-ok-dot { width:6px; height:6px; border-radius:50%; background:currentColor; flex:0 0 auto; }
+  .psp-body { max-height:min(56vh, 600px); overflow:auto; }
+  .psp-table { border-radius:8px; }
+  .psp-date { font-size:13px; font-weight:600; }
+  .psp-wd { font-size:11.5px; color:var(--text-3); line-height:1.5; }
+  .psp-time { font-size:12.5px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .psp-items { display:flex; flex-wrap:wrap; gap:4px 6px; }
+  .psp-chip { display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap; background:var(--surface-3); border:1px solid var(--line); border-radius:4px; padding:2px 6px; font-size:12px; line-height:1.6; color:var(--text-2); }
+  .psp-chip.is-unparsed { border-color:#e6b422; background:#fdf6e3; color:#8a6116; }
+  html.dark .psp-chip.is-unparsed { background:#3a3320; border-color:#5c4f2a; color:#e2c073; }
+  .psp-chip.is-unmapped { border-style:dashed; }
+  .psp-loc { color:var(--text-3); }
+  .psp-num { font-weight:600; color:var(--text-1); }
+  .psp-flag { font-style:normal; font-size:10.5px; border-radius:3px; padding:0 4px; line-height:1.6; }
+  .psp-flag.is-warn { background:#f7d774; color:#5c4200; }
+  html.dark .psp-flag.is-warn { background:#6b5320; color:#f2dca0; }
+  .psp-flag.is-gray { background:var(--surface-3); color:var(--text-3); border:1px solid var(--line); }
+  .psp-flag.is-plain { background:transparent; color:var(--text-3); border:1px dashed var(--line-strong); }
+  .psp-empty { color:var(--text-3); }
+  .psp-qty { display:grid; grid-template-columns:1fr 1fr; gap:4px 8px; }
+  .psp-qty-cell { display:flex; align-items:center; gap:4px; font-size:11.5px; color:var(--text-3); }
+  .psp-qty-cell.is-empty { opacity:.5; }
+  .psp-qty-lb { white-space:nowrap; min-width:58px; }
+  .psp-qty-cell .el-input { width:62px; }
+  .psp-tip { font-size:12px; color:var(--text-3); line-height:1.7; margin-top:10px; }
+  /* 窄屏：逐天卡片（避免五列表被裁切） */
+  .psp-cards { display:flex; flex-direction:column; gap:10px; }
+  .psp-card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; background:var(--surface); display:flex; flex-direction:column; gap:8px; }
+  .psp-card-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13px; }
+  .psp-card-head .psp-time { color:var(--text-2); }
+  .psp-card-reparse { margin-left:auto; }
+  @media (max-width:768px) {
+    .psp-body { max-height:none; }
+    .psp-qty { grid-template-columns:1fr 1fr; }
+    .psp-qty-lb { min-width:52px; font-size:11px; }
+    .psp-qty-cell .el-input { width:62px; }
+  }
   /* ===== 月计划管理面板（检修口径） ===== */
   .mp-kw { width:200px; }
   .pf-actions-sep { flex:1 1 auto; }
@@ -1646,6 +1694,7 @@
   <script src="/js/views/contacts.js"></script>
   <script src="/js/views/users.js"></script>
   <script src="/js/views/projects.js"></script>
+  <script src="/js/views/plan-split.js"></script>
   <script src="/js/views/plans.js"></script>
   <script src="/js/views/monthPlans.js"></script>
   <script src="/js/views/actualWorks.js"></script>
