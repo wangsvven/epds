@@ -1030,20 +1030,20 @@
   .plan-act-line { display:flex; align-items:center; flex-wrap:wrap; gap:0 8px; }
   .plan-acts .el-button { margin-left:0; padding-left:0; padding-right:0; height:20px; font-weight:450; font-size:12.5px; }
   .plan-split-badge { margin-left:6px; font-size:11.5px; color:var(--text-3); white-space:nowrap; }
-  /* 工作票类型 → 中国风底色：左起淡彩晕染 + 左侧 3px 色条（进行中行保留黄底，色条仍在） */
-  .plan-table .el-table__body tr.tk-a1 { --tk-edge:#3F628C; --tk-from:#D9E6F7; --tk-to:#F5F9FE; --tk-hover-from:#CCDDF3; --tk-hover-to:#EEF6FD; } /* 靛蓝 */
-  .plan-table .el-table__body tr.tk-a2 { --tk-edge:#4A7659; --tk-from:#DCEFE2; --tk-to:#F6FBF7; --tk-hover-from:#CFE8D7; --tk-hover-to:#F0F9F2; } /* 竹青 */
-  .plan-table .el-table__body tr.tk-a3 { --tk-edge:#A2813B; --tk-from:#F8E9C9; --tk-to:#FDFAF1; --tk-hover-from:#F4E0B5; --tk-hover-to:#FCF7E8; } /* 缃色 */
-  .plan-table .el-table__body tr.tk-a4 { --tk-edge:#8A5E7B; --tk-from:#F2DEEB; --tk-to:#FCF7FA; --tk-hover-from:#ECD1E2; --tk-hover-to:#FAF1F6; } /* 藕荷 */
-  .plan-table .el-table__body tr.tk-a5 { --tk-edge:#A85440; --tk-from:#F8DFD4; --tk-to:#FDF7F3; --tk-hover-from:#F3D2C3; --tk-hover-to:#FBF1EB; } /* 银朱 */
+  /* 工作票类型 → 中国风底色（红/橙/黄/绿/青）：左起淡彩晕染 + 左侧 3px 色条（进行中行保留黄底，色条仍在） */
+  .plan-table .el-table__body tr.tk-a1 { --tk-edge:#B03A34; --tk-from:#F4CEC8; --tk-to:#FEF5F3; --tk-hover-from:#EFBDB6; --tk-hover-to:#FDEDEA; } /* 胭脂（红） */
+  .plan-table .el-table__body tr.tk-a2 { --tk-edge:#C0742C; --tk-from:#F8D8B6; --tk-to:#FEF8EF; --tk-hover-from:#F4C89E; --tk-hover-to:#FDF2E4; } /* 橘红（橙） */
+  .plan-table .el-table__body tr.tk-a3 { --tk-edge:#B08F2A; --tk-from:#F8EAA6; --tk-to:#FDFBEB; --tk-hover-from:#F3E18F; --tk-hover-to:#FCF7DA; } /* 缃黄（黄） */
+  .plan-table .el-table__body tr.tk-a4 { --tk-edge:#4A7A55; --tk-from:#D2E8CE; --tk-to:#F5FBF4; --tk-hover-from:#C1DEBC; --tk-hover-to:#EDF8EA; } /* 竹绿（绿） */
+  .plan-table .el-table__body tr.tk-a5 { --tk-edge:#2E6E8C; --tk-from:#CBE3EE; --tk-to:#F4FAFD; --tk-hover-from:#B8D8E8; --tk-hover-to:#EBF6FB; } /* 天青（青） */
   .plan-table .el-table__body tr[class*="tk-a"] > td.el-table__cell { background-image:linear-gradient(90deg, var(--tk-from) 0%, var(--tk-to) 76%); }
   .plan-table .el-table__body tr[class*="tk-a"]:hover > td.el-table__cell { background-image:linear-gradient(90deg, var(--tk-hover-from) 0%, var(--tk-hover-to) 76%); }
   .plan-table .el-table__body tr[class*="tk-a"] > td.el-table__cell:first-child { box-shadow:inset 3px 0 0 var(--tk-edge); }
-  html.dark .plan-table .el-table__body tr.tk-a1 { --tk-edge:#7BA2CE; --tk-from:#1A2534; --tk-to:#121820; --tk-hover-from:#20303F; --tk-hover-to:#161E26; }
-  html.dark .plan-table .el-table__body tr.tk-a2 { --tk-edge:#79A98A; --tk-from:#17261D; --tk-to:#121917; --tk-hover-from:#1C3024; --tk-hover-to:#161F1B; }
-  html.dark .plan-table .el-table__body tr.tk-a3 { --tk-edge:#C6A457; --tk-from:#2A2317; --tk-to:#1A1712; --tk-hover-from:#332B1C; --tk-hover-to:#1E1A13; }
-  html.dark .plan-table .el-table__body tr.tk-a4 { --tk-edge:#BC8FAA; --tk-from:#271C24; --tk-to:#181419; --tk-hover-from:#31232C; --tk-hover-to:#1C171C; }
-  html.dark .plan-table .el-table__body tr.tk-a5 { --tk-edge:#CC8168; --tk-from:#2C1D18; --tk-to:#1A1412; --tk-hover-from:#35231D; --tk-hover-to:#1E1714; }
+  html.dark .plan-table .el-table__body tr.tk-a1 { --tk-edge:#E0867F; --tk-from:#361F1C; --tk-to:#1D1413; --tk-hover-from:#402622; --tk-hover-to:#221817; }
+  html.dark .plan-table .el-table__body tr.tk-a2 { --tk-edge:#E2A868; --tk-from:#372718; --tk-to:#1D1712; --tk-hover-from:#412F1D; --tk-hover-to:#221B15; }
+  html.dark .plan-table .el-table__body tr.tk-a3 { --tk-edge:#D6B85C; --tk-from:#362E17; --tk-to:#1D1911; --tk-hover-from:#40371C; --tk-hover-to:#221E15; }
+  html.dark .plan-table .el-table__body tr.tk-a4 { --tk-edge:#8CBA92; --tk-from:#1C3222; --tk-to:#131C16; --tk-hover-from:#233D2A; --tk-hover-to:#18231B; }
+  html.dark .plan-table .el-table__body tr.tk-a5 { --tk-edge:#7FBAD4; --tk-from:#19303D; --tk-to:#121B23; --tk-hover-from:#203B4A; --tk-hover-to:#16222B; }
   .plan-empty { display:flex; flex-direction:column; align-items:center; gap:10px; padding:28px 0 32px; color:var(--text-3); font-size:13px; }
   .plan-empty svg { width:52px; height:52px; color:var(--line-strong); }
   .plan-empty-tip { max-width:520px; text-align:center; line-height:1.6; color:var(--text-3); font-size:12.5px; }
