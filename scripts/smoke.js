@@ -2781,6 +2781,9 @@ async function runSmoke() {
       need(new RegExp('\\.' + c + ' \\{').test(html), 'index.html 缺少票种底色 ' + c));
     need(/tr\[class\*="tk-a"\] > td\.el-table__cell/.test(html) && /--tk-edge/.test(html),
       'index.html 应按票种给行铺底色与左侧色条');
+    need(/tr\[class\*="tk-a"\] > td\.el-table__cell \{ background-color:var\(--tk-bg\)/.test(html)
+      && !/tr\[class\*="tk-a"\][^{]*\{[^}]*linear-gradient/.test(html),
+      '票种底色应为纯色浅底，不使用渐变');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
     need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
