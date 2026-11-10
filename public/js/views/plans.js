@@ -1652,25 +1652,35 @@ const PlansView = {
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">
-                <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
-                <el-button link type="primary" size="small" @click="copyPlan(row)">复制</el-button>
-                <el-button link type="primary" size="small" @click="restorePlan(row)">恢复</el-button>
+                <span class="plan-act-line">
+                  <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
+                  <el-button link type="primary" size="small" @click="copyPlan(row)">复制</el-button>
+                  <el-button link type="primary" size="small" @click="restorePlan(row)">恢复</el-button>
+                </span>
               </template>
               <template v-else-if="row.planType === '月计划' && row.status === '已执行'">
-                <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-button link type="primary" size="small" @click="planAct(row, 'settle')">标记已结算</el-button>
-                <el-button link type="primary" size="small" @click="planAct(row, 'reopen')">退回未执行</el-button>
+                <span class="plan-act-line">
+                  <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
+                  <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                </span>
+                <span class="plan-act-line">
+                  <el-button link type="primary" size="small" @click="planAct(row, 'settle')">标记已结算</el-button>
+                  <el-button link type="primary" size="small" @click="planAct(row, 'reopen')">退回未执行</el-button>
+                </span>
               </template>
               <template v-else>
-                <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
-                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-button link type="primary" size="small" @click="planAct(row, 'copy')">复制</el-button>
-                <el-button link type="primary" size="small" @click="planAct(row, 'exec')">执行</el-button>
-                <el-button link type="primary" size="small" @click="planAct(row, 'note')">备注</el-button>
-                <el-button link type="primary" size="small" @click="planAct(row, 'cancel')">取消</el-button>
-                <el-button v-if="canSplit(row)" link type="primary" size="small" @click="planAct(row, 'split')">拆分</el-button>
-                <el-button v-if="row.splitBatchId" link type="primary" size="small" @click="planAct(row, 'unsplit')">撤销拆分</el-button>
+                <span class="plan-act-line">
+                  <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
+                  <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                  <el-button link type="primary" size="small" @click="planAct(row, 'copy')">复制</el-button>
+                </span>
+                <span class="plan-act-line">
+                  <el-button link type="primary" size="small" @click="planAct(row, 'exec')">执行</el-button>
+                  <el-button link type="primary" size="small" @click="planAct(row, 'note')">备注</el-button>
+                  <el-button link type="primary" size="small" @click="planAct(row, 'cancel')">取消</el-button>
+                  <el-button v-if="canSplit(row)" link type="primary" size="small" @click="planAct(row, 'split')">拆分</el-button>
+                  <el-button v-if="row.splitBatchId" link type="primary" size="small" @click="planAct(row, 'unsplit')">撤销拆分</el-button>
+                </span>
               </template>
             </div>
             <el-button v-else-if="canWrite('planQuantities')" link type="primary" size="small" @click="openQuantities(row)">填写施工量</el-button>

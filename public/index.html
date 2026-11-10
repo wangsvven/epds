@@ -1024,9 +1024,10 @@
   .plan-table .pf-nowrap .cell { white-space:nowrap; }
   /* 长文本列完整折行，不再用省略号截断（作业计划名称 / 工作票类型 / 变电站线路） */
   .plan-table .plan-wrapcell .cell { white-space:normal; overflow:visible; text-overflow:clip; word-break:break-word; line-height:1.45; }
-  /* 操作列：全部操作平铺（施工资料 编辑 复制 / 执行 备注 取消 拆分），不再收进「更多」下拉 */
+  /* 操作列：全部操作平铺，显式分行——施工资料 编辑 复制 / 执行 备注 取消 [拆分]，不再收进「更多」下拉 */
   .plan-table .plan-act-col .cell { padding-left:4px; padding-right:4px; }
-  .plan-acts { display:flex; align-items:center; flex-wrap:wrap; gap:2px 8px; padding:1px 0; }
+  .plan-acts { display:flex; flex-direction:column; gap:2px; padding:1px 0; }
+  .plan-act-line { display:flex; align-items:center; flex-wrap:wrap; gap:0 8px; }
   .plan-acts .el-button { margin-left:0; padding-left:0; padding-right:0; height:20px; font-weight:450; font-size:12.5px; }
   .plan-split-badge { margin-left:6px; font-size:11.5px; color:var(--text-3); white-space:nowrap; }
   /* 工作票类型 → 中国风底色：左起淡彩晕染 + 左侧 3px 色条（进行中行保留黄底，色条仍在） */
