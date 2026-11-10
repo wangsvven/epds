@@ -2787,8 +2787,8 @@ async function runSmoke() {
     need(['#E9ECF0', '#EFF4F6', '#F7F7F9', '#FBF9FA', '#FFFBFB'].every(c => html.includes(c))
       && !/#F8DFDB|#FAE5CE|#F7EFC4|#E1EFDD|#DAEBF3/.test(html),
       '票种底色应为 Dopely 色板极淡版（接近白，不再用红橙黄绿青）');
-    need(/#E9ECF0; --tk-bg-hover:#DBDFE6/.test(html) && /#FFFBFB; --tk-bg-hover:#FFF7F7/.test(html),
-      '悬停色应比底色深一档但不过浓');
+    need(/#E9ECF0; --tk-bg-hover:#E2E5EB/.test(html) && /#FFFBFB; --tk-bg-hover:#FFF9F9/.test(html),
+      '悬停色只比底色略深（20% 原色），不得回跳到较浓的上一档');
     need(/\.plan-table th\.el-table__cell,[\s\S]{0,400}color:#000 !important/.test(html)
       && /\.plans-view \{ color:#000; \}/.test(html)
       && /html\.dark \.plan-table th\.el-table__cell,/.test(html),
