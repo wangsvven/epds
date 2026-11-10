@@ -2218,6 +2218,71 @@ async function listOk(p, token) {
     return '下拉三档 / 派生谓词 / 重置清空 / 两模板各一 / info 徽标';
   });
 
+  await step('plans', '人员防冲突纯函数：parseStaff / overlaps 相接边界 / findConflicts 占用方口径', async () => {
+    const vm = require('vm');
+    const sb = { window: {}, module: { exports: {} } };
+    vm.createContext(sb);
+    vm.runInContext(fs.readFileSync(path.join(ROOT, 'public', 'js', 'plan-staff.js'), 'utf8'), sb);
+    const F = sb.window.PlanStaff;
+    need(F && typeof F.parseStaff === 'function' && typeof F.findConflicts === 'function',
+      'plan-staff.js 应导出 parseStaff / participantsOf / overlaps / findConflicts');
+
+    const ps = F.parseStaff('张三/13800138000；李四/；王五/139/001');
+    need(ps.length === 3 && ps[0].name === '张三' && ps[0].phone === '13800138000' &&
+      ps[1].name === '李四' && ps[1].phone === '' &&
+      ps[2].name === '王五/139' && ps[2].phone === '001',
+      '分号分条目 / 最后一个斜杠分姓名电话 / 电话可空：' + brief(ps));
+    need(F.parseStaff('').length === 0 && F.parseStaff(null).length === 0, '空名单应返回空数组');
+    need(F.keyOf(' 张三 ', ' 138 ') === '张三|138', '比对键应去空白：' + F.keyOf(' 张三 ', ' 138 '));
+    const parts = F.participantsOf({ staffText: '张三/13800138000；李四/', chargePerson: '张三', chargePersonPhone: '13800138000' });
+    need(JSON.stringify(parts) === JSON.stringify(['张三|13800138000', '李四|']), '参与人键应含实施人员+负责人且去重：' + brief(parts));
+    need(F.participantsOf({ staffText: '', chargePerson: '', chargePersonPhone: '139' }).length === 0, '负责人姓名为空不加键');
+
+    const T = '2026-11-10';
+    need(F.overlaps(T + ' 09:00:00', T + ' 12:00:00', T + ' 11:00:00', T + ' 14:00:00'), '重叠应判定冲突');
+    need(!F.overlaps(T + ' 09:00:00', T + ' 12:00:00', T + ' 12:00:00', T + ' 14:00:00'), '首尾恰好相接不算冲突');
+    need(!F.overlaps(T + ' 12:00:00', T + ' 14:00:00', T + ' 09:00', T + ' 12:00:00'), '相接（HH:mm / HH:mm:ss 混写）也不算冲突');
+    need(!F.overlaps(T + ' 09:00:00', T + ' 12:00:00', '', T + ' 14:00:00'), '任一时间缺失返回 false');
+
+    const A = { id: 'A', name: '计划A', planType: '周计划', status: '未执行',
+      startDate: T + ' 09:00:00', endDate: T + ' 12:00:00',
+      staffText: '张三/13800138000；李四/', chargePerson: '王五', chargePersonPhone: '13900000001' };
+    const others = [
+      A,
+      { ...A, id: 'B', name: '月计划B', planType: '月计划' },
+      { ...A, id: 'C', name: '已执行C', status: '已执行' },
+      { ...A, id: 'D', name: '已取消D', status: '已取消' },
+      { ...A, id: 'E', name: '不重叠E', startDate: T + ' 12:00:00', endDate: T + ' 14:00:00' },
+      { ...A, id: 'F', name: '无状态F', status: '' }
+    ];
+    const cf = F.findConflicts(others, '', T + ' 10:00:00', T + ' 11:00:00');
+    need(Object.keys(cf).length === 3 && cf['张三|13800138000'].length === 1 &&
+      cf['张三|13800138000'][0].name === '计划A' && cf['李四|'] && cf['王五|13900000001'],
+      '只计周计划+未执行+重叠；月计划/已执行/已取消/无状态/相接均排除：' + brief(Object.keys(cf)));
+    need(Object.keys(F.findConflicts(others, 'A', T + ' 10:00:00', T + ' 11:00:00')).length === 0,
+      'selfId 应排除自身计划');
+    need(Object.keys(F.findConflicts(others, '', '', T + ' 11:00:00')).length === 0, '起止任一为空时不产生冲突');
+    return '解析 3 项/空值/最后斜杠 + 相接边界（含混写）+ 占用方类型/状态/自排除/时间窗';
+  });
+
+  await step('结构', '计划管理优化批：日历口径 / 高处全等 / 无班组排除 / 冲突接线静态防回归', async () => {
+    const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+    const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
+    const iS = html.indexOf('<script src="/js/plan-staff.js"></script>');
+    const iP = html.indexOf('<script src="/js/views/plans.js"></script>');
+    need(iS > -1 && iS < iP, 'plan-staff.js 必须先于 views/plans.js 加载');
+    need(/p\.planType === '周计划'/.test(p) &&
+      /!\['已归档', '已取消', '已执行', '已结算'\]\.includes\(p\.status\)/.test(p) &&
+      /const upcoming = computed/.test(p), '日历 upcoming 应限周计划且排除归档/取消/执行/结算');
+    need(/=== '技工（计入高处作业人员）'/.test(p) &&
+      !/\.includes\('计入高处作业人员'\)/.test(p), 'highStaff 应全等匹配，不得用子串 includes');
+    need(/WorkerStatus\.of\(w, ServerTime\.ymd\(\)\)\.admitted && String\(w\.team \|\| ''\)\.trim\(\)/.test(p) &&
+      !/w\.team \|\| '未分组'/.test(p), 'groupedTeams 应先滤掉无班组人员且不再兜「未分组」');
+    need(/findConflicts\(/.test(p) && /staffConflict\(/.test(p) && /ElMessageBox\.alert/.test(p),
+      '视图层应调用 findConflicts / staffConflict 并有保存兜底弹窗');
+    return '脚本顺序 / 日历四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
