@@ -2791,6 +2791,33 @@ async function runSmoke() {
     return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留/操作列平铺/票种五色';
   });
 
+  await step('结构', '材料台账·出库管理四框：默认值/选项内容/三框联动过滤工程候选', async () => {
+    const body = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(/const f1 = ref\('在建工程'\)/.test(body), '框1 默认应为「在建工程」');
+    need(/const f2 = ref\('全部工程类型'\)/.test(body), '框2 默认应为「全部工程类型」（空值会退化成「请选择」）');
+    need(/const f3 = ref\(''\)/.test(body), '框3 默认应为空（全部导入状态）');
+    need(/<el-option label="已竣工工程" value="已竣工工程" \/>/.test(body), '框1 应有「已竣工工程」选项');
+    need(/label="全部工程类型" value="全部工程类型"[\s\S]{0,120}label="自有工程"[\s\S]{0,120}label="客户工程"/.test(body),
+      '框2 选项应为 全部工程类型 / 自有工程 / 客户工程');
+    need(/label="全部导入状态"[\s\S]{0,120}label="已导入"[\s\S]{0,120}label="未导入"/.test(body),
+      '框3 选项应为 全部导入状态 / 已导入 / 未导入');
+    need(/function projectPass\(p\)[\s\S]{0,400}p\.completed[\s\S]{0,200}p\.category[\s\S]{0,200}importStateOf/.test(body),
+      '三框应按 completed / category / 导入情况联动过滤');
+    need(/const projects = computed\(\(\) => \{[\s\S]{0,300}projectPass\(p\)/.test(body),
+      '框4 候选应由 projectPass 过滤后的项目名单生成');
+    need(/watch\(\[f1, f2, f3\][\s\S]{0,200}indexOf\(project\.value\) < 0[\s\S]{0,80}project\.value = ''/.test(body),
+      '框1~3 变化后已选工程不在候选内应自动清空');
+    need(/async function loadImportMap\(\) \{[\s\S]{0,80}if \(importMap\.value\) return;/.test(body)
+      && /if \(m\.importId\) o\.imported\+\+/.test(body)
+      && /@visible-change="v => v && loadImportMap\(\)"/.test(body),
+      '导入状态应有懒加载统计（带 importId 的材料行），展开下拉才请求');
+    const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+    need(/class="ob-filters"/.test(body)
+      && /\.ob-filters \{ display:grid !important; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(html),
+      '≤768px 四框应改两列网格，避免被压成「在..」「全..」');
+    return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;

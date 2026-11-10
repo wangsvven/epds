@@ -930,6 +930,10 @@
     .ck-toolbar .el-button { flex:1 1 calc(50% - 4px); }
     .ck-hint, .ck-note { flex:1 1 100%; }
     .wv-filters .ck-note { order:5; }
+    /* 出库管理「请选择项目」四框：窄屏两列网格，避免被压成「在..」「全..」 */
+    .ob-filters { display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px !important; }
+    .ob-filters > * { width:100% !important; min-width:0; margin-left:0 !important; }
+    .ob-filters > .el-button { grid-column:1 / -1; }
   }
 
   /* ===== 统一卡片观感（浅色 / 深色通用） ===== */

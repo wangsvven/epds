@@ -1235,12 +1235,13 @@ const Imports = {
 const Outbounds = {
   setup() {
     const tab = ref('stock');
-    const f1 = ref('在建工程');
-    const f2 = ref('自有工程');
-    const f3 = ref('');
+    const f1 = ref('在建工程');   // 在建工程 | 已竣工工程
+    const f2 = ref('全部工程类型');   // 全部工程类型 | 自有工程 | 客户工程
+    const f3 = ref('');           // '' = 全部导入状态 | 已导入 | 未导入
     const project = ref('');
     const keyword = ref('');
-    const projects = ref([]);
+    const allProjects = ref([]);  // 完整项目对象（含 completed / category）
+    const importMap = ref(null);  // 项目名 → { total, imported }，用到导入状态时才加载
     const workers = ref([]);
     const list = ref([]);
     const orders = ref([]);
@@ -1267,8 +1268,7 @@ const Outbounds = {
     async function loadMeta() {
       try {
         const r = await api.get('/api/projects');
-        const arr = (Array.isArray(r) ? r : (r.data || [])).map(p => p.name || p.projectName).filter(Boolean);
-        projects.value = [...new Set(arr)];
+        allProjects.value = (Array.isArray(r) ? r : (r.data || [])).filter(p => p && (p.name || p.projectName));
       } catch (e) {}
       try {
         const r = await api.get('/api/workers');
@@ -1278,6 +1278,44 @@ const Outbounds = {
         workers.value = arr.filter(w => w && w.name && WorkerStatus.of(w, today).admitted).map(w => w.name);
       } catch (e) {}
     }
+    // 导入情况：该项目名下是否存在「带 importId 的材料行」（手工录入的不算导入）
+    // 材料量较大，仅在用户真的要用「导入状态」筛选时才拉一次
+    async function loadImportMap() {
+      if (importMap.value) return;
+      try {
+        const r = await api.get('/api/materials');
+        const arr = Array.isArray(r) ? r : (r.data || []);
+        const mp = {};
+        arr.forEach(m => {
+          const n = m.project; if (!n) return;
+          const o = mp[n] || (mp[n] = { total: 0, imported: 0 });
+          o.total++; if (m.importId) o.imported++;
+        });
+        importMap.value = mp;
+      } catch (e) { importMap.value = {}; }
+    }
+    function importStateOf(name) {
+      const o = (importMap.value || {})[name];
+      return o && o.imported > 0 ? '已导入' : '未导入';
+    }
+    // 框1~3 联动：工程状态（completed）/ 工程类型（category）/ 导入情况
+    function projectPass(p) {
+      const done = !!p.completed;
+      if (f1.value === '已竣工工程' ? !done : done) return false;
+      if (f2.value && f2.value !== '全部工程类型' && (p.category || '') !== f2.value) return false;
+      if (f3.value && importStateOf(p.name || p.projectName) !== f3.value) return false;
+      return true;
+    }
+    // 框4 候选：随框1~框3 过滤后的工程名单
+    const projects = computed(() => {
+      const names = [];
+      allProjects.value.forEach(p => { if (!projectPass(p)) return; const n = p.name || p.projectName; if (n) names.push(n); });
+      return [...new Set(names)];
+    });
+    // 框1~3 变化后，已选工程若不在候选中则清空
+    watch([f1, f2, f3], () => {
+      if (project.value && projects.value.indexOf(project.value) < 0) { project.value = ''; onProjectChange(); }
+    });
     async function load() {
       if (!project.value) { list.value = []; orders.value = []; return; }
       loading.value = true;
@@ -1478,7 +1516,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM };
   },
   template: `
   <div>
@@ -1489,10 +1527,15 @@ const Outbounds = {
         <el-button @click="load">{{ tab === 'orders' ? '刷新出库记录' : '刷新库存' }}</el-button>
       </div>
     </div>
-    <div style="display:flex;gap:10px;margin-bottom:14px">
-      <el-select v-model="f1" style="width:130px"><el-option label="在建工程" value="在建工程" /><el-option label="全部工程" value="" /></el-select>
-      <el-select v-model="f2" style="width:130px"><el-option label="自有工程" value="自有工程" /><el-option label="全部工程" value="" /></el-select>
-      <el-select v-model="f3" placeholder="全部导入状态" clearable style="width:150px">
+    <div class="ob-filters" style="display:flex;gap:10px;margin-bottom:14px">
+      <el-select v-model="f1" style="width:130px">
+        <el-option label="在建工程" value="在建工程" /><el-option label="已竣工工程" value="已竣工工程" />
+      </el-select>
+      <el-select v-model="f2" style="width:140px">
+        <el-option label="全部工程类型" value="全部工程类型" /><el-option label="自有工程" value="自有工程" /><el-option label="客户工程" value="客户工程" />
+      </el-select>
+      <el-select v-model="f3" placeholder="全部导入状态" clearable style="width:150px"
+        @change="loadImportMap" @visible-change="v => v && loadImportMap()">
         <el-option label="全部导入状态" value="" /><el-option label="已导入" value="已导入" /><el-option label="未导入" value="未导入" />
       </el-select>
       <el-select v-model="project" placeholder="选择工程" filterable clearable style="width:260px" @change="onProjectChange">
