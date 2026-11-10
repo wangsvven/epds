@@ -2795,6 +2795,11 @@ async function runSmoke() {
       '周计划表格与视图文字应统统黑色（深色主题保留浅字）');
     need(/background:#6E7F9A;color:#fff/.test(p) && !/#3370ff/.test(p),
       '日历徽标应改用色板蓝灰底白字');
+    need(!/isOngoing|plan-ongoing|is-now/.test(p) && !/\.plan-idx\.is-now/.test(html),
+      '序号应统一素化：无进行中黄标 / 无 is-now 类 / 无 plan-ongoing 死类');
+    need(/<span class="plan-idx">\{\{ \(page - 1\) \* pageSize/.test(p)
+      && /\.plan-idx \{ font-variant-numeric:tabular-nums; \}/.test(html),
+      '序号应只是纯数字文本，样式仅 tabular-nums（无底色/圆角）');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
     need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');

@@ -441,11 +441,8 @@
       .rq-hist { padding:8px 8px 10px 12px; }
       .rq-mat-grid { grid-template-columns:repeat(2,1fr); gap:6px 12px; }
     }
-  /* 计划管理：进行中（覆盖今天）只看序号黄标，行底色仍按工作票类型 */
-  /* 序号列：进行中的行用暖黄圆角标提示（不再整行铺黄底，行底色统一按票种） */
-  .plan-idx { display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:19px; padding:0 3px; border-radius:10px; font-variant-numeric:tabular-nums; }
-  .plan-idx.is-now { background:var(--warn-line); color:#000; font-weight:600; }
-  html.dark .plan-idx.is-now { background:var(--warn-line); color:var(--warn-text); }
+  /* 序号列：统一素化——纯数字，无底色 / 无圆角标 / 无悬停提示，所有行一致 */
+  .plan-idx { font-variant-numeric:tabular-nums; }
   /* 已取消周计划：整行置灰淡化，与已归档月计划风格一致；文字仍按「统统黑色」 */
   .el-table tr.plan-row-canceled > td.el-table__cell { background-color:rgba(128,128,128,.07) !important; color:#000 !important; }
   html.dark .el-table tr.plan-row-canceled > td.el-table__cell { color:#e8eaed !important; }
