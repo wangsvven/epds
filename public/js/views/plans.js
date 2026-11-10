@@ -237,11 +237,34 @@ const PlansView = {
       if (!s) return '-';
       return s.replace(/(\d+(?:\.\d+)?)\s*k\s*v$/i, '$1kV');
     }
-    // 行高亮：已取消整行置灰（与已归档一致）；覆盖今天且未取消/归档的计划（进行中）
+    // 工作票类型 → 行底色（中国风五色，一处定义，样式在 index.html 的 .tk-aN）
+    const TICKET_TONE = [
+      ['配电：配电第一种工作票', 'tk-a1'],   // 靛蓝
+      ['配电：配电第二种工作票', 'tk-a2'],   // 竹青
+      ['配电：低压工作票', 'tk-a3'],         // 缃色
+      ['线路：线路第一种工作票', 'tk-a4'],   // 藕荷
+      ['线路：线路第二种工作票', 'tk-a5']    // 银朱
+    ];
+    function ticketTone(row) {
+      const t = String((row && row.ticketType) || '').trim();
+      if (!t) return '';
+      const hit = TICKET_TONE.find(x => x[0] === t);
+      if (hit) return hit[1];
+      // 兜底：导入/历史数据里的简写按关键字归类，保证同一票种同色
+      if (/低压/.test(t)) return 'tk-a3';
+      if (/线路/.test(t)) return /二种/.test(t) ? 'tk-a5' : 'tk-a4';
+      if (/配电/.test(t)) return /二种/.test(t) ? 'tk-a2' : 'tk-a1';
+      return '';
+    }
+    // 行高亮：已取消整行置灰（与已归档一致）；覆盖今天且未取消/归档的计划（进行中）；其余按票种底色
     function rowClass({ row }) {
       if (row.status === '已取消') return 'plan-row-canceled';
+      const cls = [];
       const t = fmtDate(ServerTime.now());
-      return (!['已取消', '已归档'].includes(row.status) && daySlice(row.startDate) <= t && daySlice(row.endDate) >= t) ? 'plan-ongoing' : '';
+      if (!['已取消', '已归档'].includes(row.status) && daySlice(row.startDate) <= t && daySlice(row.endDate) >= t) cls.push('plan-ongoing');
+      const tone = ticketTone(row);
+      if (tone) cls.push(tone);
+      return cls.join(' ');
     }
     // 操作列：复制 / 执行 / 备注 / 取消
     async function copyPlan(row) {
@@ -1610,22 +1633,22 @@ const PlansView = {
 
       <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
         <el-table-column type="index" label="序号" width="52" align="center" />
-        <el-table-column prop="name" label="作业计划名称" min-width="180" class-name="plan-wrapcell">
+        <el-table-column prop="name" label="作业计划名称" min-width="168" class-name="plan-wrapcell">
           <template #default="{row}">
             <span>{{ row.name }}</span>
             <span v-if="splitBadge(row)" class="plan-split-badge">{{ splitBadge(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="team" label="作业班组" min-width="92" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="leader" label="班组长" width="76" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="startDate" label="计划开始" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="endDate" label="计划结束" width="110" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="ticketType" label="工作票类型" min-width="140" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="voltage" label="电压等级" width="78" align="center" :formatter="(r,c,v)=>fmtVoltage(v)" />
-        <el-table-column prop="station" label="变电站/线路" min-width="120" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePerson" label="工作负责人" width="92" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="144" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column label="操作" width="152" class-name="plan-act-col">
+        <el-table-column prop="team" label="作业班组" min-width="84" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="leader" label="班组长" width="68" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="startDate" label="计划开始" width="104" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="endDate" label="计划结束" width="104" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="ticketType" label="工作票类型" min-width="128" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="voltage" label="电压等级" width="76" align="center" :formatter="(r,c,v)=>fmtVoltage(v)" />
+        <el-table-column prop="station" label="变电站/线路" min-width="112" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePerson" label="工作负责人" width="90" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="142" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column label="操作" width="176" class-name="plan-act-col">
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">
@@ -1636,32 +1659,18 @@ const PlansView = {
               <template v-else-if="row.planType === '月计划' && row.status === '已执行'">
                 <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
                 <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-dropdown trigger="click" class="plan-act-more" @command="c => planAct(row, c)">
-                  <el-button link type="primary" size="small">更多<svg class="plan-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item command="settle">标记已结算</el-dropdown-item>
-                      <el-dropdown-item command="reopen">退回未执行</el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
+                <el-button link type="primary" size="small" @click="planAct(row, 'settle')">标记已结算</el-button>
+                <el-button link type="primary" size="small" @click="planAct(row, 'reopen')">退回未执行</el-button>
               </template>
               <template v-else>
                 <el-button link type="primary" size="small" @click="openPlanMaterials(row)">施工资料</el-button>
                 <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-                <el-dropdown trigger="click" class="plan-act-more" @command="c => planAct(row, c)">
-                  <el-button link type="primary" size="small">更多<svg class="plan-caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></el-button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item command="copy">复制</el-dropdown-item>
-                      <el-dropdown-item command="exec">执行</el-dropdown-item>
-                      <el-dropdown-item v-if="canSplit(row)" command="split">拆分</el-dropdown-item>
-                      <el-dropdown-item command="note">备注</el-dropdown-item>
-                      <el-dropdown-item v-if="row.splitBatchId" command="unsplit">撤销拆分</el-dropdown-item>
-                      <el-dropdown-item command="cancel" divided class="plan-dd-danger">取消</el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
+                <el-button link type="primary" size="small" @click="planAct(row, 'copy')">复制</el-button>
+                <el-button link type="primary" size="small" @click="planAct(row, 'exec')">执行</el-button>
+                <el-button link type="primary" size="small" @click="planAct(row, 'note')">备注</el-button>
+                <el-button link type="primary" size="small" @click="planAct(row, 'cancel')">取消</el-button>
+                <el-button v-if="canSplit(row)" link type="primary" size="small" @click="planAct(row, 'split')">拆分</el-button>
+                <el-button v-if="row.splitBatchId" link type="primary" size="small" @click="planAct(row, 'unsplit')">撤销拆分</el-button>
               </template>
             </div>
             <el-button v-else-if="canWrite('planQuantities')" link type="primary" size="small" @click="openQuantities(row)">填写施工量</el-button>

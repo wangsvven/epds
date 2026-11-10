@@ -2760,7 +2760,7 @@ async function runSmoke() {
     return '四类拦截各 1 条（状态/编辑/工程量/勘察）+ 另建勘察 1 条 + 正常撤销恢复快照、删 1 条子计划并逻辑删除';
   });
 
-  await step('结构', '周计划拆分前端接线：脚本顺序/组件注册/入口守卫/徽标/改期拦截/窄屏卡片', async () => {
+  await step('结构', '周计划拆分前端接线与列表样式：脚本顺序/组件注册/入口守卫/徽标/改期拦截/窄屏卡片/操作列平铺/票种底色', async () => {
     const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
     const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
     const d = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plan-split.js'), 'utf8');
@@ -2773,13 +2773,19 @@ async function runSmoke() {
     need(/\.plan-split-badge/.test(html) && /\.psp-card \{/.test(html), 'index.html 缺少拆分徽标或窄屏卡片样式');
     need(/planType !== '周计划'[\s\S]{0,120}status !== '未执行'[\s\S]{0,160}parentPlanId \|\| row\.splitBatchId/.test(p),
       'canSplit 应排除非周计划/非未执行/子计划/已拆分');
-    need(/v-if="canSplit\(row\)" command="split"/.test(p), '更多下拉的「拆分」应按 canSplit 显示');
-    need(/v-if="row\.splitBatchId" command="unsplit"/.test(p), '更多下拉的「撤销拆分」应只对已拆分父计划显示');
+    need(/v-if="canSplit\(row\)"[^>]*>拆分<\/el-button>/.test(p), '「拆分」应按 canSplit 直接平铺显示');
+    need(/v-if="row\.splitBatchId"[^>]*>撤销拆分<\/el-button>/.test(p), '「撤销拆分」应只对已拆分父计划显示');
+    need(!/plan-act-more/.test(p) && !/<el-dropdown/.test(p), '操作列应全部平铺，不再收进「更多」下拉');
+    need(/TICKET_TONE[\s\S]{0,600}tk-a5/.test(p), 'plans.js 应定义五种工作票 → 行底色映射');
+    ['tk-a1', 'tk-a2', 'tk-a3', 'tk-a4', 'tk-a5'].forEach(c =>
+      need(new RegExp('\\.' + c + ' \\{').test(html), 'index.html 缺少票种底色 ' + c));
+    need(/tr\[class\*="tk-a"\] > td\.el-table__cell/.test(html) && /--tk-edge/.test(html),
+      'index.html 应按票种给行铺底色与左侧色条');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
     need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
     need(/qtyTouched/.test(d) && /rebuildContent/.test(d), '重新解析应保留用户改过的工程量');
-    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留';
+    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留/操作列平铺/票种五色';
   });
 
   /* ---------- 汇总 ---------- */
