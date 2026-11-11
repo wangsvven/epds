@@ -543,6 +543,45 @@ app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
   res.json({ ok: true, data: rec });
 });
 
+// 作废前试算：冲销后可用 =（当前已到 − 本单该行累计入库量）− 该材料有效出库净额
+// 净额口径复用 outboundStats（仅未删除、状态=有效的出库单，领取 − 归还）；任一行 < 0 整单拒绝。
+// 未入库行（deduct = 0）不改变库存，不参与试算；待入库单因此天然不受影响。
+function voidAvailabilityCheck(rec) {
+  let bad = false;
+  const refs = [];
+  const statsCache = {};
+  (rec.items || []).forEach(it => {
+    const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
+    if (!m) return;
+    const cr = (rec.confirmRows || []).find(c => c.materialId === it.materialId);
+    const deduct = roundQty(cr ? (Number(cr.thisQty) || 0) : 0);
+    if (deduct <= 0) return;
+    const arrivedAfter = roundQty((Number(m.qtyArrived) || 0) - deduct);
+    if (!statsCache[m.project]) statsCache[m.project] = outboundStats(m.project);
+    const st = statsCache[m.project][m.id] || { taken: 0, returned: 0 };
+    const net = roundQty(st.taken - st.returned);
+    const availableAfter = roundQty(arrivedAfter - net);
+    if (availableAfter >= -1e-9) return;
+    bad = true;
+    // 列出占用该材料（净出库 > 0）的有效出库单，供前端逐条展示
+    DB.materialOutbound.forEach(o => {
+      if (o.deleted || o.status !== '有效') return;
+      (o.items || []).forEach(oi => {
+        if (!oi || oi.materialId !== m.id) return;
+        const qty = roundQty(oi.qty);
+        const returned = roundQty(oi.returned);
+        const oNet = roundQty(qty - returned);
+        if (oNet <= 0) return;
+        refs.push({
+          outNo: o.outNo || '', outboundId: o.id, materialId: m.id,
+          code: oi.code || m.code || '', description: oi.description || m.description || '',
+          qty, returned, net: oNet, availableAfter, receiver: o.receiver || ''
+        });
+      });
+    });
+  });
+  return { bad, refs };
+}
 // 作废（待入库/已入库/部分到库均可作废；已入库的会冲销其已入库数量，材料状态按扣减后重新汇总）
 app.put('/api/materialRequisitions/:id/void', (req, res) => {
   const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
@@ -550,6 +589,11 @@ app.put('/api/materialRequisitions/:id/void', (req, res) => {
   if (rec.status !== '待入库' && rec.status !== '已入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单已' + rec.status + '，不能作废' });
   const reason = String((req.body || {}).reason || '').trim();
   if (!reason) return res.status(400).json({ error: '请填写作废原因' });
+  // 冲销不得把可用库存冲成负数（否则料从库存消失、而出库单仍然占用）
+  const chk = voidAvailabilityCheck(rec);
+  if (chk.bad) {
+    return res.status(400).json({ error: '作废后可用库存将为负，请先归还或作废占用的出库单', refs: chk.refs });
+  }
   rec.status = '已作废';
   // 按领料单明细恢复材料状态（待入库作废时 confirmRows 为空，也要解除「已生成领料单」锁定）
   (rec.items || []).forEach(it => {

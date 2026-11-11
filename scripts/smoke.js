@@ -776,6 +776,110 @@ async function runSmoke() {
     return '应到 3 · 已到 0 · 未到库';
   });
 
+  let p02MatId = '', p02ReqId = '', p02OutId = '';
+  await step('materials', 'P0-2-A 有效出库占用 3.5 时作废领料单 → 拒、refs 含单号与净 3.5、库存不变', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P02A 占用主料', qtyRequired: 10, unit: '根', code: 'ZT-P02A' }
+    }), 'materials POST P02A');
+    p02MatId = m.id;
+    p02ReqId = await arriveVia(m.id, 6);
+    const ob = needOk(await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, receiver: '冒烟领料人', items: [{ materialId: m.id, qty: 3.5 }] }
+    }), 'outbound create P02A');
+    p02OutId = ob.data.id;
+    const outNo = ob.data.outNo;
+    const r = await api('PUT', '/api/materialRequisitions/' + p02ReqId + '/void', { token, body: { reason: 'ZT测试-冲穿校验' } });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(r.data.error === '作废后可用库存将为负，请先归还或作废占用的出库单', '文案不符：' + r.data.error);
+    const refs = r.data.refs;
+    need(Array.isArray(refs) && refs.length === 1, 'refs 应 1 条，实际 ' + brief(refs));
+    const x = refs[0];
+    ['outNo', 'outboundId', 'materialId', 'code', 'description', 'qty', 'returned', 'net', 'availableAfter', 'receiver']
+      .forEach(k => need(k in x, 'refs 缺字段 ' + k));
+    need(x.outNo === outNo && x.outboundId === p02OutId, 'refs 出库单号/ID 不符：' + x.outNo + '/' + x.outboundId);
+    need(x.qty === 3.5 && x.returned === 0 && x.net === 3.5, 'qty/returned/net 不符：' + JSON.stringify([x.qty, x.returned, x.net]));
+    need(x.availableAfter === -3.5, 'availableAfter 应为 -3.5，实际 ' + x.availableAfter);
+    need(x.receiver === '冒烟领料人', 'receiver 不符：' + x.receiver);
+    const reqs = await listOk('/api/materialRequisitions', token);
+    need(reqs.find(y => y.id === p02ReqId).status === '已入库', '领料单状态应保持 已入库');
+    const cur = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material detail P02A');
+    need(cur.qtyArrived === 6, '已到应仍 6，实际 ' + cur.qtyArrived);
+    const stock = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(MP_C), { token }), 'stock P02A');
+    const s = stock.find(z => z.id === m.id);
+    need(s && s.available === 2.5, '库存仍应显示 2.5，实际 ' + (s && s.available));
+    return '3.5 占用 → 400 · refs ' + outNo + ' 净 3.5 · 已到 6 · 可用 2.5';
+  });
+
+  await step('materials', 'P0-2-B 先作废出库单 → 再作废领料单成功', async () => {
+    needOk(await api('PUT', '/api/materialOutbound/' + p02OutId + '/void', { token, body: { reason: 'ZT测试-解除占用' } }), 'outbound void');
+    needOk(await api('PUT', '/api/materialRequisitions/' + p02ReqId + '/void', { token, body: { reason: 'ZT测试-作废领料单' } }), 'requisition void');
+    const cur = needOk(await api('GET', '/api/materials/' + p02MatId, { token }), 'material detail P02B');
+    need(cur.qtyArrived === 0, '作废后已到应 0，实际 ' + cur.qtyArrived);
+    const stock = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(MP_C), { token }), 'stock P02B');
+    need(!stock.some(z => z.id === p02MatId), '库存不应再有该材料');
+    return '出库作废 → 领料作废成功 · 已到 0';
+  });
+
+  await step('materials', 'P0-2-C 归还至净 0 → 作废领料单成功', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P02C 归还后作废', qtyRequired: 5, unit: '根', code: 'ZT-P02C' }
+    }), 'materials POST P02C');
+    const rid = await arriveVia(m.id, 2);
+    const ob = needOk(await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, receiver: '冒烟领料人', items: [{ materialId: m.id, qty: 2 }] }
+    }), 'outbound create P02C');
+    needOk(await api('PUT', '/api/materialOutbound/' + ob.data.id + '/return', { token, body: { rows: [{ materialId: m.id, qty: 2 }] } }), 'outbound return P02C');
+    needOk(await api('PUT', '/api/materialRequisitions/' + rid + '/void', { token, body: { reason: 'ZT测试-归还后作废' } }), 'requisition void P02C');
+    const cur = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material detail P02C');
+    need(cur.qtyArrived === 0, '已到应 0，实际 ' + cur.qtyArrived);
+    return '净 0 → 作废成功 · 已到 0';
+  });
+
+  await step('materials', 'P0-2-D 无出库 → 作废成功、已到正确冲减', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P02D 无出库作废', qtyRequired: 5, unit: '根', code: 'ZT-P02D' }
+    }), 'materials POST P02D');
+    const rid = await arriveVia(m.id, 3);
+    needOk(await api('PUT', '/api/materialRequisitions/' + rid + '/void', { token, body: { reason: 'ZT测试-无出库作废' } }), 'requisition void P02D');
+    const cur = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material detail P02D');
+    need(cur.qtyArrived === 0 && cur.qtyNotArrived === 5 && cur.status === '未到库',
+      '冲减后应 已到 0 / 未到 5 / 未到库，实际 ' + cur.qtyArrived + '/' + cur.qtyNotArrived + '/' + cur.status);
+    return '已到 3 → 0 · 未到 5 · 未到库';
+  });
+
+  await step('materials', 'P0-2-E 待入库单作废不受影响（voidDeduct=0）', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P02E 待入库作废', qtyRequired: 5, unit: '根', code: 'ZT-P02E' }
+    }), 'materials POST P02E');
+    const rid = await mkReqOf(m.id, 3);
+    const r = needOk(await api('PUT', '/api/materialRequisitions/' + rid + '/void', { token, body: { reason: 'ZT测试-待入库作废' } }), 'requisition void P02E');
+    need(r.data.status === '已作废', '状态应为 已作废，实际 ' + r.data.status);
+    need(r.data.voidDeduct === 0, 'voidDeduct 应为 0，实际 ' + r.data.voidDeduct);
+    const cur = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material detail P02E');
+    need(cur.qtyArrived === 0, '已到应仍 0，实际 ' + cur.qtyArrived);
+    return '作废成功 · voidDeduct=0 · 已到仍 0';
+  });
+
+  await step('materials', 'P0-2-F 空作废原因 → 400（既有行为保持）', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P02F 空原因', qtyRequired: 5, unit: '根', code: 'ZT-P02F' }
+    }), 'materials POST P02F');
+    const rid = await mkReqOf(m.id, 1);
+    const r = await api('PUT', '/api/materialRequisitions/' + rid + '/void', { token, body: { reason: '   ' } });
+    need(r.status === 400, '应 400，实际 ' + r.status);
+    need(r.data.error === '请填写作废原因', '文案不符：' + r.data.error);
+    const reqs = await listOk('/api/materialRequisitions', token);
+    need(reqs.find(y => y.id === rid).status === '待入库', '领料单应仍为 待入库');
+    return '400 · 状态未变';
+  });
+
   // P0-1.4 前端静态断言（UI 交互不在冒烟内模拟）
   await step('materials', 'P0-1.4 前端：已到改只读展示（新增显示 0）、应到 min 大于 0', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
@@ -784,6 +888,14 @@ async function runSmoke() {
     need(!/v-model="form\.qtyArrived"/.test(src), '已到不应再有可编辑输入');
     need(/v-model="form\.qtyRequired" :min="0\.0001"/.test(src), '应到 min 应为 0.0001（> 0 口径）');
     return '已到只读 · 应到 min>0';
+  });
+
+  // P0-2-G 前端静态断言（真实界面另由浏览器实测覆盖）
+  await step('materials', 'P0-2-G 前端：作废被拒列出出库单号与净出库', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(/const refs = e && e\.data && e\.data\.refs;[\s\S]{0,400}r\.outNo[\s\S]{0,160}fmtQty\(r\.net\)/.test(src),
+      '作废失败应列出出库单号与净出库');
+    return '作废失败列出单号+净出库';
   });
 
   /* ---------- 计划编号（纯函数与前端共用） ---------- */

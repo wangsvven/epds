@@ -920,7 +920,22 @@ const Requisitions = {
         ElementPlus.ElMessage.success('领料单 ' + vdlg.rec.reqNo + ' 已作废');
         vdlg.visible = false; load();
         window.dispatchEvent(new CustomEvent('materials-changed')); // 材料明细实时刷新
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) {
+        // 冲销会把可用库存冲成负数：列出占用中的出库单（单号 + 净出库），逐条核对
+        const refs = e && e.data && e.data.refs;
+        if (Array.isArray(refs) && refs.length) {
+          const html = '<div style="line-height:1.8">' + (e.message || '') + '</div>'
+            + '<div style="margin-top:10px;line-height:2">'
+            + refs.map(r => '· 出库单 <b>' + r.outNo + '</b>：净出库 <b>' + fmtQty(r.net) + '</b>'
+              + (r.description ? '（' + r.description + '）' : '')).join('<br>')
+            + '</div>';
+          ElementPlus.ElMessageBox.alert(html, '无法作废领料单', {
+            dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning'
+          });
+        } else {
+          ElementPlus.ElMessage.error(e.message);
+        }
+      }
     }
     async function deleteReq(r) {
       try {
