@@ -2805,6 +2805,14 @@ async function runSmoke() {
       '票种色条应移到操作列左缘，序号列不再有色条');
     need(['#BEC5D2', '#CEDEE5', '#E7E8EC', '#F3EDEF', '#FFF2F2'].every(c => html.includes(c)),
       '色条颜色应为同色系 45% 原色（与底色同源、只比底色深）');
+    need(/<span v-if="canSplit\(row\) \|\| row\.splitBatchId" class="plan-act-line">/.test(p)
+      && /v-if="canSplit\(row\)"[^>]*>拆分<\/el-button>/.test(p),
+      '「拆分/撤销拆分」应单独占操作列第三行（参考图布局）');
+    need(/label="作业计划名称" min-width="240"/.test(p) && /label="操作" width="170"/.test(p)
+      && /label="工作负责人联系电话" width="126"/.test(p),
+      '列宽按参考图重分配：名称加宽、其余收紧、总宽不溢出');
+    need(/th\.el-table__cell > \.cell,[\s\S]{0,120}padding-left:6px/.test(html),
+      '单元格左右内边距应收紧到 6px，保证 12 列表头与日期不被省略');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
     need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');

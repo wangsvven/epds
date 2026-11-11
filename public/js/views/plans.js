@@ -1630,27 +1630,27 @@ const PlansView = {
       </div>
 
       <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
-        <el-table-column label="序号" width="52" align="center">
+        <el-table-column label="序号" width="48" align="center">
           <template #default="{ row, $index }">
             <span class="plan-idx">{{ (page - 1) * pageSize + $index + 1 }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="作业计划名称" min-width="168" class-name="plan-wrapcell">
+        <el-table-column prop="name" label="作业计划名称" min-width="240" class-name="plan-wrapcell">
           <template #default="{row}">
             <span>{{ row.name }}</span>
             <span v-if="splitBadge(row)" class="plan-split-badge">{{ splitBadge(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="team" label="作业班组" min-width="84" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="leader" label="班组长" width="68" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="startDate" label="计划开始" width="104" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="endDate" label="计划结束" width="104" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
-        <el-table-column prop="ticketType" label="工作票类型" min-width="128" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="voltage" label="电压等级" width="76" align="center" :formatter="(r,c,v)=>fmtVoltage(v)" />
-        <el-table-column prop="station" label="变电站/线路" min-width="112" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePerson" label="工作负责人" width="90" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="142" :formatter="(r,c,v)=>dash(v)" />
-        <el-table-column label="操作" width="176" class-name="plan-act-col">
+        <el-table-column prop="team" label="作业班组" min-width="80" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="leader" label="班组长" width="64" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="startDate" label="计划开始" width="100" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="endDate" label="计划结束" width="100" class-name="pf-nowrap" :formatter="(r,c,v)=>fmtDT(v)" />
+        <el-table-column prop="ticketType" label="工作票类型" min-width="116" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="voltage" label="电压等级" width="70" align="center" :formatter="(r,c,v)=>fmtVoltage(v)" />
+        <el-table-column prop="station" label="变电站/线路" min-width="104" class-name="plan-wrapcell" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePerson" label="工作负责人" width="82" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column prop="chargePersonPhone" label="工作负责人联系电话" width="126" :formatter="(r,c,v)=>dash(v)" />
+        <el-table-column label="操作" width="170" class-name="plan-act-col">
           <template #default="{row}">
             <div v-if="canWrite('plans')" class="plan-acts">
               <template v-if="tab === 'canceled'">
@@ -1680,6 +1680,8 @@ const PlansView = {
                   <el-button link type="primary" size="small" @click="planAct(row, 'exec')">执行</el-button>
                   <el-button link type="primary" size="small" @click="planAct(row, 'note')">备注</el-button>
                   <el-button link type="primary" size="small" @click="planAct(row, 'cancel')">取消</el-button>
+                </span>
+                <span v-if="canSplit(row) || row.splitBatchId" class="plan-act-line">
                   <el-button v-if="canSplit(row)" link type="primary" size="small" @click="planAct(row, 'split')">拆分</el-button>
                   <el-button v-if="row.splitBatchId" link type="primary" size="small" @click="planAct(row, 'unsplit')">撤销拆分</el-button>
                 </span>

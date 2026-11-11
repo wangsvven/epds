@@ -1024,8 +1024,11 @@
   .plan-table { border-radius:10px; overflow:hidden; }
   .plan-table th.el-table__cell { background:var(--surface-3) !important; color:var(--text-2); font-weight:600; font-size:12.5px; padding:7px 0; }
   .plan-table th.el-table__cell > .cell { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .plan-table td.el-table__cell { font-size:13px; padding:7px 0; }
+  .plan-table td.el-table__cell { font-size:13px; padding:9px 0; }
   .plan-table .cell { line-height:20px; font-variant-numeric:tabular-nums; }
+  /* 参考图的紧凑排布：单元格左右内边距 12→6px，列宽不变但表头与日期不再被省略 */
+  .plan-table th.el-table__cell > .cell,
+  .plan-table td.el-table__cell > .cell { padding-left:6px; padding-right:6px; }
   .plan-table .pf-nowrap .cell { white-space:nowrap; }
   /* 长文本列完整折行，不再用省略号截断（作业计划名称 / 工作票类型 / 变电站线路） */
   .plan-table .plan-wrapcell .cell { white-space:normal; overflow:visible; text-overflow:clip; word-break:break-word; line-height:1.45; }
