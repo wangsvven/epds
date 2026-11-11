@@ -3699,6 +3699,286 @@ async function runSmoke() {
     return '八类命中 · 检测前后 db.json 字节一致 · ' + rows.length + ' 条';
   });
 
+  /* ========== P4 业务日期与按日回放（第一批 + 第二批） ==========
+   * 业务日期口径：reqDate（领料）/ arrivalDate（整单到货，写 history）/ outDate（出库）/ returnDate（归还）。
+   * 单号按业务日取号；新单 legacy:false；回放是新单库存先后的唯一口径；存量单（legacy:true）作废只走 P0-2。 */
+  const { MIGRATIONS } = require(path.join(ROOT, 'server', 'core', 'migrations.js'));
+  const P4_MIG = MIGRATIONS.find(m => m.id === '20261111-material-biz-dates');
+  const P4PJ = 'ZT测试-业务日期冒烟';
+  const p4Tag = d => String(d).replace(/-/g, '');
+  const p4D4 = dayOff(srvToday, -4);
+  const p4D31 = dayOff(srvToday, -31);
+  const p4Future = dayOff(srvToday, 3);
+  let p4Seq = 0;
+  const p4Mat = async (code, qty) => {
+    p4Seq++;
+    return needOk(await api('POST', '/api/materials', {
+      token, body: { project: P4PJ, source: '甲供材料', description: 'ZT测试-P4-' + code + '-' + p4Seq, qtyRequired: qty, unit: '只', code: 'ZT-P4-' + code + p4Seq }
+    }), 'materials POST P4-' + code);
+  };
+  const p4Req = async (matId, qty, reqDate, extra) => needOk(await api('POST', '/api/requisitions/create', {
+    token, body: Object.assign({ items: [{ id: matId, qty }] }, reqDate ? { reqDate } : {}, extra || {})
+  }), 'P4 create req').data;
+  const p4Confirm = (reqId, matId, qty, arrivalDate, reason) => {
+    const row = { materialId: matId, thisQty: qty };
+    if (reason) row.reason = reason;
+    return api('PUT', '/api/materialRequisitions/' + reqId + '/confirm', {
+      token, body: Object.assign({ rows: [row] }, arrivalDate ? { arrivalDate } : {})
+    });
+  };
+  const p4Out = (matId, qty, extra) => api('POST', '/api/materialOutbound/create', {
+    token, body: Object.assign({ project: P4PJ, workerId: smokeWorker.id, items: [{ materialId: matId, qty }] }, extra || {})
+  });
+  const p4Stock = async id => {
+    const rows = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(P4PJ), { token }), 'P4 stock');
+    const r = (rows || []).find(x => x.id === id);
+    return r ? Number(r.available) : 0;
+  };
+  const p4Ref = {};
+  // P4 段自建工程（材料只能挂项目列表里的工程名）
+  {
+    const projs = needOk(await api('GET', '/api/projects', { token }), 'GET projects');
+    if (!(projs || []).some(p => p.name === P4PJ && !p.deleted)) {
+      needOk(await api('POST', '/api/projects', {
+        token, body: { name: P4PJ, batch: '2026-11', substation: 'ZT设施所', workType: '配网', category: '自有工程' }
+      }), 'POST P4 project');
+    }
+  }
+
+  await step('materials', 'P4-1-A 省略日期默认今天 + 单号用今天 + 录入时间另存', async () => {
+    const m = await p4Mat('A', 100);
+    const r = await p4Req(m.id, 5, '');
+    need(r.reqDate === srvToday, 'reqDate 应默认今天：' + r.reqDate);
+    need(r.reqNo.indexOf('LL-' + p4Tag(srvToday) + '-') === 0, '领料单号应用今天：' + r.reqNo);
+    need(r.legacy === false, '新领料单 legacy 应为 false');
+    need(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(r.createdAt), 'createdAt 应是录入时分串：' + r.createdAt);
+    const c = await p4Confirm(r.id, m.id, 5, '');
+    needOk(c, 'P4-1-A confirm');
+    need(c.data.data.history[0].arrivalDate === srvToday, 'arrivalDate 应默认今天：' + c.data.data.history[0].arrivalDate);
+    need(c.data.data.history[0].at !== c.data.data.history[0].arrivalDate, 'history.at 不应被写成业务日');
+    const o = await p4Out(m.id, 2, {});
+    needOk(o, 'P4-1-A out');
+    need(o.data.data.outDate === srvToday, 'outDate 应默认今天：' + o.data.data.outDate);
+    need(o.data.data.outNo.indexOf('OUT-' + p4Tag(srvToday) + '-') === 0, '出库单号应用今天');
+    need(o.data.data.legacy === false, '出库新单 legacy 应为 false');
+    p4Ref.reqNo = r.reqNo; p4Ref.outNo = o.data.data.outNo;
+    return r.reqNo + ' / ' + o.data.data.outNo;
+  });
+
+  await step('materials', 'P4-1-B 分两次整单到货两个日期 + 行级日期忽略', async () => {
+    const m = await p4Mat('B', 100);
+    const r = await p4Req(m.id, 10, p4D4);
+    need(r.reqNo.indexOf('LL-' + p4Tag(p4D4) + '-') === 0, '领料单应按开单日取号：' + r.reqNo);
+    const c1 = await api('PUT', '/api/materialRequisitions/' + r.id + '/confirm', {
+      token, body: { rows: [{ materialId: m.id, thisQty: 6, arrivalDate: p4D31, reason: 'ZT分两批到货' }], arrivalDate: p4D4 }
+    });
+    needOk(c1, 'P4-1-B confirm1');
+    const c2 = await p4Confirm(r.id, m.id, 4, srvToday);
+    needOk(c2, 'P4-1-B confirm2');
+    const h = c2.data.data.history;
+    need(c2.data.data.status === '已入库' && h.length === 2, '两次确认后应已入库且有两条 history：' + brief(h));
+    need(h[0].arrivalDate === p4D4 && h[1].arrivalDate === srvToday, '两条整单到货日应为 ' + p4D4 + ' / ' + srvToday + '：' + brief(h.map(x => x.arrivalDate)));
+    need(h.every(x => String(x.at).slice(0, 10) === srvToday), '两条 at 都应是今天录入时间：' + brief(h.map(x => x.at)));
+    need(h.every(x => (x.rows || []).every(y => y.arrivalDate === undefined)), '行级日期不应落库（整单口径）');
+    p4Ref.bReqId = r.id;
+    return h.map(x => x.arrivalDate).join(' / ');
+  });
+
+  await step('materials', 'P4-1-C 到货早于开单日 / 未来日期 / 非法格式 → 400 且不落库', async () => {
+    const m = await p4Mat('C', 100);
+    const r = await p4Req(m.id, 5, p4D4);
+    const bad = await p4Confirm(r.id, m.id, 5, dayOff(p4D4, -1));
+    need(bad.status === 400 && /到货日期不能早于领料日期/.test(String(bad.data.error)), '到货早于开单应 400：' + brief(bad.data));
+    need((await p4Stock(m.id)) === 0, '拒绝后已到应仍为 0');
+    need((await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], reqDate: p4Future } })).status === 400, '未来领料日期应 400');
+    need((await p4Confirm(r.id, m.id, 1, p4Future)).status === 400, '未来到货日期应 400');
+    need((await api('POST', '/api/materialOutbound/create', { token, body: { project: P4PJ, workerId: smokeWorker.id, items: [{ materialId: m.id, qty: 1 }], outDate: p4Future } })).status === 400, '未来出库日期应 400');
+    need((await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], reqDate: '2026/11/07' } })).status === 400, '非 YYYY-MM-DD 应 400');
+    return '四类拒绝且未落库';
+  });
+
+  await step('materials', 'P4-1-D 出库日默认作业日 / 未来作业日回落今天并带提示', async () => {
+    const m = await p4Mat('D', 100);
+    const r = await p4Req(m.id, 20, p4D4);
+    needOk(await p4Confirm(r.id, m.id, 20, p4D4), 'P4-1-D confirm');
+    const o = await p4Out(m.id, 3, { workDate: p4D4 });
+    needOk(o, 'P4-1-D out');
+    need(o.data.data.outDate === p4D4 && o.data.data.workDate === p4D4, '出库日应默认等于作业日：' + brief({ out: o.data.data.outDate, work: o.data.data.workDate }));
+    need(o.data.data.outNo.indexOf('OUT-' + p4Tag(p4D4) + '-') === 0, '出库单号应走出库日：' + o.data.data.outNo);
+    need(String(o.data.data.createdAt).slice(0, 10) === srvToday, 'createdAt 应仍是今天');
+    const o2 = await p4Out(m.id, 1, { workDate: p4Future });
+    needOk(o2, 'P4-1-D 未来作业日出库');
+    need(o2.data.data.outDate === srvToday, '未来作业日应回落今天：' + o2.data.data.outDate);
+    need(o2.data.data.workDate === p4Future, '作业日本身应保留未来日期');
+    need(o2.data.outDateFallback === true && /今天/.test(String(o2.data.outDateHint)), '回落时应带 outDateFallback + 提示：' + brief({ f: o2.data.outDateFallback, h: o2.data.outDateHint }));
+    return o.data.data.outNo + ' · 回落提示：' + o2.data.outDateHint;
+  });
+
+  await step('materials', 'P4-1-E 出库早于到货由回放拒绝（临时门槛已删）', async () => {
+    const m = await p4Mat('E', 100);
+    const r = await p4Req(m.id, 10, p4D4);
+    needOk(await p4Confirm(r.id, m.id, 10, p4D4), 'P4-1-E confirm');
+    const bad = await p4Out(m.id, 3, { outDate: dayOff(p4D4, -1) });
+    need(bad.status === 400 && /可用库存将为负/.test(String(bad.data.error)), '应 400 且是回放文案：' + brief(bad.data));
+    need(bad.data.date === dayOff(p4D4, -1), '应指出负库存日期：' + bad.data.date);
+    need((await p4Stock(m.id)) === 10, '库存应不变');
+    const okSameDay = await p4Out(m.id, 3, { outDate: p4D4 });
+    needOk(okSameDay, 'P4-1-E 同日先入后出应通过');
+    const src = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'materials.js'), 'utf8');
+    need(!/earliestArrivalOf/.test(src) && !/不能早于物料/.test(src), '代码里不应再有「最早到货日」专用门槛');
+    return '回放拒绝 · 同日放行 · 门槛已删';
+  });
+
+  await step('materials', 'P4-1-F/G 超 30 天补录：无原因 400、有原因 200 且原因落库', async () => {
+    const m = await p4Mat('F', 100);
+    need((await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], reqDate: p4D31 } })).status === 400, '领料日超 30 天无原因应 400');
+    const r = await p4Req(m.id, 5, p4D31, { reqDateReason: 'ZT补录原因' });
+    need(r.reqDate === p4D31 && r.reqDateReason === 'ZT补录原因', '原因应落库：' + brief(r));
+    need(r.reqNo.indexOf('LL-' + p4Tag(p4D31) + '-') === 0, '单号应走该业务日：' + r.reqNo);
+    need((await p4Confirm(r.id, m.id, 5, p4D31)).status === 400, '到货日超 30 天无原因应 400');
+    const c = await api('PUT', '/api/materialRequisitions/' + r.id + '/confirm', { token, body: { rows: [{ materialId: m.id, thisQty: 5 }], arrivalDate: p4D31, arrivalReason: 'ZT补录到货' } });
+    needOk(c, 'P4-1-G confirm');
+    need(c.data.data.history[0].arrivalDate === p4D31 && c.data.data.history[0].arrivalReason === 'ZT补录到货', '到货日与原因应落库');
+    return r.reqNo + ' · 原因已落库';
+  });
+
+  await step('materials', 'P4-2 按业务日取号：接着该日流水、作废不回收、未来不占号', async () => {
+    const m = await p4Mat('G', 100);
+    const all = needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs');
+    const seqOf = (no, pre) => (String(no).indexOf(pre) === 0 && /^\d+$/.test(String(no).slice(pre.length)) ? parseInt(String(no).slice(pre.length), 10) : 0);
+    const pre = 'LL-' + p4Tag(p4D4) + '-';
+    const max0 = (all || []).reduce((s, x) => Math.max(s, seqOf(x.reqNo, pre)), 0);
+    const r1 = await p4Req(m.id, 3, p4D4);
+    need(seqOf(r1.reqNo, pre) === max0 + 1, '应接着该日最大流水 +1：' + r1.reqNo + '（原最大 ' + max0 + '）');
+    needOk(await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-2 作废' } }), 'P4-2 作废');
+    const r2 = await p4Req(m.id, 2, p4D4);
+    need(seqOf(r2.reqNo, pre) === max0 + 2, '作废号不应回收：' + r2.reqNo);
+    const outs = needOk(await api('GET', '/api/materialOutbound/orders', { token }), 'GET outs');
+    const preO = 'OUT-' + p4Tag(p4D4) + '-';
+    const maxO = (outs || []).reduce((s, x) => Math.max(s, seqOf(x.outNo, preO)), 0);
+    needOk(await p4Confirm(r2.id, m.id, 2, p4D4), 'P4-2 confirm（给取号用例备库存）');
+    const o = await p4Out(m.id, 1, { outDate: p4D4 });
+    needOk(o, 'P4-2 out');
+    need(seqOf(o.data.data.outNo, preO) === maxO + 1, '出库应按出库日取号：' + o.data.data.outNo);
+    const cnt = (await api('GET', '/api/materialRequisitions', { token })).data.length;
+    need((await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], reqDate: p4Future } })).status === 400, '未来日期应 400');
+    need((await api('GET', '/api/materialRequisitions', { token })).data.length === cnt, '未来日期不应占号落库');
+    return r2.reqNo + ' · ' + o.data.data.outNo;
+  });
+
+  await step('materials', 'P4-3 作废后按原开单日重开：双向 correctedFrom / correctedBy；不存在则拒', async () => {
+    const m = await p4Mat('H', 100);
+    const r1 = await p4Req(m.id, 5, srvToday);
+    needOk(await p4Confirm(r1.id, m.id, 5, srvToday), 'P4-3 confirm');
+    needOk(await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-3 更正' } }), 'P4-3 作废');
+    const r2 = await p4Req(m.id, 3, srvToday, { correctedFrom: r1.id });
+    need(r2.correctedFrom === r1.id && r2.correctedFromNo === r1.reqNo, '新单应带 correctedFrom：' + brief({ a: r2.correctedFrom, b: r2.correctedFromNo }));
+    need(r2.legacy === false, '更正新单仍应是新单');
+    const list = needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs');
+    const old = (list || []).find(x => x.id === r1.id);
+    need(old.correctedBy === r2.id && old.correctedByNo === r2.reqNo, '原单应回写 correctedBy：' + brief({ a: old.correctedBy }));
+    need(old.reqNo === r1.reqNo && old.status === '已作废', '原单号不变且已作废');
+    const cnt = (list || []).length;
+    const bad = await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], correctedFrom: 'rq_not_exist_zz' } });
+    need(bad.status === 400 && /不存在/.test(String(bad.data.error)), 'correctedFrom 不存在应 400：' + brief(bad.data));
+    need((await api('GET', '/api/materialRequisitions', { token })).data.length === cnt, '不存在的更正来源不应建单');
+    return r1.reqNo + ' → ' + r2.reqNo;
+  });
+
+  await step('materials', 'P4-4-B/C 回放：补录压垮中间日拒绝、每天不为负放行', async () => {
+    const m = await p4Mat('I', 100);
+    const r = await p4Req(m.id, 10, p4D4);
+    needOk(await p4Confirm(r.id, m.id, 10, p4D4), 'P4-4 confirm');
+    const o8 = await p4Out(m.id, 10, { outDate: dayOff(p4D4, 1) });
+    needOk(o8, 'P4-4 8 日出库 10');
+    const bad = await p4Out(m.id, 1, { outDate: p4D4 });
+    need(bad.status === 400 && bad.data.date === dayOff(p4D4, 1), '补录 1 应被 8 日负库存拒绝：' + brief(bad.data));
+    need((await p4Stock(m.id)) === 0, '当前可用应为 0');
+    // 正向：另一材料 7 日入库 10、8 日出库 3 → 当天可用 7
+    const m2 = await p4Mat('I2', 100);
+    const r2 = await p4Req(m2.id, 10, p4D4);
+    needOk(await p4Confirm(r2.id, m2.id, 10, p4D4), 'P4-4 confirm2');
+    const o3 = await p4Out(m2.id, 3, { outDate: dayOff(p4D4, 1) });
+    needOk(o3, 'P4-4-C 8 日出库 3');
+    need((await p4Stock(m2.id)) === 7, '当前可用应为 7');
+    const bad2 = await p4Out(m2.id, 10, { outDate: p4D4 });
+    need(bad2.status === 400 && bad2.data.date === dayOff(p4D4, 1), '7 日再出 10 应压垮 8 日：' + brief(bad2.data));
+    return '中间日负 → 拒 · 逐日不为负 → 放行';
+  });
+
+  await step('materials', 'P4-4-F 作废新单入库走回放：中间日为负则拒，先作出库后放行', async () => {
+    const m = await p4Mat('J', 100);
+    const r1 = await p4Req(m.id, 10, p4D4);
+    needOk(await p4Confirm(r1.id, m.id, 10, p4D4), 'P4-4-F confirm1');
+    const o = await p4Out(m.id, 8, { outDate: dayOff(p4D4, 1) });
+    needOk(o, 'P4-4-F 出库 8');
+    const r2 = await p4Req(m.id, 10, dayOff(p4D4, 2));
+    needOk(await p4Confirm(r2.id, m.id, 10, dayOff(p4D4, 2)), 'P4-4-F confirm2');
+    need((await p4Stock(m.id)) === 12, '当前可用应 12（P0-2 能过）');
+    const bad = await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-4-F' } });
+    need(bad.status === 400 && bad.data.date === dayOff(p4D4, 1), '应被中间日负库存拒绝：' + brief(bad.data));
+    const still = (await api('GET', '/api/materialRequisitions', { token })).data.find(x => x.id === r1.id);
+    need(still.status !== '已作废', '领料单不应被作废');
+    needOk(await api('PUT', '/api/materialOutbound/' + o.data.data.id + '/void', { token, body: { reason: 'ZT P4-4-F 出库' } }), 'P4-4-F 作废出库');
+    const ok2 = await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-4-F 再来' } });
+    needOk(ok2, '先作出库后应可作废');
+    return '回放拒 · 作出库后成功';
+  });
+
+  await step('materials', 'P4-5 迁移：按单号回填 / 两次一致 / 不碰 legacy:false 新单', async () => {
+    const dbPath = path.join(TMP, 'data', 'db.json');
+    const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    const t = raw.materialRequisitions.find(r => r.reqNo === p4Ref.reqNo);
+    const o = raw.materialOutbound.find(x => x.outNo === p4Ref.outNo);
+    const fresh = raw.materialRequisitions.find(r => r.id === p4Ref.bReqId);
+    need(t && o && fresh, '临时库里找不到本段单据');
+    const keep = { reqDate: t.reqDate, legacy: t.legacy, arr: (t.history || []).map(h => h.arrivalDate), outDate: o.outDate, workDate: o.workDate, outLegacy: o.legacy, fresh: { reqDate: fresh.reqDate, legacy: fresh.legacy } };
+    // 剥掉业务日期字段，模拟迁移前存量
+    delete t.reqDate; delete t.legacy; (t.history || []).forEach(h => { delete h.arrivalDate; });
+    delete o.outDate; delete o.legacy;
+    const a = JSON.parse(JSON.stringify(raw)); P4_MIG.run(a);
+    const b = JSON.parse(JSON.stringify(a)); P4_MIG.run(b);
+    const pa = a.materialRequisitions.find(r => r.reqNo === p4Ref.reqNo);
+    need(pa.reqDate === keep.reqDate, 'reqDate 应回填为 ' + keep.reqDate + '，实际 ' + pa.reqDate);
+    need(pa.legacy === true, '存量领料单应打 legacy=true');
+    need((pa.history || []).every((h, i) => h.arrivalDate === keep.arr[i]), 'history.arrivalDate 应按 at 回填：' + brief((pa.history || []).map(h => h.arrivalDate)));
+    need((pa.history || []).every((h, i) => h.at === (t.history[i] || {}).at), 'history.at 不得被改');
+    const oa = a.materialOutbound.find(x => x.outNo === p4Ref.outNo);
+    need(oa.outDate === keep.outDate, 'outDate 应按单号回填：' + oa.outDate);
+    need(oa.workDate === keep.workDate, 'workDate 不得被 outDate 覆盖');
+    need(oa.legacy === true, '存量出库单应打 legacy=true');
+    const same = JSON.stringify({ r: a.materialRequisitions, o: a.materialOutbound }) === JSON.stringify({ r: b.materialRequisitions, o: b.materialOutbound });
+    need(same, '连续两次执行结果应逐字节一致（幂等）');
+    need(P4_MIG.needs(a) === false, '迁移后 needs 应为 false');
+    const fa = a.materialRequisitions.find(r => r.id === p4Ref.bReqId);
+    need(fa.legacy === false && fa.reqDate === keep.fresh.reqDate, 'legacy:false 新单不得被改打成存量');
+    need(a.materialRequisitions.length === raw.materialRequisitions.length && a.materialOutbound.length === raw.materialOutbound.length, '迁移行数应不变');
+    return '回填正确 · 两次一致 · 新单未被改标';
+  });
+
+  await step('materials', 'P4-4-G 存量单作废只走 P0-2：不被历史某日负库存锁死', async () => {
+    const m = await p4Mat('K', 100);
+    const r1 = await p4Req(m.id, 10, p4D4);
+    needOk(await p4Confirm(r1.id, m.id, 10, p4D4), 'P4-4-G confirm1');
+    const o = await p4Out(m.id, 8, { outDate: dayOff(p4D4, 1) });
+    needOk(o, 'P4-4-G 出库 8');
+    const r2 = await p4Req(m.id, 10, dayOff(p4D4, 2));
+    needOk(await p4Confirm(r2.id, m.id, 10, dayOff(p4D4, 2)), 'P4-4-G confirm2');
+    // 把它标成存量：停服 → 改库 → 起服（模拟迁移前的单）
+    const port = Number(String(base).split(':').pop());
+    await stopServer();
+    const db2 = JSON.parse(fs.readFileSync(path.join(TMP, 'data', 'db.json'), 'utf8'));
+    db2.materialRequisitions.find(x => x.id === r1.id).legacy = true;
+    fs.writeFileSync(path.join(TMP, 'data', 'db.json'), JSON.stringify(db2, null, 2), 'utf8');
+    await startServer(port);
+    const v = await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-4-G 存量' } });
+    needOk(v, '存量单作废应成功（回放跳过）');
+    need(v.data && v.data.data && v.data.data.status === '已作废', '存量单应已作废');
+    const v2 = await api('PUT', '/api/materialRequisitions/' + r2.id + '/void', { token, body: { reason: 'ZT P4-4-G 存量2' } });
+    need(v2.status === 400 && /作废后可用库存将为负/.test(String(v2.data.error)), '存量单遇有效出库占用仍应 400：' + brief(v2.data));
+    return '存量作废成功 · P0-2 仍拦有效占用';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;

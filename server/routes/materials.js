@@ -7,7 +7,7 @@ const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO, aliveFilter, fmtNow, bjStr } = require('../core/util');
-const { withGen, materialStatus, roundQty } = require('../core/material-calc');
+const { withGen, materialStatus, roundQty, replayAvailability } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 const { isWorkerAdmitted } = require('../core/worker-status');
 
@@ -39,6 +39,21 @@ function bizDateError(label, val, reason) {
   }
   return '';
 }
+// 回放不通过的统一 400：说明哪天、哪个物料、哪张单导致不够、当时可用与本次数量（P4-4）
+function replayFail(res, m, rp, what) {
+  const desc = (m && (m.description || m.code)) || '';
+  const who = rp.self ? (what || '本单') : (rp.refNo || '历史单据');
+  const verb = rp.kind === 'out' ? '出库' : '入库';
+  const tail = rp.self ? (who + ' ' + rp.qty) : (who + ' ' + verb + ' ' + rp.qty);
+  const msg = '补录后 ' + rp.firstNegativeDate + ' 物料「' + desc + '」可用库存将为负（当时可用 '
+    + rp.available + '，' + tail + '）';
+  const refs = rp.refNo ? [rp.refNo.indexOf('OUT-') === 0 ? { outNo: rp.refNo } : { reqNo: rp.refNo }] : [];
+  return res.status(400).json({
+    error: msg, date: rp.firstNegativeDate,
+    materialId: m ? m.id : '', code: (m && m.code) || '', description: desc,
+    available: rp.available, qty: rp.qty, refs
+  });
+}
 // 取号：按前缀扫已落库的最大流水 +1（含已作废 / 已删除，不回收、不复用），超 9999 位数自然增长
 function nextDocNo(list, field, prefix) {
   let max = 0;
@@ -54,20 +69,7 @@ const dateTagOf = d => String(d || '').replace(/-/g, '');
 function reqNoOf(reqDate) { return nextDocNo(DB.materialRequisitions, 'reqNo', 'LL-' + dateTagOf(reqDate) + '-'); }
 function outNoOf(outDate) { return nextDocNo(DB.materialOutbound, 'outNo', 'OUT-' + dateTagOf(outDate) + '-'); }
 // 该材料「已确认入库且领料单未作废」的最早到货日（P4-1 临时门槛用；第二批回放上线后删除调用方）
-function earliestArrivalOf(materialId) {
-  let min = '';
-  DB.materialRequisitions.forEach(r => {
-    if (!r || r.deleted || r.status === '已作废') return;
-    if (!(r.items || []).some(it => it && it.materialId === materialId)) return;
-    (r.history || []).forEach(h => {
-      if (!h) return;
-      const d = String(h.arrivalDate || h.at || '').slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
-      if (!min || d < min) min = d;
-    });
-  });
-  return min;
-}
+
 
 // 领料单删除：仅已作废的领料单可删除（须注册在通用 CRUD 工厂之前以覆盖默认删除）
 app.delete('/api/materialRequisitions/:id', (req, res) => {
@@ -246,8 +248,10 @@ app.post('/api/materialOutbound/create', (req, res) => {
     }
   }
   // P4-1：出库日期（必填，省略时默认等于已填作业日；作业日缺失或晚于今天则默认今天）
-  // 注意 workDate 是作业日，可以是未来排期；出库日不能晚于今天，故未来作业日不再照抄。
+  // 注意 workDate 是作业日，可以是未来排期；出库日不能晚于今天，故未来作业日不再照抄，
+  // 并在响应里带 outDateFallback / outDateHint，界面据此标出「出库日已按今天」。
   const outDateInput = String(b.outDate || '').trim();
+  const outDateFallback = !outDateInput && !!workDate && workDate > todayBizDate();
   const outDate = outDateInput || ((workDate && workDate <= todayBizDate()) ? workDate : todayBizDate());
   const outDateReason = String(b.outDateReason || '').trim();
   const outDateErr = bizDateError('出库日期', outDate, outDateReason);
@@ -256,6 +260,7 @@ app.post('/api/materialOutbound/create', (req, res) => {
   if (!items.length) return res.status(400).json({ error: '请勾选需要出库的材料' });
   const stats = outboundStats(project);
   const finalItems = [];
+  let availErr = ''; // 累计可用不足：先记下，等回放算完再定用哪条文案（回放能给出具体是哪一天）
   for (const e of items) {
     const m = DB.materials.find(x => x.id === e.materialId && !x.deleted);
     if (!m || m.project !== project) return res.status(400).json({ error: '物料不存在或不属于所选工程' });
@@ -263,11 +268,13 @@ app.post('/api/materialOutbound/create', (req, res) => {
     if (!(qty > 0)) return res.status(400).json({ error: '物料「' + m.description + '」出库数量必须大于 0' });
     const st = stats[m.id] || { taken: 0, returned: 0 };
     const avail = roundQty(Math.max(0, roundQty(m.qtyArrived) - roundQty(st.taken - st.returned)));
-    if (qty > avail + 1e-9) return res.status(400).json({ error: '物料「' + m.description + '」本次出库 ' + qty + ' 超过可用库存 ' + avail });
+    const overAvail = qty > avail + 1e-9;
+    if (overAvail && !availErr) availErr = '物料「' + m.description + '」本次出库 ' + qty + ' 超过可用库存 ' + avail;
     // P1：来源领料单（可选）—— 须存在/未删除/未作废/属于本项目/含此材料，且不超过该单剩余可出
+    // 累计可用已经不够的行不再查领料单（反正要拒），留给回放给出「哪一天为负」的精确信息
     let reqId = '';
     const reqInput = String(e.requisitionId || '').trim();
-    if (reqInput) {
+    if (reqInput && !overAvail) {
       const reqRec = DB.materialRequisitions.find(x => x.id === reqInput && !x.deleted);
       if (!reqRec) return res.status(400).json({ error: '来源领料单不存在' });
       if (reqRec.status === '已作废') return res.status(400).json({ error: '来源领料单 ' + (reqRec.reqNo || '') + ' 已作废，不能作为出库来源' });
@@ -285,13 +292,16 @@ app.post('/api/materialOutbound/create', (req, res) => {
       }
       reqId = reqInput;
     }
-    // P4-1 临时库存门槛（仅第一批；第二批按日回放上线后必须删除，改由回放拒绝）
-    const earliest = earliestArrivalOf(m.id);
-    if (earliest && outDate < earliest) {
-      return res.status(400).json({ error: '出库日期 ' + outDate + ' 不能早于物料「' + m.description + '」的到货日期 ' + earliest });
-    }
     finalItems.push({ materialId: m.id, code: m.code || '', description: m.description || '', unit: m.unit || '', qty, returned: 0, requisitionId: reqId });
   }
+  // P4-4：按日回放——本单出库之后，该材料从最早业务日起每一天的可用都不得为负（第二批起唯一口径）
+  for (const fi of finalItems) {
+    const m = DB.materials.find(x => x.id === fi.materialId && !x.deleted);
+    if (!m) continue;
+    const rp = replayAvailability(fi.materialId, [{ date: outDate, kind: 'out', qty: fi.qty, self: true }]);
+    if (!rp.ok) return replayFail(res, m, rp, '本单出库');
+  }
+  if (availErr) return res.status(400).json({ error: availErr });
   // 单号：OUT-YYYYMMDD-NNNN，日期取出库业务日（不是录入日）；流水按该日已落库最大号 +1，不回收
   const rec = {
     id: genId('ob'), outNo: outNoOf(outDate),
@@ -304,7 +314,11 @@ app.post('/api/materialOutbound/create', (req, res) => {
   };
   DB.materialOutbound.unshift(rec);
   saveDB();
-  res.json({ ok: true, data: withOutboundLinks([rec])[0] });
+  res.json({
+    ok: true, data: withOutboundLinks([rec])[0],
+    outDateFallback,
+    outDateHint: outDateFallback ? '作业日 ' + workDate + ' 晚于今天，出库日已按今天（' + outDate + '）' : ''
+  });
 });
 app.put('/api/materialOutbound/:id/return', (req, res) => {
   const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
@@ -320,7 +334,7 @@ app.put('/api/materialOutbound/:id/return', (req, res) => {
     return res.status(400).json({ error: '归还日期不能早于出库日期（' + outDateOfRec + '）' });
   }
   const rows = Array.isArray((req.body || {}).rows) ? req.body.rows : [];
-  const applied = [];
+  const plan = [];
   for (const r of rows) {
     const it = (rec.items || []).find(i => i.materialId === r.materialId);
     if (!it) continue;
@@ -328,10 +342,23 @@ app.put('/api/materialOutbound/:id/return', (req, res) => {
     const remaining = roundQty(it.qty - it.returned);
     if (!(qty > 0)) continue;
     if (qty > remaining + 1e-9) return res.status(400).json({ error: '物料「' + it.description + '」本次归还 ' + qty + ' 超过剩余未归还 ' + remaining });
-    it.returned = roundQty(it.returned + qty);
-    applied.push({ materialId: it.materialId, qty });
+    plan.push({ it, qty });
   }
-  if (!applied.length) return res.status(400).json({ error: '请填写有效的归还数量' });
+  if (!plan.length) return res.status(400).json({ error: '请填写有效的归还数量' });
+  // P4-4：新单归还走回放（存量单不跑，避免被历史账锁死）；归还只会增加当日可用
+  if (rec.legacy !== true) {
+    for (const p of plan) {
+      const m = DB.materials.find(x => x.id === p.it.materialId && !x.deleted);
+      if (!m) continue;
+      const rp = replayAvailability(p.it.materialId, [{ date: returnDate, kind: 'in', qty: p.qty, self: true }]);
+      if (!rp.ok) return replayFail(res, m, rp, '本单归还');
+    }
+  }
+  const applied = [];
+  for (const p of plan) {
+    p.it.returned = roundQty(p.it.returned + p.qty);
+    applied.push({ materialId: p.it.materialId, qty: p.qty });
+  }
   if (!Array.isArray(rec.returns)) rec.returns = [];
   rec.returns.push({ at: fmtNow(), returnDate, returnDateReason, rows: applied });
   saveDB();
@@ -343,6 +370,17 @@ app.put('/api/materialOutbound/:id/void', (req, res) => {
   if (rec.status !== '有效') return res.status(400).json({ error: '该出库单已作废，不能重复作废' });
   const reason = String((req.body || {}).reason || '').trim();
   if (!reason) return res.status(400).json({ error: '作废原因不能为空' });
+  // P4-4：新单作废走回放（作废=本单出库与其归还一起撤销，按净额在该出库日一次性回加；存量单不跑）
+  if (rec.legacy !== true) {
+    for (const it of (rec.items || [])) {
+      const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
+      if (!m) continue;
+      const net = roundQty((Number(it.qty) || 0) - (Number(it.returned) || 0));
+      if (net <= 0) continue;
+      const rp = replayAvailability(it.materialId, [{ date: rec.outDate, kind: 'out', qty: -net, self: true }]);
+      if (!rp.ok) return replayFail(res, m, rp, '本单作废');
+    }
+  }
   rec.status = '已作废';
   rec.voidReason = reason;
   rec.voidedAt = fmtNow();
@@ -804,8 +842,8 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
 // 后到者能看到前者记录并取 max+1，同一秒并发也不会撞号；扫描含已作废/已删除记录，单号不回收复用。
 // 历史单已由 scripts/migrate-no4-20261031.js 全量重编为本格式，推导天然连续。
 // 从暂存的物料生成领料单；领料数量可任意填写（默认=可继续领料），但不能大于可继续领料
-// 请求体：{ items: [{ id, qty }], reqDate?, reqDateReason? }（兼容旧 { ids: [...] } = 按可继续领料全量生成）
-// correctedFrom（作废更正关联）属第二批，本批传入一律忽略，不报错。
+// 请求体：{ items: [{ id, qty }], reqDate?, reqDateReason?, correctedFrom? }（兼容旧 { ids: [...] } = 按可继续领料全量生成）
+// P4-3：correctedFrom 为被更正的原领料单（id 或单号），新单写 correctedFrom/FromNo，原单回写 correctedBy/ByNo。
 app.post('/api/requisitions/create', (req, res) => {
   const body = req.body || {};
   const list = Array.isArray(body.items) && body.items.length
@@ -817,6 +855,13 @@ app.post('/api/requisitions/create', (req, res) => {
   const reqDateReason = String(body.reqDateReason || '').trim();
   const reqDateErr = bizDateError('领料日期', reqDate, reqDateReason);
   if (reqDateErr) return res.status(400).json({ error: reqDateErr });
+  // P4-3：更正来源先校验，找不到就 400，绝不建单
+  const correctedFromInput = String(body.correctedFrom || '').trim();
+  let orig = null;
+  if (correctedFromInput) {
+    orig = DB.materialRequisitions.find(x => !x.deleted && (x.id === correctedFromInput || x.reqNo === correctedFromInput)) || null;
+    if (!orig) return res.status(400).json({ error: '要更正的原领料单不存在（' + correctedFromInput + '）' });
+  }
   const items = [];
   const skipped = [];
   const touched = [];
@@ -842,10 +887,13 @@ app.post('/api/requisitions/create', (req, res) => {
     reqDate, reqDateReason,
     projects: [...new Set(items.map(i => i.project))],
     items, createdAt: fmtNow(), status: '待入库', confirmRows: null,
+    correctedFrom: orig ? orig.id : '', correctedFromNo: orig ? (orig.reqNo || '') : '',
     legacy: false,
     deleted: false
   };
   DB.materialRequisitions.unshift(rec);
+  // P4-3：原单回写反向关联（同一次 saveDB 落盘，保证双向一致）
+  if (orig) { orig.correctedBy = rec.id; orig.correctedByNo = rec.reqNo; }
   // 同步材料状态（已生成数量按领料单动态汇总，部分生成时剩余量仍可继续领料）
   touched.forEach(m => { m.status = materialStatus(m); });
   saveDB();
@@ -920,7 +968,7 @@ app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
   }
   const rows = Array.isArray((req.body || {}).rows) ? req.body.rows : [];
   const results = (rec.confirmRows || []).map(x => ({ ...x })); // 已累计的入库记录
-  const opRows = []; // 本次操作的逐条记录（写入 history，供详情展示与 Excel 下载）
+  const plan = []; // 先算后写：校验全部通过再动库，避免写到一半被回放拒绝
   for (const it of rec.items) {
     const prev = results.find(x => x.materialId === it.materialId);
     const done = prev ? (Number(prev.thisQty) || 0) : 0;
@@ -935,6 +983,21 @@ app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
     // 仍有未入库数量即视为异常，须有异常原因（本次填写或沿用上次）
     const abnormal = cum < it.qty - 1e-9;
     if (abnormal && !reason && !(prev && prev.reason)) return res.status(400).json({ error: '物料「' + it.description + '」仍有未入库数量，必须填写异常原因' });
+    plan.push({ it, qty, reason, cum, abnormal, prev });
+  }
+  // P4-4：新单（legacy !== true）的确认入库走按日回放；存量单补入库不跑，避免被历史账锁死
+  if (rec.legacy !== true) {
+    for (const p of plan) {
+      if (!(p.qty > 0)) continue;
+      const m = DB.materials.find(x => x.id === p.it.materialId && !x.deleted);
+      if (!m) continue;
+      const rp = replayAvailability(p.it.materialId, [{ date: arrivalDate, kind: 'in', qty: p.qty, self: true }]);
+      if (!rp.ok) return replayFail(res, m, rp, '本单入库');
+    }
+  }
+  const opRows = []; // 本次操作的逐条记录（写入 history，供详情展示与 Excel 下载）
+  for (const p of plan) {
+    const it = p.it, qty = p.qty, reason = p.reason, cum = p.cum, abnormal = p.abnormal, prev = p.prev;
     const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
     if (m && qty > 0) {
       m.qtyArrived = roundQty(m.qtyArrived + qty);
@@ -1012,6 +1075,24 @@ app.put('/api/materialRequisitions/:id/void', (req, res) => {
   const chk = voidAvailabilityCheck(rec);
   if (chk.bad) {
     return res.status(400).json({ error: '作废后可用库存将为负，请先归还或作废占用的出库单', refs: chk.refs });
+  }
+  // P4-4：新单作废在 P0-2 之后还要过按日回放（把本单历次入库从时间轴上撤掉，看中间某天会不会为负）。
+  // 存量单（legacy: true）只走 P0-2，不跑回放——旧账本来就可能对不上，否则永远作废不了。
+  if (rec.legacy !== true) {
+    for (const it of (rec.items || [])) {
+      const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
+      if (!m) continue;
+      const evs = [];
+      (rec.history || []).forEach(h => {
+        const row = (h.rows || []).find(x => x && x.materialId === it.materialId);
+        const q = Number(row && row.thisQty) || 0;
+        if (q <= 0) return;
+        evs.push({ date: h.arrivalDate || h.at, kind: 'in', qty: -q, self: true });
+      });
+      if (!evs.length) continue;
+      const rp = replayAvailability(it.materialId, evs);
+      if (!rp.ok) return replayFail(res, m, rp, '本单作废');
+    }
   }
   rec.status = '已作废';
   // 按领料单明细恢复材料状态（待入库作废时 confirmRows 为空，也要解除「已生成领料单」锁定）
