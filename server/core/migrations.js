@@ -198,7 +198,7 @@ const MIGRATIONS = [
     desc: '材料期初余额：按迁移时刻的当前可用数写 openingAvailable / openingDate / openingAt',
     needs(DB) {
       const ms = Array.isArray(DB.materials) ? DB.materials : [];
-      return ms.some(m => m && m.openingAvailable === undefined);
+      return ms.some(m => m && (m.openingAvailable === undefined || m.openingRaw === undefined));
     },
     run(DB) {
       const ms = Array.isArray(DB.materials) ? DB.materials : [];
@@ -222,17 +222,21 @@ const MIGRATIONS = [
       const nowStr = today + ' ' + p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes());
       let n = 0, neg = 0;
       ms.forEach(m => {
-        if (!m || m.openingAvailable !== undefined) return;
+        if (!m) return;
+        if (m.openingAvailable !== undefined && m.openingRaw !== undefined) return;
         const k = String(m.project || '') + '\u0001' + m.id;
         const s = net[k] || { taken: 0, returned: 0 };
         const raw = round(round(m.qtyArrived) - round(s.taken - s.returned));
+        if (m.openingAvailable === undefined) {
+          m.openingAvailable = Math.max(0, raw); // 期初按可用口径，负数不参与判定
+          m.openingDate = today;
+          m.openingAt = nowStr;
+          n++;
+        }
+        m.openingRaw = raw; // 留痕：迁移那一刻的原始余额（可能为负），供 P0-4 对账
         if (raw < 0) neg++;
-        m.openingAvailable = Math.max(0, raw);
-        m.openingDate = today;
-        m.openingAt = nowStr;
-        n++;
       });
-      console.log('[migrate] 材料期初余额已写入 ' + n + ' 条（截止 ' + nowStr + (neg ? '，其中 ' + neg + ' 条老账为负按 0 记' : '') + '）；回放自此往后算');
+      console.log('[migrate] 材料期初余额已写入 ' + n + ' 条（截止 ' + nowStr + (neg ? '，其中 ' + neg + ' 条老账为负：openingAvailable 按 0、openingRaw 保留负值' : '') + '）；回放自此往后算');
       return true;
     }
   }
