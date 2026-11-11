@@ -201,6 +201,14 @@ function allSingleProjectNames() {
   });
   return names;
 }
+// 已到数量只能由「确认入库 / 补入库」产生：新增只接受 0（或空），编辑只接受与库内现值一致。
+// 领料单作废的冲销走 void 接口，不经过这里。
+function validateArrivedBody(b, { forEdit = false, oldItem = null } = {}) {
+  if (b.qtyArrived === undefined || b.qtyArrived === null || b.qtyArrived === '') return null;
+  const cur = forEdit && oldItem ? roundQty(oldItem.qtyArrived) : 0;
+  if (roundQty(b.qtyArrived) === cur) return null;
+  return forEdit ? '已到数量不能手工修改，只能通过确认入库产生' : '已到数量不能手工填写，只能通过确认入库产生';
+}
 function validateMaterialBody(b, { forEdit = false, oldItem = null } = {}) {
   const project = String(b.project || '').trim();
   if (!project) return '项目名称不能为空';
@@ -209,8 +217,18 @@ function validateMaterialBody(b, { forEdit = false, oldItem = null } = {}) {
   if (!SOURCE_TYPES.includes(source)) return '来源类型无效，仅支持：' + SOURCE_TYPES.join(' / ');
   if (!String(b.description || '').trim()) return '物料描述不能为空';
   const qty = Number(b.qtyRequired);
-  if (!isFinite(qty) || qty < 0) return '应到数量无效';
-  if (forEdit && oldItem && roundQty(qty) !== roundQty(oldItem.qtyRequired) && !String(b.modifyReason || '').trim()) {
+  const oldQty = forEdit && oldItem ? roundQty(oldItem.qtyRequired) : null;
+  const qtyChanged = forEdit && oldItem ? roundQty(qty) !== oldQty : true;
+  // 应到必须大于 0；编辑时只拦「改后 ≤ 0」，存量 0/负数行改其他字段不被堵死
+  if (!isFinite(qty)) return forEdit ? '应到数量无效' : '应到数量必须大于 0';
+  if (qtyChanged && roundQty(qty) <= 0) return '应到数量必须大于 0';
+  // 编辑后已到不得大于应到（只在改应到且低于现行已到时拦）
+  if (forEdit && oldItem && qtyChanged && roundQty(oldItem.qtyArrived) > roundQty(qty)) {
+    return '已到 ' + roundQty(oldItem.qtyArrived) + ' 大于应到 ' + roundQty(qty) + '，请先处理入库/出库后再改应到';
+  }
+  const arrivedErr = validateArrivedBody(b, { forEdit, oldItem });
+  if (arrivedErr) return arrivedErr;
+  if (forEdit && oldItem && qtyChanged && !String(b.modifyReason || '').trim()) {
     return '修改了应到数量，必须填写「修改应到数量原因」';
   }
   return null;
@@ -222,7 +240,7 @@ app.post('/api/materials', (req, res) => {
   const item = {
     id: genId('m'), createdAt: nowISO(),
     project: String(b.project).trim(), description: String(b.description).trim(),
-    qtyRequired: roundQty(b.qtyRequired), qtyArrived: roundQty(b.qtyArrived),
+    qtyRequired: roundQty(b.qtyRequired), qtyArrived: 0, // 已到只能由确认入库产生，新增恒为 0
     unit: String(b.unit || '').trim(), code: String(b.code || '').trim(),
     orderNo: String(b.orderNo || '').trim() || '-',
     source: String(b.source).trim(), sourceNote: String(b.sourceNote || '').trim(),
@@ -250,7 +268,7 @@ app.put('/api/materials/:id', (req, res) => {
     project: String(b.project || old.project).trim(),
     description: String(b.description !== undefined ? b.description : old.description).trim(),
     qtyRequired: roundQty(b.qtyRequired !== undefined ? b.qtyRequired : old.qtyRequired),
-    qtyArrived: roundQty(b.qtyArrived !== undefined ? b.qtyArrived : old.qtyArrived),
+    qtyArrived: roundQty(old.qtyArrived), // 已到只随确认入库/补入库/作废冲销变化，编辑不改写
     unit: String(b.unit !== undefined ? b.unit : old.unit).trim(),
     code: String(b.code !== undefined ? b.code : old.code).trim(),
     orderNo: String(b.orderNo !== undefined ? b.orderNo : old.orderNo).trim() || '-',

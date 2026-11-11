@@ -495,6 +495,16 @@ async function runSmoke() {
   const insertReq = async (reqNo) => {
     needOk(await api('POST', '/api/materialRequisitions', { token, body: { reqNo, projects: ['冒烟测试项目'], items: [], status: '待入库', createdAt: reqNo.slice(0, 8) } }), 'insert ' + reqNo);
   };
+  // 已到只能由入库产生（P0-1）：为任意材料生成领料单并确认入库
+  const mkReqOf = async (mid, qty) => {
+    const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: mid, qty }] } }), 'requisition create');
+    return d.data.id;
+  };
+  const arriveVia = async (mid, qty) => {
+    const rid = await mkReqOf(mid, qty);
+    needOk(await api('PUT', '/api/materialRequisitions/' + rid + '/confirm', { token, body: { rows: [{ materialId: mid, thisQty: qty }] } }), 'requisition confirm');
+    return rid;
+  };
   await step('materials', '领料单号定版：当日首单 LL-YYYYMMDD-0001（4 位流水，无前缀/昨日单均不计入推导）', async () => {
     // 干扰项：历史无前缀写法（不匹配 LL-<今日>- 前缀）、昨日 LL- 单（日期不同）
     await insertReq(TODAY + '-005');
@@ -592,11 +602,12 @@ async function runSmoke() {
   });
 
   await step('materials', '到货统计：同名跨项目合并为一行且数量相加', async () => {
-    const p2 = needOk(await api('POST', '/api/projects', { token, body: { name: '冒烟测试项目B', batch: '2026-01', substation: '冒烟供电所', workType: '配网', category: '自有工程' } }), 'projects POST B');
-    needOk(await api('POST', '/api/materials', {
+    const p2 =     needOk(await api('POST', '/api/projects', { token, body: { name: '冒烟测试项目B', batch: '2026-01', substation: '冒烟供电所', workType: '配网', category: '自有工程' } }), 'projects POST B');
+    const mb = needOk(await api('POST', '/api/materials', {
       token,
-      body: { project: '冒烟测试项目B', source: '甲供材料', description: '预应力混凝土电杆Φ150×10M', qtyRequired: 5, qtyArrived: 2, unit: '根', code: 'S01HDG1005' }
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '预应力混凝土电杆Φ150×10M', qtyRequired: 5, unit: '根', code: 'S01HDG1005' }
     }), 'materials POST B');
+    await arriveVia(mb.id, 2); // 已到 2：只能由确认入库产生
     const ms = await listOk('/api/materials', token);
     const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
     need(agg.kindCount === 1, '同名物料应合并为 1 种，实际 ' + agg.kindCount);
@@ -607,10 +618,11 @@ async function runSmoke() {
   });
 
   await step('materials', '到货统计：同编码不同描述分开算（各是各的）', async () => {
-    needOk(await api('POST', '/api/materials', {
+    const mc = needOk(await api('POST', '/api/materials', {
       token,
-      body: { project: '冒烟测试项目B', source: '甲供材料', description: '同编码另一描述', qtyRequired: 7, qtyArrived: 1, unit: '根', code: 'S01HDG1005' }
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: '同编码另一描述', qtyRequired: 7, unit: '根', code: 'S01HDG1005' }
     }), 'materials POST C');
+    await arriveVia(mc.id, 1); // 已到 1：只能由确认入库产生
     const ms = await listOk('/api/materials', token);
     const agg = arrivalCalc.aggregate(ms, ['冒烟测试项目', '冒烟测试项目B']);
     need(agg.kindCount === 2, '同编码不同描述应算 2 种，实际 ' + agg.kindCount);
@@ -651,6 +663,127 @@ async function runSmoke() {
     need(rr.length === 2, '作废单应排除，应 2 条，实际 ' + rr.length);
     need(rr[0].at > rr[1].at, '应按时间倒序，实际 ' + rr.map(x => x.at).join(' | '));
     return `组 ${agg.kindCount} / 已到 ${agg.arrivedKindCount} / 未到 ${agg.notArrivedKindCount} · D1 未与同名异码合并 · 动态 ${rr.length} 条`;
+  });
+
+  /* ---------- 材料台账修复批一：P0-1 已到只能由入库产生 / P0-2 作废防冲穿库存 ---------- */
+  const MP_C = '冒烟测试项目C';
+  let p01DId = '';
+  await step('materials', 'P0-1-A 只填应到：已到恒 0 / 未到库 / 不进可出库库存', async () => {
+    needOk(await api('POST', '/api/projects', { token, body: { name: MP_C, batch: '2026-11', substation: '冒烟供电所', workType: '配网', category: '自有工程' } }), 'projects POST C');
+    const d = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P01A 未到货物料', qtyRequired: 4, unit: '根', code: 'ZT-P01A' }
+    }), 'materials POST P01A');
+    need(d.qtyArrived === 0, '已到应为 0，实际 ' + d.qtyArrived);
+    need(d.status === '未到库', '状态应为 未到库，实际 ' + d.status);
+    const stock = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(MP_C), { token }), 'stock P01A');
+    need(!stock.some(x => x.id === d.id), '未到货材料不应出现在可出库库存');
+    return 'id=' + d.id + ' · 已到 0 · 未到库 · 库存不出现';
+  });
+
+  await step('materials', 'P0-1-B 新增携带已到 → 400「只能通过确认入库产生」且不落库', async () => {
+    const before = (await listOk('/api/materials', token)).length;
+    const r = await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P01B 手工已到', qtyRequired: 10, qtyArrived: 99, unit: '根', code: 'ZT-P01B' }
+    });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(r.data.error === '已到数量不能手工填写，只能通过确认入库产生', '文案不符：' + r.data.error);
+    const after = await listOk('/api/materials', token);
+    need(after.length === before, '拒绝后材料数不应变化：' + before + ' → ' + after.length);
+    need(!after.some(m => m.code === 'ZT-P01B'), '被拒材料不应落库');
+    const stock = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(MP_C), { token }), 'stock P01B');
+    need(!stock.some(x => x.code === 'ZT-P01B'), '不应凭空产生库存');
+    return '400 · 未落库 · 无库存';
+  });
+
+  await step('materials', 'P0-1-C 应到 ≤ 0 → 400「应到数量必须大于 0」', async () => {
+    for (const q of [0, -3]) {
+      const r = await api('POST', '/api/materials', {
+        token,
+        body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P01C 应到非法', qtyRequired: q, unit: '个', code: 'ZT-P01C' }
+      });
+      need(r.status === 400, 'qtyRequired=' + q + ' 应 400，实际 ' + r.status);
+      need(/应到数量必须大于 0/.test(r.data.error), 'qtyRequired=' + q + ' 文案不符：' + r.data.error);
+    }
+    return '0 与 -3 均 400';
+  });
+
+  await step('materials', 'P0-1-D 确认入库 6 → 已到 6 / 部分到库 / 库存 6（唯一入口）', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P01D 入库主料', qtyRequired: 10, unit: '根', code: 'ZT-P01D' }
+    }), 'materials POST P01D');
+    p01DId = m.id;
+    await arriveVia(m.id, 6);
+    const cur = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material detail P01D');
+    need(cur.qtyArrived === 6, '已到应为 6，实际 ' + cur.qtyArrived);
+    need(cur.qtyNotArrived === 4, '未到应为 4，实际 ' + cur.qtyNotArrived);
+    need(cur.status === '部分到库', '状态应为 部分到库，实际 ' + cur.status);
+    const stock = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(MP_C), { token }), 'stock P01D');
+    const s = stock.find(x => x.id === m.id);
+    need(s && s.available === 6, '可用库存应为 6，实际 ' + (s && s.available));
+    return '已到 6 · 未到 4 · 部分到库 · 可用 6';
+  });
+
+  await step('materials', 'P0-1-E 确认入库超量 → 400（既有校验保持）', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P01E 超量入库', qtyRequired: 5, unit: '根', code: 'ZT-P01E' }
+    }), 'materials POST P01E');
+    const rid = await mkReqOf(m.id, 4);
+    const r = await api('PUT', '/api/materialRequisitions/' + rid + '/confirm', { token, body: { rows: [{ materialId: m.id, thisQty: 5 }] } });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(/不能大于未入库数量/.test(r.data.error), '文案不符：' + r.data.error);
+    const cur = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material detail P01E');
+    need(cur.qtyArrived === 0, '超量被拒后已到应仍为 0，实际 ' + cur.qtyArrived);
+    return '4 的领料单入库 5 → 400 · 已到仍 0';
+  });
+
+  await step('materials', 'P0-1-F 编辑：改已到 → 400 且已到不变；应到低于已到 → 400', async () => {
+    const cur = needOk(await api('GET', '/api/materials/' + p01DId, { token }), 'material detail F');
+    const r1 = await api('PUT', '/api/materials/' + p01DId, { token, body: Object.assign({}, cur, { qtyArrived: 7 }) });
+    need(r1.status === 400, '改已到应 400，实际 ' + r1.status + ' ' + brief(r1.data));
+    need(r1.data.error === '已到数量不能手工修改，只能通过确认入库产生', '文案不符：' + r1.data.error);
+    const r2 = await api('PUT', '/api/materials/' + p01DId, { token, body: Object.assign({}, cur, { qtyRequired: 5, modifyReason: '冒烟：下调应到' }) });
+    need(r2.status === 400, '应到低于已到应 400，实际 ' + r2.status + ' ' + brief(r2.data));
+    need(/已到 6 大于应到 5/.test(r2.data.error), '文案不符：' + r2.data.error);
+    const after = needOk(await api('GET', '/api/materials/' + p01DId, { token }), 'material detail F after');
+    need(after.qtyArrived === 6, '已到应保持 6，实际 ' + after.qtyArrived);
+    need(after.qtyRequired === 10, '应到应保持 10，实际 ' + after.qtyRequired);
+    return '改已到 400 · 应到 5 低于已到 6 → 400 · 原值不变';
+  });
+
+  await step('materials', 'P0-1-G 导入：应到落库、已到恒 0', async () => {
+    const wb = xlsx.utils.book_new();
+    const ws = xlsx.utils.aoa_to_sheet([
+      ['项目名称', '物料描述', '申请数量', '计量单位', '物料编码', '采购订单号', '来源类型'],
+      [MP_C, 'ZT测试-P01G 导入物料', 3, '个', 'ZT-P01G', 'PO-ZT-1', '甲供材料']
+    ]);
+    xlsx.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const fd = new FormData();
+    fd.append('file', new Blob([buf]), 'zt-p01g.xlsx');
+    const res = await fetch(base + '/api/materials/import', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd });
+    const data = await res.json();
+    need(res.ok, '导入应成功：' + res.status + ' ' + brief(data));
+    need(data.added === 1, '应导入 1 条，实际 ' + data.added);
+    const it = data.data[0];
+    need(it.qtyRequired === 3 && it.qtyArrived === 0, '应到 3 / 已到 0，实际 ' + it.qtyRequired + '/' + it.qtyArrived);
+    need(it.status === '未到库', '状态应为 未到库，实际 ' + it.status);
+    const stock = needOk(await api('GET', '/api/materialOutbound/stock?project=' + encodeURIComponent(MP_C), { token }), 'stock P01G');
+    need(!stock.some(x => x.id === it.id), '导入材料未到货不应进库存');
+    return '应到 3 · 已到 0 · 未到库';
+  });
+
+  // P0-1.4 前端静态断言（UI 交互不在冒烟内模拟）
+  await step('materials', 'P0-1.4 前端：已到改只读展示（新增显示 0）、应到 min 大于 0', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(/label="已到数量"[\s\S]{0,160}:model-value="fmtQty\(form\.qtyArrived \|\| 0\)" readonly/.test(src),
+      '已到应改为只读展示（新增显示 0）');
+    need(!/v-model="form\.qtyArrived"/.test(src), '已到不应再有可编辑输入');
+    need(/v-model="form\.qtyRequired" :min="0\.0001"/.test(src), '应到 min 应为 0.0001（> 0 口径）');
+    return '已到只读 · 应到 min>0';
   });
 
   /* ---------- 计划编号（纯函数与前端共用） ---------- */

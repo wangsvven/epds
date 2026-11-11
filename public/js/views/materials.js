@@ -19,7 +19,7 @@ const MaterialsView = {
     const SOURCE_TYPES = ['ERP采购申请', '甲供材料', '库存调拨', '乙供/自购', '运检项目'];
     const sourceColors = { 'ERP采购申请': '#3370ff', '甲供材料': '#7c4dbe', '库存调拨': '#0e9e9e', '乙供/自购': '#d48806', '运检项目': '#389e0d' };
     const statusColors = { '全部到库': '#389e0d', '部分到库': '#e6932c', '未到库': '#f56c6c', '已生成领料单': '#3370ff' };
-    const emptyForm = () => ({ project: '', source: '甲供材料', inWeeklyPlan: true, sourceNote: '', description: '', qtyRequired: 0, qtyArrived: 0, unit: '', code: '', orderNo: '-', modifyReason: '' });
+    const emptyForm = () => ({ project: '', source: '甲供材料', inWeeklyPlan: true, sourceNote: '', description: '', qtyRequired: null, qtyArrived: 0, unit: '', code: '', orderNo: '-', modifyReason: '' });
     const form = reactive(emptyForm());
 
     async function load() {
@@ -749,7 +749,7 @@ const MaterialsView = {
         <el-row :gutter="24">
           <el-col :span="12" :xs="24">
             <el-form-item label="应到数量" required style="margin-bottom:14px">
-              <el-input-number v-model="form.qtyRequired" :min="0" :precision="4" :controls="false" style="width:100%" />
+              <el-input-number v-model="form.qtyRequired" :min="0.0001" :precision="4" :controls="false" style="width:100%" />
             </el-form-item>
           </el-col>
           <el-col :span="12" :xs="24">
@@ -758,10 +758,10 @@ const MaterialsView = {
             </el-form-item>
           </el-col>
         </el-row>
-        <el-row v-if="editingId" :gutter="24">
+        <el-row :gutter="24">
           <el-col :span="12" :xs="24">
             <el-form-item label="已到数量" style="margin-bottom:14px">
-              <el-input-number v-model="form.qtyArrived" :min="0" :precision="4" :controls="false" style="width:100%" />
+              <el-input :model-value="fmtQty(form.qtyArrived || 0)" readonly />
             </el-form-item>
           </el-col>
         </el-row>
