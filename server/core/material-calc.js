@@ -73,8 +73,9 @@ function eventsOf(materialId) {
     if (!(r.items || []).some(it => it && it.materialId === materialId)) return;
     (r.history || []).forEach(h => {
       const row = (h && h.rows || []).find(x => x && x.materialId === materialId);
+      // P4-7：冲销行是负数，必须按代数和计入（不能因为 thisQty <= 0 就跳过）；0 无影响可跳
       const qty = Number(row && row.thisQty) || 0;
-      if (qty <= 0) return;
+      if (!qty) return;
       const d = dayPart(h.arrivalDate) || dayPart(h.at) || dayPart(r.confirmedAt) || dayPart(r.reqDate);
       if (!d) return; // 没有可用日期的事件不参与回放（迁移已保证新库都有）
       out.push({ date: d, kind: 'in', qty, refNo: r.reqNo || '', self: false, at: timePart(h.at) || timePart(r.confirmedAt) });
@@ -134,14 +135,18 @@ function replayAvailability(materialId, extraEvents) {
   while (i < events.length) {
     const date = events[i].date;
     // 当日先入（含归还、作废冲销负数）
+    // P4-7：同一天的「冲销 + 更正」必须整组入账后再判负——否则 −10 与 +10 会中途判负，
+    // 把「只改到货日、净额不变」这种正常更正误杀。取该组里第一个致负的事件做报错依据。
+    let neg = null;
     while (i < events.length && events[i].date === date && events[i].kind === 'in') {
       const e = events[i];
       const before = avail;
       avail = roundQty(avail + e.qty);
-      if (avail < -1e-9) {
-        return { ok: false, firstNegativeDate: date, available: before, qty: Math.abs(e.qty), refNo: e.refNo, self: e.self, label: e.label, kind: 'in' };
-      }
+      if (avail < -1e-9 && !neg) neg = { before, qty: Math.abs(e.qty), refNo: e.refNo, self: e.self, label: e.label };
       i++;
+    }
+    if (avail < -1e-9 && neg) {
+      return { ok: false, firstNegativeDate: date, available: neg.before, qty: neg.qty, refNo: neg.refNo, self: neg.self, label: neg.label, kind: 'in' };
     }
     // 当日再出
     while (i < events.length && events[i].date === date && events[i].kind === 'out') {

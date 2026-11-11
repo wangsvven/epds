@@ -240,6 +240,33 @@ const MIGRATIONS = [
       return true;
     }
   }
+  ,
+  /* ---------- 迁移 5：领料单 history 条目补稳定 id（P4-7-M） ----------
+   * 入库更正按条目 id 定位；旧条目没有 id，这里一次性补齐（he 前缀，冲突重抽）。
+   * 只补空缺：已有 id 不改写，其它字段（数量/到货日/at）、单号、状态、legacy、期初一律不动。 */
+  {
+    id: '20261111-history-entry-ids',
+    desc: '领料单 history 条目补稳定 id（he 前缀），供入库更正经由条目 id 定位',
+    needs(DB) {
+      const rq = Array.isArray(DB.materialRequisitions) ? DB.materialRequisitions : [];
+      return rq.some(r => r && (r.history || []).some(h => h && !h.id));
+    },
+    run(DB) {
+      const rq = Array.isArray(DB.materialRequisitions) ? DB.materialRequisitions : [];
+      const used = new Set();
+      rq.forEach(r => (r.history || []).forEach(h => { if (h && h.id) used.add(h.id); }));
+      const gen = () => {
+        let id;
+        do { id = 'he' + Math.random().toString(36).slice(2, 9); } while (used.has(id));
+        used.add(id);
+        return id;
+      };
+      let n = 0;
+      rq.forEach(r => (r.history || []).forEach(h => { if (h && !h.id) { h.id = gen(); n++; } }));
+      console.log('[migrate] history 条目补 id ' + n + ' 条（已有 id 不改写）');
+      return true;
+    }
+  }
   // ↓ 以后新增数据迁移：在此追加 { id, desc, needs?, run } 即可，随版本升级自动执行。
 ];
 

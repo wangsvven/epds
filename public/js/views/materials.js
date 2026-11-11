@@ -1049,10 +1049,44 @@ const Requisitions = {
       return (cr && cr.reason) || '-';
     }
     // 某物料在领料单内的全部入库/补入库操作记录（按时间顺序，N 次操作 N 条）
+    // P4-7 入库更正：只改这一次的数量/到货日，单号与开单日不变
+    const cdlg = reactive({ visible: false, rec: null, entry: null, arrivalDate: '', qty: null, reason: '', arrivalReason: '', saving: false });
+    function openCorrect(rec, h) {
+      cdlg.rec = rec; cdlg.entry = h;
+      cdlg.arrivalDate = h.arrivalDate || (h.at || '').slice(0, 10);
+      cdlg.qty = Number(h.thisQty) || 0;
+      cdlg.reason = ''; cdlg.arrivalReason = ''; cdlg.visible = true;
+    }
+    async function submitCorrect() {
+      if (!cdlg.rec || !cdlg.entry) return;
+      if (!String(cdlg.reason || '').trim()) { ElementPlus.ElMessage.error('请填写更正原因'); return; }
+      if (cdlg.arrivalDate && cdlg.arrivalDate < oldLimit30() && !String(cdlg.arrivalReason || '').trim()) {
+        ElementPlus.ElMessage.error('到货日期早于 30 天，请填写补录原因'); return;
+      }
+      cdlg.saving = true;
+      try {
+        await api.post('/api/materialRequisitions/' + cdlg.rec.id + '/receipts/' + cdlg.entry.id + '/correct', {
+          qty: Number(cdlg.qty), arrivalDate: cdlg.arrivalDate, reason: String(cdlg.reason).trim(),
+          arrivalReason: String(cdlg.arrivalReason || '').trim()
+        });
+        ElementPlus.ElMessage.success('已更正该次入库，单号与开单日不变');
+        cdlg.visible = false;
+        await load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { cdlg.saving = false; }
+    }
     function itemHistory(rec, materialId) {
       const out = [];
       ((rec && rec.history) || []).forEach(h => (h.rows || []).forEach(r => {
-        if (r.materialId === materialId) out.push({ at: h.at, thisQty: r.thisQty, abnormal: r.abnormal, reason: r.reason });
+        if (r.materialId !== materialId) return;
+        // P4-7：标签 原记录(已冲销)/冲销/更正/入库；冲销与已冲销的原记录都不能再作为更正目标
+        const tag = h.reverses ? '冲销' : (h.correctsEntry ? '更正' : (h.reversed ? '原记录(已冲销)' : '入库'));
+        out.push({
+          id: h.id || '', at: h.at, arrivalDate: h.arrivalDate || '',
+          thisQty: r.thisQty, abnormal: r.abnormal,
+          reason: r.reason || h.reason || '',
+          tag, canCorrect: !!h.id && !h.reverses && !h.reversed
+        });
       }));
       return out;
     }
@@ -1060,7 +1094,7 @@ const Requisitions = {
     function arrivedSum(rec, materialId) {
       return itemHistory(rec, materialId).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
+    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30, cdlg, openCorrect, submitCorrect };
   },
   template: `
   <div>
@@ -1111,10 +1145,12 @@ const Requisitions = {
               <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ itemHistory(row, it.materialId).length }} 次</span></div>
               <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border class="rq-hist-table">
                 <el-table-column label="到货日期" width="120"><template #default="{row:h}">{{ h.arrivalDate || (h.at || '').slice(0, 10) }}</template></el-table-column>
+                <el-table-column label="标签" width="120"><template #default="{row:h}"><el-tag size="small" :type="h.tag === '冲销' ? 'danger' : (h.tag === '更正' ? 'warning' : (h.tag === '原记录(已冲销)' ? 'info' : 'success'))">{{ h.tag }}</el-tag></template></el-table-column>
                 <el-table-column label="录入时间" width="170"><template #default="{row:h}">{{ fmtTime(h.at) }}</template></el-table-column>
                 <el-table-column label="本次入库数量" width="120" align="right"><template #default="{row:h}">{{ fmtQty(h.thisQty) }}</template></el-table-column>
                 <el-table-column label="入库情况" width="100" align="center"><template #default="{row:h}"><el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag></template></el-table-column>
-                <el-table-column prop="reason" label="异常原因" min-width="200"><template #default="{row:h}">{{ h.reason || '-' }}</template></el-table-column>
+                <el-table-column prop="reason" label="原因" min-width="180"><template #default="{row:h}">{{ h.reason || '-' }}</template></el-table-column>
+                <el-table-column label="操作" width="90" align="center"><template #default="{row:h}"><el-button v-if="h.canCorrect && row.status !== '已作废' && canWrite('materials')" link type="primary" size="small" @click="openCorrect(row, h)">更正</el-button></template></el-table-column>
               </el-table>
               <div v-else class="rq-hist-empty">暂无入库记录（确认入库 / 补入库后按次记录）</div>
             </div>
@@ -1208,6 +1244,38 @@ const Requisitions = {
       <template #footer>
         <el-button @click="dlg.visible=false">取 消</el-button>
         <el-button type="primary" @click="doConfirm">{{ dlg.type==='supplement' ? '确认补入库' : '确认入库' }}</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="入库更正" v-model="cdlg.visible" width="560px" top="12vh">
+      <div v-if="cdlg.entry" style="background:var(--surface-3);border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;line-height:1.9">
+        <div>领料单：<b>{{ cdlg.rec && cdlg.rec.reqNo }}</b>　开单日 {{ cdlg.rec && cdlg.rec.reqDate }}</div>
+        <div>原到货日：{{ cdlg.entry.arrivalDate || (cdlg.entry.at || '').slice(0, 10) }}　原数量：{{ cdlg.entry.thisQty }}</div>
+        <div style="color:var(--text-3)">只更正这一次入库的数量 / 到货日；单号、开单日、创建时间都不变。改项目或物料请走「作废重开」。</div>
+      </div>
+      <el-form label-position="top">
+        <el-row :gutter="12">
+          <el-col :span="12" :xs="24">
+            <el-form-item label="更正后到货日" required>
+              <el-date-picker v-model="cdlg.arrivalDate" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" :xs="24">
+            <el-form-item label="更正后数量" required>
+              <el-input-number v-model="cdlg.qty" :min="0" :precision="4" :controls="false" style="width:100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item v-if="cdlg.arrivalDate && cdlg.arrivalDate < oldLimit30()" label="到货日早于 30 天，补录原因" required>
+          <el-input v-model="cdlg.arrivalReason" placeholder="请说明补录原因" />
+        </el-form-item>
+        <el-form-item label="更正原因" required>
+          <el-input v-model="cdlg.reason" placeholder="如：数量录入错误，应为 8" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cdlg.visible=false">取 消</el-button>
+        <el-button type="primary" :loading="cdlg.saving" @click="submitCorrect">确认更正</el-button>
       </template>
     </el-dialog>
 

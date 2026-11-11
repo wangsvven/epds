@@ -945,13 +945,16 @@ app.get('/api/materialRequisitions/:id/download', (req, res) => {
   if (hist.length) {
     aoa.push(['', '', '', '', '', '', '']);
     aoa.push(['入库记录（按次）', '', '', '', '', '', '']);
-    aoa.push(['到货日期', '物料描述', '本次数量', '录入时间', '', '', '']);
+    aoa.push(['到货日期', '标签', '物料描述', '本次数量', '录入时间', '原因', '']);
+    const histTag = h => (h.reverses ? '冲销' : (h.correctsEntry ? '更正' : (h.reversed ? '原记录(已冲销)' : '入库')));
     hist.forEach(h => {
       const day = String((h && h.arrivalDate) || (h && h.at) || '').slice(0, 10);
       const at = String((h && h.at) || '');
+      const tag = histTag(h);
+      const why = String((h && (h.reason || h.arrivalReason)) || '');
       (h.rows || []).forEach(r => {
         const it = rec.items.find(x => x.materialId === r.materialId) || {};
-        aoa.push([day, it.description || '', r.thisQty, at, '', '', '']);
+        aoa.push([day, tag, it.description || '', r.thisQty, at, why, '']);
       });
     });
   }
@@ -1045,7 +1048,7 @@ app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
   rec.confirmedAt = fmtNow();
   // 每次入库/补入库操作均记录历史（详情展开逐条展示 + Excel 领料单附带入库记录）
   if (!Array.isArray(rec.history)) rec.history = [];
-  rec.history.push({ at: rec.confirmedAt, arrivalDate, arrivalReason, rows: opRows });
+  rec.history.push({ id: genId('he'), at: rec.confirmedAt, arrivalDate, arrivalReason, rows: opRows });
   saveDB();
   res.json({ ok: true, data: rec });
 });
@@ -1107,13 +1110,17 @@ app.put('/api/materialRequisitions/:id/void', (req, res) => {
     for (const it of (rec.items || [])) {
       const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
       if (!m) continue;
-      const evs = [];
+      // P4-7：按「到货日」汇总该物料的净入库（含冲销负数），作废时整日取反，链条也能抵平
+      const byDay = {};
       (rec.history || []).forEach(h => {
         const row = (h.rows || []).find(x => x && x.materialId === it.materialId);
         const q = Number(row && row.thisQty) || 0;
-        if (q <= 0) return;
-        evs.push({ date: h.arrivalDate || h.at, kind: 'in', qty: -q, self: true });
+        if (!q) return;
+        const d = String((h.arrivalDate || h.at || '')).slice(0, 10);
+        if (!d) return;
+        byDay[d] = roundQty((byDay[d] || 0) + q);
       });
+      const evs = Object.keys(byDay).filter(d => byDay[d]).map(d => ({ date: d, kind: 'in', qty: -byDay[d], self: true }));
       if (!evs.length) continue;
       const rp = replayAvailability(it.materialId, evs);
       if (!rp.ok) return replayFail(res, m, rp, '本单作废');
@@ -1137,6 +1144,182 @@ app.put('/api/materialRequisitions/:id/void', (req, res) => {
   rec.voidReason = reason;
   rec.voidDeduct = roundQty((rec.confirmRows || []).reduce((s, r) => s + (Number(r.thisQty) || 0), 0));
   saveDB();
+  res.json({ ok: true, data: rec });
+});
+
+/* ---------- 入库更正（P4-7） ----------
+ * 只改「某一次确认入库」的数量 / 到货日：原条目只打 reversed 标记，数量与到货日原文不动；
+ * 同一次 saveDB 追加「冲销（负数，落在原到货日）+ 更正入库（新数量，落在新到货日）」两条 history。
+ * 单号、reqDate、createdAt 不变；改项目 / 物料 / 领料行仍走作废重开。
+ */
+
+// 按 history 代数和重算该单的净入库、confirmRows 与领料单状态（净额 = 原记录 − 冲销 + 更正）
+function netByMaterial(rec) {
+  const net = {};
+  (rec.history || []).forEach(h => {
+    (h.rows || []).forEach(r => {
+      if (!r || !r.materialId) return;
+      net[r.materialId] = roundQty((net[r.materialId] || 0) + (Number(r.thisQty) || 0));
+    });
+  });
+  return net;
+}
+function recomputeFromHistory(rec) {
+  const net = netByMaterial(rec);
+  const prevRows = rec.confirmRows || [];
+  rec.confirmRows = (rec.items || []).map(it => {
+    const q = roundQty(net[it.materialId] || 0);
+    const prev = prevRows.find(c => c && c.materialId === it.materialId) || {};
+    const short = q < it.qty - 1e-9;
+    return { materialId: it.materialId, thisQty: q, abnormal: short, reason: short ? (prev.reason || '') : '' };
+  });
+  const allFull = (rec.items || []).every(it => roundQty(net[it.materialId] || 0) >= it.qty - 1e-9);
+  const allZero = (rec.items || []).every(it => roundQty(net[it.materialId] || 0) <= 1e-9);
+  rec.status = allFull ? '已入库' : (allZero ? '待入库' : '部分到库');
+  return net;
+}
+// 该材料当前被哪些有效出库单占用（用于「当前可用将为负」时列出单号）
+function outboundRefsOf(materialId, project) {
+  const refs = [];
+  DB.materialOutbound.forEach(o => {
+    if (!o || o.deleted || o.status !== '有效' || o.project !== project) return;
+    (o.items || []).forEach(it => {
+      if (!it || it.materialId !== materialId) return;
+      const net = roundQty((Number(it.qty) || 0) - (Number(it.returned) || 0));
+      if (net <= 0) return;
+      refs.push({ outNo: o.outNo || '', outboundId: o.id, qty: roundQty(it.qty), returned: roundQty(it.returned), net, receiver: o.receiver || '' });
+    });
+  });
+  return refs;
+}
+
+app.post('/api/materialRequisitions/:id/receipts/:entryId/correct', (req, res) => {
+  const rec = DB.materialRequisitions.find(x => x.id === req.params.id);
+  if (!rec || rec.deleted) return res.status(404).json({ error: '未找到领料单' });
+  if (rec.status === '已作废') return res.status(400).json({ error: '该领料单已作废，不能更正入库记录' });
+  const entry = (rec.history || []).find(h => h && h.id && h.id === req.params.entryId);
+  if (!entry) return res.status(400).json({ error: '未找到该次入库记录' });
+  if (entry.reverses) return res.status(400).json({ error: '冲销记录不能作为更正目标' });
+  if (entry.reversed) return res.status(400).json({ error: '该次入库已被冲销，不能重复更正；如需再改请更正上一次的「更正入库」记录' });
+
+  const body = req.body || {};
+  const reason = String(body.reason || '').trim();
+  if (!reason) return res.status(400).json({ error: '请填写更正原因' });
+  const arrivalDate = String(body.arrivalDate || '').trim() || String(entry.arrivalDate || '').slice(0, 10);
+  const arrivalReason = String(body.arrivalReason || '').trim();
+  const dErr = bizDateError('到货日期', arrivalDate, arrivalReason);
+  if (dErr) return res.status(400).json({ error: dErr });
+  const reqDateOfRec = String(rec.reqDate || '').slice(0, 10);
+  if (reqDateOfRec && arrivalDate < reqDateOfRec) {
+    return res.status(400).json({ error: '到货日期不能早于领料日期（' + reqDateOfRec + '）' });
+  }
+
+  const entryRows = (entry.rows || []).filter(r => r && r.materialId);
+  if (!entryRows.length) return res.status(400).json({ error: '该次入库没有可更正的物料行' });
+  const rowsIn = Array.isArray(body.rows) ? body.rows : null;
+  const hasQty = body.qty !== undefined && body.qty !== null && body.qty !== '';
+  if (entryRows.length > 1 && hasQty && !rowsIn) {
+    return res.status(400).json({ error: '该次入库含 ' + entryRows.length + ' 行物料，请按 rows 逐行提交更正后数量' });
+  }
+  const plan = [];
+  for (const r of entryRows) {
+    const oldQty = roundQty(r.thisQty);
+    let nq = oldQty;
+    if (rowsIn) {
+      const hit = rowsIn.find(x => x && x.materialId === r.materialId);
+      if (hit && hit.qty !== undefined && hit.qty !== null && hit.qty !== '') nq = Number(hit.qty);
+    } else if (hasQty) {
+      nq = Number(body.qty);
+    }
+    if (!isFinite(nq)) return res.status(400).json({ error: '更正后数量必须是数字' });
+    nq = roundQty(nq);
+    if (nq < 0) return res.status(400).json({ error: '更正后数量不能为负数' });
+    plan.push({ materialId: r.materialId, oldQty, newQty: nq });
+  }
+
+  // 数量上限 + 回放 + 当前可用（存量单同样要满足当前可用 ≥ 0）
+  const net = netByMaterial(rec);
+  const backups = [];
+  for (const p of plan) {
+    const it = (rec.items || []).find(x => x.materialId === p.materialId) || {};
+    const netAfter = roundQty((net[p.materialId] || 0) - p.oldQty + p.newQty);
+    if (it.qty !== undefined && netAfter > Number(it.qty) + 1e-9) {
+      return res.status(400).json({ error: '物料「' + (it.description || p.materialId) + '」更正后净入库 ' + netAfter + ' 将超过该行领料数量 ' + it.qty });
+    }
+    const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
+    if (!m) continue;
+    const delta = roundQty(p.newQty - p.oldQty);
+    const arrivedAfter = roundQty(m.qtyArrived + delta);
+    if (arrivedAfter > Number(m.qtyRequired) + 1e-9) {
+      return res.status(400).json({ error: '物料「' + (m.description || m.code) + '」更正后已到 ' + arrivedAfter + ' 将超过应到 ' + m.qtyRequired });
+    }
+    const rp = replayAvailability(p.materialId, [
+      { date: String(entry.arrivalDate || entry.at || '').slice(0, 10), kind: 'in', qty: -p.oldQty, self: true },
+      { date: arrivalDate, kind: 'in', qty: p.newQty, self: true }
+    ]);
+    if (!rp.ok) return replayFail(res, m, rp, '本单更正');
+    const stats = outboundStats(m.project);
+    const st = stats[m.id] || { taken: 0, returned: 0 };
+    const availAfter = roundQty(arrivedAfter - roundQty(st.taken - st.returned));
+    if (availAfter < -1e-9) {
+      const refs = outboundRefsOf(m.id, m.project);
+      return res.status(400).json({
+        error: '更正后当前可用库存将为负（可用 ' + availAfter + '），请先归还或作废相关出库单',
+        materialId: m.id, code: m.code || '', description: m.description || '', available: availAfter, refs
+      });
+    }
+    backups.push(JSON.parse(JSON.stringify(m)));
+  }
+
+  const now = fmtNow();
+  const revEntry = {
+    id: genId('he'), at: now, arrivalDate: String(entry.arrivalDate || entry.at || '').slice(0, 10),
+    arrivalReason: arrivalReason || '', reason,
+    reverses: entry.id,
+    rows: plan.map(p => ({ materialId: p.materialId, thisQty: roundQty(-p.oldQty), abnormal: false, reason: '' }))
+  };
+  const corEntry = {
+    id: genId('he'), at: now, arrivalDate, arrivalReason: arrivalReason || '', reason,
+    correctsEntry: entry.id,
+    rows: plan.map(p => ({ materialId: p.materialId, thisQty: p.newQty, abnormal: false, reason: '' }))
+  };
+
+  const snapHist = JSON.parse(JSON.stringify(rec.history || []));
+  const snapConfirm = JSON.parse(JSON.stringify(rec.confirmRows || null));
+  const snap = { status: rec.status, confirmedAt: rec.confirmedAt };
+  try {
+    if (!Array.isArray(rec.history)) rec.history = [];
+    rec.history.push(revEntry, corEntry);
+    entry.reversed = true;
+    entry.reversedBy = revEntry.id;
+    // 材料已到按差额推进（qtyArrived 还含其它单与存量手工值，不能按单张 history 重算）
+    plan.forEach(p => {
+      const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
+      if (!m) return;
+      const delta = roundQty(p.newQty - p.oldQty);
+      m.qtyArrived = roundQty(Math.max(0, m.qtyArrived + delta));
+      m.qtyNotArrived = roundQty(Math.max(0, (Number(m.qtyRequired) || 0) - m.qtyArrived));
+      m.status = materialStatus(m);
+    });
+    recomputeFromHistory(rec);
+    rec.confirmedAt = now;
+    // 仅测试环境可用的故障注入：生产默认关闭，普通请求无法触发
+    if (process.env.NODE_ENV === 'test' && process.env.EPDS_TEST_FAIL_SAVE === '1') {
+      throw new Error('测试注入：saveDB 前失败');
+    }
+    saveDB();
+  } catch (e) {
+    // 原子回滚：内存里也恢复到操作前，文件未写入则对外读取与操作前一致
+    rec.history = JSON.parse(JSON.stringify(snapHist));
+    rec.confirmRows = snapConfirm === null ? null : JSON.parse(JSON.stringify(snapConfirm));
+    rec.status = snap.status;
+    rec.confirmedAt = snap.confirmedAt;
+    plan.forEach((p, i) => {
+      const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
+      if (m && backups[i]) Object.assign(m, backups[i]);
+    });
+    return res.status(500).json({ error: '入库更正失败，未写入任何改动：' + e.message });
+  }
   res.json({ ok: true, data: rec });
 });
 
