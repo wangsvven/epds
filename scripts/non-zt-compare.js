@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* ========== 非 ZT 数据三方比对（只读） ==========
- * 用途：每批验收与发布前，确认生产 / 副本 / 基线三方「业务数据」完全一致。
+ * 用途：每批验收与发布前，确认生产 / 副本 / 基线三方「业务数据」的差异。
  *
  * 只读约定（写死，不改）：
  *   - 只 fs.readFileSync 三份 db.json，不启服务、不调任何接口（自然也没有写接口）、不写任何库；
@@ -12,10 +12,16 @@
  *   - 出库单取 project，材料取 project；
  *   - 「含已删除」「未删除」两种计数都输出，逐条比对时两者都参与。
  *
+ * 门禁口径（--gate）：
+ *   - copy-baseline（推荐，R4-NZT 用）：只有「副本 vs 基线」决定退出码；
+ *     生产与基线的差异照常逐条打印，但标为观察项，不判整门失败。
+ *     发布前应把当时的生产快照作为基线，这样门禁等价于「副本对发布前生产」。
+ *   - all（默认，保留原严格口径）：三方任一差异都判失败。
+ *
  * 用法：
- *   node scripts/non-zt-compare.js --baseline <基线 db.json> [--prod <生产 db.json>] [--copy <副本 db.json>]
+ *   node scripts/non-zt-compare.js --baseline <基线 db.json> [--gate copy-baseline] [--prod <生产 db.json>] [--copy <副本 db.json>]
  *   默认：--copy = 本脚本所在项目的 data/db.json；--prod = 环境变量 EPDS_PROD_DB 或本机生产目录
- * 退出码：0 = 三方一致（输出 SAME）；1 = 有差异（列出单号）；2 = 参数/文件/JSON 错误
+ * 退出码：0 = 门禁通过（copy-baseline 下输出 GATE PASS）；1 = 门禁失败；2 = 参数/文件/JSON 错误
  */
 const fs = require('fs');
 const path = require('path');
@@ -30,9 +36,14 @@ function argOf(name, dft) {
 const BASE_PATH = argOf('baseline', '');
 const COPY_PATH = argOf('copy', path.join(ROOT, 'data', 'db.json'));
 const PROD_PATH = argOf('prod', process.env.EPDS_PROD_DB || '/Users/admin/WorkBuddy/复刻/epds/data/db.json');
+const GATE = argOf('gate', 'all');
 
 if (!BASE_PATH) {
-  console.error('用法：node scripts/non-zt-compare.js --baseline <基线 db.json> [--prod <生产 db.json>] [--copy <副本 db.json>]');
+  console.error('用法：node scripts/non-zt-compare.js --baseline <基线 db.json> [--gate copy-baseline|all] [--prod <生产 db.json>] [--copy <副本 db.json>]');
+  process.exit(2);
+}
+if (GATE !== 'all' && GATE !== 'copy-baseline') {
+  console.error('--gate 只能是 copy-baseline 或 all，收到：' + GATE);
   process.exit(2);
 }
 
@@ -45,7 +56,7 @@ function load(label, p) {
   catch (e) { console.error(label + ' 不是合法 JSON：' + e.message); process.exit(2); }
   return {
     label, path: abs, db,
-    mtime: new Date(st.mtimeMs).toISOString().slice(0, 19).replace('T', ' '),
+    mtime: new Date(st.mtimeMs + 8 * 3600e3).toISOString().slice(0, 19).replace('T', ' ') + '（北京时间）',
     size: st.size
   };
 }
@@ -122,12 +133,15 @@ function pick(S, table) {
 
 const ids = ['base', 'prod', 'copy'];
 const pad = (s, n) => { s = String(s); let w = 0; for (const ch of s) w += ch.charCodeAt(0) > 255 ? 2 : 1; return s + ' '.repeat(Math.max(0, n - w)); };
+const strict = GATE === 'all';
 
 console.log('==== 非 ZT 数据三方比对（只读） ====');
 ids.forEach(k => console.log(pad(SRC[k].label, 4) + '：' + SRC[k].path + '\n      修改时间 ' + SRC[k].mtime + ' · ' + SRC[k].size + ' 字节'));
-console.log('口径：项目名不以「ZT测试-」开头视为业务数据；含已删除 / 未删除两种计数都输出\n');
+console.log('口径：项目名不以「ZT测试-」开头视为业务数据；含已删除 / 未删除两种计数都输出');
+console.log('门禁：' + (strict ? '三方任一差异均失败（all）' : '只看「副本 vs 基线」，生产差异仅作观察（copy-baseline）') + '\n');
 
-let diffs = 0;
+let gateDiffs = 0;
+let watchDiffs = 0;
 const rows = [];
 TABLES.forEach(t => {
   const P = {}; ids.forEach(k => { P[k] = pick(SRC[k], t); });
@@ -141,15 +155,17 @@ TABLES.forEach(t => {
     d1: (db1 > 0 ? '+' : '') + db1,
     d2: (db2 > 0 ? '+' : '') + db2
   });
-  // 逐条：并集里任一方缺失或指纹不同都算差异
+  // 逐条：并集里任一方缺失或指纹不同都算差异；门禁模式下按「是否涉及副本对基线」分类
   const keys = new Set([...P.base.map.keys(), ...P.prod.map.keys(), ...P.copy.map.keys()]);
-  const tableDiffs = [];
+  const list = [];
+  const add = (text, gate) => list.push({ text, gate: strict ? true : !!gate });
   keys.forEach(k => {
     const e = ids.map(x => P[x].map.get(k));
     const miss = ids.filter((x, i) => !e[i]);
     const labels = e.filter(Boolean).map(x => x.label);
     if (miss.length) {
-      tableDiffs.push((labels[0] || k) + '：仅存在于 ' + ids.filter((x, i) => e[i]).map(x => SRC[x].label).join('/') + '，缺失于 ' + miss.map(x => SRC[x].label).join('/'));
+      add((labels[0] || k) + '：仅存在于 ' + ids.filter((x, i) => e[i]).map(x => SRC[x].label).join('/') + '，缺失于 ' + miss.map(x => SRC[x].label).join('/'),
+        !!e[0] !== !!e[2]); // 基线与副本对「是否存在」不一致才进门禁；仅生产多/少算观察
       return;
     }
     if (e[0].sig !== e[1].sig || e[0].sig !== e[2].sig) {
@@ -158,18 +174,22 @@ TABLES.forEach(t => {
         const vals = e.map(x => String(x.raw[i]));
         return vals[0] === vals[1] && vals[0] === vals[2] ? '' : f + '=' + vals.join(' | ');
       }).filter(Boolean).join('；');
-      tableDiffs.push(labels[0] + '：' + detail + '（顺序：基线 | 生产 | 副本）');
+      add(labels[0] + '：' + detail + '（顺序：基线 | 生产 | 副本）', e[0].sig !== e[2].sig);
     }
     // 删除标记也纳入（同一单号一边删一边没删）
     if (e[0].deleted !== e[1].deleted || e[0].deleted !== e[2].deleted) {
-      tableDiffs.push(labels[0] + '：删除标记不一致（基线 ' + e[0].deleted + ' / 生产 ' + e[1].deleted + ' / 副本 ' + e[2].deleted + '）');
+      add(labels[0] + '：删除标记不一致（基线 ' + e[0].deleted + ' / 生产 ' + e[1].deleted + ' / 副本 ' + e[2].deleted + '）',
+        e[0].deleted !== e[2].deleted);
     }
   });
-  if (tableDiffs.length) {
-    diffs += tableDiffs.length;
-    console.log('【' + t.name + '】差异 ' + tableDiffs.length + ' 条：');
-    tableDiffs.slice(0, 50).forEach(x => console.log('  - ' + x));
-    if (tableDiffs.length > 50) console.log('  …… 其余 ' + (tableDiffs.length - 50) + ' 条省略');
+  const g = list.filter(x => x.gate);
+  const w = list.filter(x => !x.gate);
+  gateDiffs += g.length;
+  watchDiffs += w.length;
+  if (list.length) {
+    console.log('【' + t.name + '】差异 ' + list.length + ' 条' + (strict ? '' : '（门禁 ' + g.length + ' / 观察 ' + w.length + '）') + '：');
+    list.slice(0, 50).forEach(x => console.log('  - ' + (strict ? '' : (x.gate ? '[门禁] ' : '[观察] ')) + x.text));
+    if (list.length > 50) console.log('  …… 其余 ' + (list.length - 50) + ' 条省略');
     console.log('');
   }
 });
@@ -178,9 +198,27 @@ console.log(pad('表', 8) + pad('基线 全/有效', 16) + pad('生产 全/有�
 rows.forEach(r => console.log(pad(r.name, 8) + pad(r.base, 16) + pad(r.prod, 16) + pad(r.copy, 16) + pad(r.d1, 12) + r.d2));
 
 const countDiff = rows.some(r => r.d1 !== '0' || r.d2 !== '0');
-if (diffs || countDiff) {
-  console.log('\n结果：DIFF（逐条差异 ' + diffs + ' 条' + (countDiff ? '，行数存在差值' : '') + '）');
+const gateCountDiff = rows.some(r => r.d2 !== '0');
+
+if (strict) {
+  if (gateDiffs || countDiff) {
+    console.log('\n结果：DIFF（逐条差异 ' + gateDiffs + ' 条' + (countDiff ? '，行数存在差值' : '') + '）');
+    process.exit(1);
+  }
+  console.log('\nSAME：三张表在「非 ZT 业务数据」口径下完全一致（含未删除与含已删除两种计数均无差值）');
+  process.exit(0);
+}
+
+// copy-baseline：生产差异只观察，不判失败
+if (gateDiffs || gateCountDiff) {
+  console.log('\n结果：GATE FAIL（副本对基线：逐条差异 ' + gateDiffs + ' 条' + (gateCountDiff ? '，行数有差值' : '') + '）'
+    + (watchDiffs ? '；另有生产观察差异 ' + watchDiffs + ' 条' : ''));
   process.exit(1);
 }
-console.log('\nSAME：三张表在「非 ZT 业务数据」口径下完全一致（含未删除与含已删除两种计数均无差值）');
+console.log('\nGATE PASS：副本与基线在「非 ZT 业务数据」口径下一致（含未删除与含已删除两种计数均无差值）');
+if (watchDiffs || (countDiff && rows.some(r => r.d1 !== '0'))) {
+  console.log('观察：生产与基线存在差异 ' + watchDiffs + ' 条（行数差见上表「生产−基线」列），按约定不影响本次门禁；发布前应以当时的生产快照为基线复核。');
+} else {
+  console.log('观察：生产与基线也无差异。');
+}
 process.exit(0);
