@@ -612,39 +612,69 @@ app.delete('/api/materials/:id', (req, res) => {
 // ---------- 材料导入（真实模板：采购申请） ----------
 // 模板列（按位置）：0 项目名称（单体工程名称）/ 1 短文本(物料描述) / 2 申请数量 / 3 计量单位 / 4 物料编码 / 5 采购订单号 / 6 来源类型
 // 硬校验：① 项目名称必须与项目列表一致  ② 来源类型必须是固定枚举，任一行不合法则整份拒绝导入
+// 材料导入：读文件 → 逐行校验。预览与正式导入共用同一套（P2：两处口径不允许漂移）
+function readImportRows(file) {
+  const name = file.originalname || '';
+  if (/\.csv$/i.test(name)) {
+    const text = file.buffer.toString('utf8').replace(/^\uFEFF/, '');
+    return text.split(/\r?\n/).filter(l => l.trim()).map(l => l.split(',').map(c => c.replace(/^"|"$/g, '').trim()));
+  }
+  const wb = xlsx.read(file.buffer, { type: 'buffer' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  return xlsx.utils.sheet_to_json(ws, { header: 1, defval: '' });
+}
+// 返回 { errors: [{ row, reason }], parsed, skippedEmpty }；errors 为全量逐行清单（不首错即停）
+function validateImportRows(rows) {
+  const validNames = allSingleProjectNames();
+  const errors = [];
+  const parsed = [];
+  let skippedEmpty = 0;
+  rows.forEach((r, i) => {
+    if (i === 0) return; // 跳过表头
+    const project = String(r[0] || '').trim();
+    const description = String(r[1] || '').trim();
+    const qtyRaw = String(r[2] === undefined || r[2] === null ? '' : r[2]).trim();
+    const source = String(r[6] || '').trim();
+    if (!project && !description && !qtyRaw) { skippedEmpty++; return; } // 空行
+    const rowNo = i + 1;
+    if (!validNames.includes(project)) { errors.push({ row: rowNo, reason: '项目名称「' + (project || '空') + '」与项目列表不一致' }); return; }
+    if (!SOURCE_TYPES.includes(source)) { errors.push({ row: rowNo, reason: '来源类型「' + (source || '空') + '」无效（仅支持：' + SOURCE_TYPES.join(' / ') + '）' }); return; }
+    const qty = Number(qtyRaw);
+    if (!qtyRaw || !isFinite(qty) || qty < 0) { errors.push({ row: rowNo, reason: '申请数量「' + (qtyRaw || '空') + '」无效' }); return; }
+    parsed.push({ project, description, qty: roundQty(qty), unit: String(r[3] || '').trim(), code: String(r[4] || '').trim(), orderNo: String(r[5] || '').trim() || '-', source });
+  });
+  return { errors, parsed, skippedEmpty };
+}
+// P2 试校验：同一 multipart 文件、同一套逐行校验，一次性返回全部行的错误清单；不写库、不生成批次
+app.post('/api/materials/import/preview', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '未收到文件' });
+    const { errors, parsed, skippedEmpty } = validateImportRows(readImportRows(req.file));
+    res.json({
+      ok: errors.length === 0,
+      canImport: errors.length === 0 && parsed.length > 0,
+      total: parsed.length + errors.length + skippedEmpty,
+      validRows: parsed.length,
+      skippedEmpty,
+      errorCount: errors.length,
+      errors: errors.map(e => ({ row: e.row, message: '第' + e.row + '行：' + e.reason })),
+      note: errors.length
+        ? '有 ' + errors.length + ' 行不通过校验，正式导入会整批拒绝'
+        : (parsed.length ? '校验通过，可导入 ' + parsed.length + ' 行' : '模板中没有可导入的数据行')
+    });
+  } catch (e) { res.status(500).json({ error: '试校验失败：' + e.message }); }
+});
 app.post('/api/materials/import', upload.single('file'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '未收到文件' });
-    let rows;
     const name = req.file.originalname || '';
-    if (/\.csv$/i.test(name)) {
-      const text = req.file.buffer.toString('utf8').replace(/^\uFEFF/, '');
-      rows = text.split(/\r?\n/).filter(l => l.trim()).map(l => l.split(',').map(c => c.replace(/^"|"$/g, '').trim()));
-    } else {
-      const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      rows = xlsx.utils.sheet_to_json(ws, { header: 1, defval: '' });
-    }
-    const validNames = allSingleProjectNames();
-    const errors = [];
-    const parsed = [];
-    let skippedEmpty = 0;
-    rows.forEach((r, i) => {
-      if (i === 0) return; // 跳过表头
-      const project = String(r[0] || '').trim();
-      const description = String(r[1] || '').trim();
-      const qtyRaw = String(r[2] === undefined || r[2] === null ? '' : r[2]).trim();
-      const source = String(r[6] || '').trim();
-      if (!project && !description && !qtyRaw) { skippedEmpty++; return; } // 空行
-      const rowNo = i + 1;
-      if (!validNames.includes(project)) { errors.push('第' + rowNo + '行：项目名称「' + (project || '空') + '」与项目列表不一致'); return; }
-      if (!SOURCE_TYPES.includes(source)) { errors.push('第' + rowNo + '行：来源类型「' + (source || '空') + '」无效（仅支持：' + SOURCE_TYPES.join(' / ') + '）'); return; }
-      const qty = Number(qtyRaw);
-      if (!qtyRaw || !isFinite(qty) || qty < 0) { errors.push('第' + rowNo + '行：申请数量「' + (qtyRaw || '空') + '」无效'); return; }
-      parsed.push({ project, description, qty: roundQty(qty), unit: String(r[3] || '').trim(), code: String(r[4] || '').trim(), orderNo: String(r[5] || '').trim() || '-', source });
-    });
+    const { errors, parsed, skippedEmpty } = validateImportRows(readImportRows(req.file));
     if (errors.length) {
-      return res.status(400).json({ error: '导入失败，共 ' + errors.length + ' 处不一致：' + errors.slice(0, 5).join('；') + (errors.length > 5 ? '（仅显示前 5 处）' : '') });
+      return res.status(400).json({
+        error: '导入失败，共 ' + errors.length + ' 处不一致：'
+          + errors.slice(0, 5).map(e => '第' + e.row + '行：' + e.reason).join('；')
+          + (errors.length > 5 ? '（仅显示前 5 处）' : '')
+      });
     }
     if (!parsed.length) return res.status(400).json({ error: '模板中没有可导入的数据行' });
     // 判重：项目 + 物料编码 + 物料描述 + 单位（材料记录无「规格」字段）。

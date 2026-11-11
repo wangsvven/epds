@@ -375,31 +375,57 @@ const MaterialsView = {
       a.download = '材料导入模板.xlsx';
       document.body.appendChild(a); a.click(); a.remove();
     }
+    // P2 导入：选文件后先弹窗，可「试校验」再「确认导入」；正式导入行为与文案不变
+    const idlg = reactive({ visible: false, file: null, fileName: '', errors: [], checked: false, note: '', checking: false, importing: false });
     function importMaterials() {
       const input = document.createElement('input');
       input.type = 'file'; input.accept = '.xlsx,.xls,.csv';
-      input.onchange = async () => {
+      input.onchange = () => {
         const file = input.files && input.files[0];
         if (!file) return;
-        const fd = new FormData(); fd.append('file', file);
-        try {
-          const res = await fetch('/api/materials/import', {
-            method: 'POST',
-            headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') },
-            body: fd
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || '导入失败');
-          ElementPlus.ElMessage.success(data.added ? ('成功导入 ' + data.added + ' 条物料（批次 ' + data.batch + '），跳过重复 ' + (data.skipped || 0) + ' 条') : ('全部 ' + (data.skipped || 0) + ' 条均为重复，未生成导入批次'));
-          load();
-        } catch (e) { ElementPlus.ElMessage.error(e.message); }
+        idlg.file = file; idlg.fileName = file.name;
+        idlg.errors = []; idlg.checked = false; idlg.note = ''; idlg.visible = true;
       };
       input.click();
+    }
+    async function previewImport() {
+      if (!idlg.file) return;
+      idlg.checking = true;
+      try {
+        const fd = new FormData(); fd.append('file', idlg.file, idlg.fileName);
+        const res = await fetch('/api/materials/import/preview', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') },
+          body: fd
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '试校验失败');
+        idlg.checked = true;
+        idlg.errors = Array.isArray(data.errors) ? data.errors : [];
+        idlg.note = data.note || '';
+      } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { idlg.checking = false; }
+    }
+    async function doImport() {
+      if (!idlg.file) return;
+      idlg.importing = true;
+      try {
+        const fd = new FormData(); fd.append('file', idlg.file, idlg.fileName);
+        const res = await fetch('/api/materials/import', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + localStorage.getItem('erp_token') },
+          body: fd
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '导入失败');
+        ElementPlus.ElMessage.success(data.added ? ('成功导入 ' + data.added + ' 条物料（批次 ' + data.batch + '），跳过重复 ' + (data.skipped || 0) + ' 条') : ('全部 ' + (data.skipped || 0) + ' 条均为重复，未生成导入批次'));
+        idlg.visible = false;
+        load();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { idlg.importing = false; }
     }
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
       projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
-      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
+      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, idlg, previewImport, doImport, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
   <div>
@@ -785,6 +811,22 @@ const MaterialsView = {
       <template #footer>
         <el-button @click="dialogVisible=false">取消</el-button>
         <el-button type="primary" @click="submit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="导入材料表" v-model="idlg.visible" width="640px" top="10vh">
+      <div style="font-size:14px;margin-bottom:10px">已选择文件：<b>{{ idlg.fileName }}</b></div>
+      <div style="color:var(--text-2);font-size:13px;line-height:1.7;margin-bottom:12px">
+        可先「试校验」查看全部行的错误清单（不写库、不生成批次）；正式导入时任意一行不通过都会整批拒绝。
+      </div>
+      <div v-if="idlg.note" :style="{ fontSize:'13px', lineHeight:'1.7', marginBottom:'10px', color: idlg.errors.length ? 'var(--el-color-danger)' : 'var(--el-color-success)' }">{{ idlg.note }}</div>
+      <div v-if="idlg.errors.length" style="max-height:260px;overflow:auto;border:1px solid var(--line-strong);border-radius:6px;padding:8px 12px">
+        <div v-for="(e, i) in idlg.errors" :key="i" style="font-size:13px;line-height:1.9;color:var(--el-color-danger)">· {{ e.message }}</div>
+      </div>
+      <template #footer>
+        <el-button @click="idlg.visible=false">取 消</el-button>
+        <el-button :loading="idlg.checking" @click="previewImport">试校验</el-button>
+        <el-button type="primary" :loading="idlg.importing" @click="doImport">确认导入</el-button>
       </template>
     </el-dialog>
   </div>`

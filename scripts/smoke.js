@@ -776,6 +776,74 @@ async function runSmoke() {
     return '应到 3 · 已到 0 · 未到库';
   });
 
+  /* ---------- P2 材料导入试校验 ---------- */
+  const mkImportFile = (rows, fname) => {
+    const wb2 = xlsx.utils.book_new();
+    const ws2 = xlsx.utils.aoa_to_sheet([['项目名称', '物料描述', '申请数量', '计量单位', '物料编码', '采购订单号', '来源类型'], ...rows]);
+    xlsx.utils.book_append_sheet(wb2, ws2, 'Sheet1');
+    const buf2 = xlsx.write(wb2, { type: 'buffer', bookType: 'xlsx' });
+    const fd2 = new FormData();
+    fd2.append('file', new Blob([buf2]), fname);
+    return fd2;
+  };
+  await step('materials', 'P2 试校验：四类行一次列全、库与批次零变化；正式导入同文件整批拒绝', async () => {
+    const before = {
+      mats: (await listOk('/api/materials', token)).length,
+      batches: (await listOk('/api/materialImports', token)).length
+    };
+    const rows4 = [
+      [MP_C, 'ZT测试-P2 正常行', 2, '个', 'ZT-P2-OK', 'PO-ZT', '甲供材料'],
+      ['不存在项目ZT', 'ZT测试-P2 未知项目', 1, '个', 'ZT-P2-PJ', 'PO-ZT', '甲供材料'],
+      [MP_C, 'ZT测试-P2 缺数量', '', '个', 'ZT-P2-QT', 'PO-ZT', '甲供材料'],
+      [MP_C, 'ZT测试-P2 负数', -3, '个', 'ZT-P2-NG', 'PO-ZT', '甲供材料']
+    ];
+    const pv = await fetch(base + '/api/materials/import/preview', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: mkImportFile(rows4, 'zt-p2.xlsx')
+    });
+    const pvd = await pv.json();
+    need(pv.ok, '试校验接口应 200：' + pv.status + ' ' + brief(pvd));
+    need(pvd.ok === false && pvd.canImport === false, '含错文件应 ok=false / canImport=false：' + brief(pvd));
+    need(pvd.errorCount === 3 && Array.isArray(pvd.errors) && pvd.errors.length === 3,
+      '应一次列全 3 行错误，实际 ' + pvd.errorCount);
+    need(pvd.errors.map(e => e.row).join(',') === '3,4,5', '错误行号应为 3,4,5，实际 ' + pvd.errors.map(e => e.row).join(','));
+    need(pvd.errors.every(e => e.message && /^第\d+行：/.test(e.message)), '错误项应含「第N行：原因」：' + brief(pvd.errors));
+    need(/项目列表不一致/.test(pvd.errors[0].message) && /申请数量/.test(pvd.errors[1].message) && /申请数量/.test(pvd.errors[2].message),
+      '错误原因不符：' + brief(pvd.errors.map(e => e.message)));
+    need(pvd.validRows === 1, '合法行应为 1，实际 ' + pvd.validRows);
+    const after1 = {
+      mats: (await listOk('/api/materials', token)).length,
+      batches: (await listOk('/api/materialImports', token)).length
+    };
+    need(after1.mats === before.mats && after1.batches === before.batches, '试校验不应写库：' + brief({ before, after1 }));
+    const up = await fetch(base + '/api/materials/import', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: mkImportFile(rows4, 'zt-p2.xlsx')
+    });
+    const upd = await up.json();
+    need(up.status === 400 && /共 3 处不一致/.test(upd.error), '正式导入应整批拒绝：' + up.status + ' ' + brief(upd));
+    need(/第3行：/.test(upd.error) && /项目列表不一致/.test(upd.error), '正式导入错误口径应与试校验一致：' + upd.error);
+    const after2 = {
+      mats: (await listOk('/api/materials', token)).length,
+      batches: (await listOk('/api/materialImports', token)).length
+    };
+    need(after2.mats === before.mats && after2.batches === before.batches, '整批拒绝不应落库：' + brief({ before, after2 }));
+    const up2 = await fetch(base + '/api/materials/import', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token },
+      body: mkImportFile([[MP_C, 'ZT测试-P2 全对行', 1, '个', 'ZT-P2-ALLOK', 'PO-ZT', '甲供材料']], 'zt-p2-ok.xlsx')
+    });
+    const d2 = await up2.json();
+    need(up2.status === 200 && d2.added === 1, '全对文件应导入成功：' + up2.status + ' ' + brief(d2));
+    return '3 错行全列（行 3/4/5） · 零写 · 整批拒绝 · 全对导入成功';
+  });
+
+  await step('materials', 'P2.1 前端：导入弹窗有「试校验」与错误清单、正式导入仍走原接口', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(/\/api\/materials\/import\/preview/.test(src), '前端应调用试校验接口');
+    need(/试校验/.test(src), '弹窗应有「试校验」按钮');
+    need(/v-for="\(e, i\) in idlg\.errors"/.test(src), '应逐条展示错误清单');
+    need(/\/api\/materials\/import['"]/.test(src), '正式导入仍走原接口');
+    return '试校验按钮 + 错误清单 + 正式导入原接口';
+  });
+
   // P0-3 起效后出库必须填已准入工人：先落一名固定工人供 P0-2/P0-3 各出库用例使用
   let smokeWorker = null;
   let srvToday = '';
