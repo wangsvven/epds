@@ -114,6 +114,76 @@ const MIGRATIONS = [
       return true;
     }
   }
+  ,
+  /* ---------- 迁移 3：材料业务日期回填 + 存量标记（P4-5） ----------
+   * 背景：旧单只有 createdAt / history.at，没有 reqDate / arrivalDate / outDate / returnDate；
+   * 单号里的日期才是「业务日期」的唯一历史线索（出库单的 workDate 是作业日，不能拿来当出库日）。
+   * 规则：只补空字段，不改单号、不改 createdAt / confirmedAt / history.at / voidedAt、不改数量与状态；
+   *       处理当时已存在的领料单 / 出库单打 legacy: true（新单由创建接口写 legacy: false）。
+   * 注意：区分存量只能看 legacy，不能看业务日期字段在不在——本迁移会把字段补齐。 */
+  {
+    id: '20261111-material-biz-dates',
+    desc: '材料业务日期回填（reqDate / arrivalDate / outDate / returnDate）并给存量单据打 legacy 标记',
+    needs(DB) {
+      const rq = Array.isArray(DB.materialRequisitions) ? DB.materialRequisitions : [];
+      const ob = Array.isArray(DB.materialOutbound) ? DB.materialOutbound : [];
+      if (rq.some(r => r && (!r.reqDate || r.legacy === undefined))) return true;
+      if (rq.some(r => r && (r.history || []).some(h => h && !h.arrivalDate))) return true;
+      if (ob.some(o => o && (!o.outDate || o.legacy === undefined))) return true;
+      if (ob.some(o => o && (o.returns || []).some(x => x && !x.returnDate))) return true;
+      return false;
+    },
+    run(DB) {
+      const p2 = n => String(n).padStart(2, '0');
+      const now = new Date(Date.now() + 8 * 3600 * 1000);
+      const today = now.getUTCFullYear() + '-' + p2(now.getUTCMonth() + 1) + '-' + p2(now.getUTCDate());
+      const dayOf = s => {
+        const v = String(s == null ? '' : s).slice(0, 10);
+        return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+      };
+      // 单号里的日期：LL-YYYYMMDD-NNNN / OUT-YYYYMMDD-NNNN
+      const fromNo = (no, prefix) => {
+        const m = String(no == null ? '' : no).match(new RegExp('^' + prefix + '(\\d{4})(\\d{2})(\\d{2})-'));
+        return m ? m[1] + '-' + m[2] + '-' + m[3] : '';
+      };
+      const rq = Array.isArray(DB.materialRequisitions) ? DB.materialRequisitions : [];
+      const ob = Array.isArray(DB.materialOutbound) ? DB.materialOutbound : [];
+      let fReq = 0, fArr = 0, fOut = 0, fRet = 0, markRq = 0, markOb = 0, fallback = 0;
+      rq.forEach(r => {
+        if (!r) return;
+        if (!r.reqDate) {
+          // 单号日期 → createdAt 日期 → 今天（兜底只应对 createdAt 缺失的异常记录，正常库不会走到）
+          let d = fromNo(r.reqNo, 'LL-') || dayOf(r.createdAt);
+          if (!d) { d = today; fallback++; }
+          r.reqDate = d; fReq++;
+        }
+        (r.history || []).forEach(h => {
+          if (!h || h.arrivalDate) return;
+          h.arrivalDate = dayOf(h.at) || dayOf(r.confirmedAt) || r.reqDate || today; fArr++;
+        });
+        if (r.legacy === undefined) { r.legacy = true; markRq++; }
+      });
+      ob.forEach(o => {
+        if (!o) return;
+        if (!o.outDate) {
+          // 只认单号日期，绝不用 workDate（作业日）冒充出库日
+          let d = fromNo(o.outNo, 'OUT-') || dayOf(o.createdAt);
+          if (!d) { d = today; fallback++; }
+          o.outDate = d; fOut++;
+        }
+        (o.returns || []).forEach(x => {
+          if (!x || x.returnDate) return;
+          x.returnDate = dayOf(x.at) || o.outDate || today; fRet++;
+        });
+        if (o.legacy === undefined) { o.legacy = true; markOb++; }
+      });
+      console.log('[migrate] 业务日期回填：领料单 reqDate ' + fReq + ' / 入库 arrivalDate ' + fArr
+        + ' / 出库 outDate ' + fOut + ' / 归还 returnDate ' + fRet
+        + '；存量标记 领料 ' + markRq + ' 张、出库 ' + markOb + ' 张'
+        + (fallback ? '；兜底用今天 ' + fallback + ' 处（缺 createdAt，请人工复核）' : ''));
+      return true;
+    }
+  }
   // ↓ 以后新增数据迁移：在此追加 { id, desc, needs?, run } 即可，随版本升级自动执行。
 ];
 
