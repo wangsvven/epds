@@ -51,10 +51,11 @@ const ArrivalStats = {
     const allEvents = computed(() => window.ArrivalCalc.recentArrivals(reqs.value, planNames.value, 100000));
     const recent = computed(() => allEvents.value.slice(0, 40));
 
+    // P4-6：一律按「到货日」（arrivalDate，缺省回退 at 的日期），不再按录入日
     const dayEvents = computed(() => {
       const d = arrivalDate.value;
       if (!d) return [];
-      return allEvents.value.filter(e => String(e.at || '').slice(0, 10) === d);
+      return allEvents.value.filter(e => String(e.arrivalDate || e.at || '').slice(0, 10) === d);
     });
     // 当日按「编码 + 描述」聚合（与 aggregate 同键）
     const dayQtyMap = computed(() => {
@@ -103,7 +104,7 @@ const ArrivalStats = {
     const arrivalDaySet = computed(() => {
       const set = new Set();
       allEvents.value.forEach(e => {
-        const d = String(e.at || '').slice(0, 10);
+        const d = String(e.arrivalDate || e.at || '').slice(0, 10);
         if (d) set.add(d);
       });
       return set;
@@ -113,7 +114,7 @@ const ArrivalStats = {
       const groups = [];
       let cur = null;
       recent.value.forEach(e => {
-        const d = String(e.at || '').slice(0, 10);
+        const d = String(e.arrivalDate || e.at || '').slice(0, 10);
         if (!cur || cur.date !== d) { cur = { date: d, items: [] }; groups.push(cur); }
         cur.items.push(e);
       });
@@ -157,12 +158,12 @@ const ArrivalStats = {
         '',
         '导出时间：' + stamp,
         '',
-        '| 时间 | 领料单号 | 材料 | 本次到货数量 | 情况 |',
-        '| --- | --- | --- | --- | --- |'
+        '| 到货日 | 录入时间 | 领料单号 | 材料 | 本次到货数量 | 情况 |',
+        '| --- | --- | --- | --- | --- | --- |'
       ];
       allEvents.value.forEach(e => {
         const state = e.abnormal ? ('异常' + (e.reason ? '（' + e.reason + '）' : '')) : '正常';
-        lines.push('| ' + (e.at || '') + ' | ' + (e.reqNo || '') + ' | ' + (e.description || '') +
+        lines.push('| ' + (e.arrivalDate || '') + ' | ' + (e.at || '') + ' | ' + (e.reqNo || '') + ' | ' + (e.description || '') +
           ' | ' + fmt(e.qty) + ' | ' + state + ' |');
       });
       const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
@@ -280,7 +281,7 @@ const ArrivalStats = {
     <div class="as-recent">
       <div class="as-recent-head">
         <span class="as-recent-title">最近到货动态</span>
-        <span class="as-recent-sub">最近 40 条（按入库时间倒序）</span>
+        <span class="as-recent-sub">最近 40 条（按到货日倒序，括号内为录入时间）</span>
         <span class="spacer"></span>
         <el-button size="small" :disabled="!allEvents.length" @click="downloadLog">下载日志</el-button>
       </div>

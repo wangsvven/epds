@@ -1339,10 +1339,14 @@ async function runSmoke() {
       const buf = Buffer.from(await r.arrayBuffer());
       const wb2 = xlsx.read(buf, { type: 'buffer' });
       const ws2 = wb2.Sheets[wb2.SheetNames[0]];
+      // 表头行按内容定位（P4-6 在标题与表头之间插了「领料日期」行，不能写死行号）
+      const aoa = xlsx.utils.sheet_to_json(ws2, { header: 1, blankrows: false, defval: '' });
+      const hi = aoa.findIndex(x => String(x[0]) === '序号');
+      const remark = (hi >= 0 && aoa[hi + 1]) ? String(aoa[hi + 1][6] || '') : '';
       return {
         title: String((ws2.A1 || {}).v || ''),
-        head: String((ws2.A3 || {}).v || ''),
-        remark: String((ws2.G4 || {}).v || '')   // 备注列（第 7 列）应仍为采购订单号
+        head: hi >= 0 ? aoa[hi].join('|') : '',
+        remark: remark   // 备注列（第 7 列）应仍为采购订单号
       };
     };
     const t1 = await readTitle(await mk(p1.name, 'ZT-P34-A'));
@@ -4009,6 +4013,67 @@ async function runSmoke() {
     const bad = await p4Out(m.id, 1, { outDate: srvToday });
     need(bad.status === 400 && bad.data.date === srvToday, '期初用尽后再出 1 应被拒：' + brief(bad.data));
     return '期初 12 → 出 12 放行 · 再出 1 拒';
+  });
+
+  await step('materials', 'P4-6-A 到货统计按到货日而不是录入日（纯函数）', async () => {
+    const AC = require(path.join(ROOT, 'public', 'js', 'arrival-calc.js')).ArrivalCalc;
+    need(AC && typeof AC.recentArrivals === 'function', 'arrival-calc 未导出 recentArrivals');
+    const reqs = [{
+      reqNo: 'LL-X-1', projects: ['P'], items: [{ materialId: 'm1', code: 'C1', description: 'D1', unit: '只', project: 'P' }],
+      history: [
+        { at: '2026-11-11 09:00', arrivalDate: p4D4, rows: [{ materialId: 'm1', thisQty: 6 }] },
+        { at: '2026-11-11 10:00', arrivalDate: dayOff(p4D4, 2), rows: [{ materialId: 'm1', thisQty: 4 }] }
+      ]
+    }];
+    const ev = AC.recentArrivals(reqs, ['P'], 10);
+    need(ev.length === 2, '应有两条入库事件：' + ev.length);
+    need(ev[0].arrivalDate === dayOff(p4D4, 2) && ev[0].at === '2026-11-11 10:00', '应按到货日倒序且保留录入时间：' + brief(ev[0]));
+    need(ev[1].arrivalDate === p4D4, '第二条到货日应为 ' + p4D4 + '：' + brief(ev[1]));
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'arrivalStats.js'), 'utf8');
+    need(/e\.arrivalDate \|\| e\.at/.test(src), '到货统计页应按 arrivalDate 双读');
+    return '按到货日倒序 · 录入时间保留';
+  });
+
+  await step('materials', 'P4-6-B 导出含领料日期与按次入库历史', async () => {
+    const m = await p4Mat('N', 100);
+    const r = await p4Req(m.id, 10, p4D4);
+    needOk(await api('PUT', '/api/materialRequisitions/' + r.id + '/confirm', {
+      token, body: { rows: [{ materialId: m.id, thisQty: 6, reason: 'ZT分两批' }], arrivalDate: p4D4 }
+    }), 'P4-6-B confirm1');
+    needOk(await api('PUT', '/api/materialRequisitions/' + r.id + '/confirm', {
+      token, body: { rows: [{ materialId: m.id, thisQty: 4 }], arrivalDate: dayOff(p4D4, 2) }
+    }), 'P4-6-B confirm2');
+    const res = await fetch(base + '/api/materialRequisitions/' + r.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
+    need(res.status === 200, '导出应 200，实际 ' + res.status);
+    need(/filename="LL-/.test(String(res.headers.get('content-disposition'))), '文件名仍应是单号');
+    const buf = Buffer.from(await res.arrayBuffer());
+    const wb = xlsx.read(buf, { type: 'buffer' });
+    const aoa = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, blankrows: false, defval: '' });
+    const flat = aoa.map(x => x.join('|')).join('\n');
+    need(/领料日期：/.test(flat) && flat.indexOf(p4D4) > -1, '表内应有领料日期 ' + p4D4);
+    const idx = aoa.findIndex(x => String(x[0]).indexOf('入库记录') === 0);
+    need(idx > 0, '应有入库记录块');
+    const hist = aoa.slice(idx).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(String(x[0])));
+    need(hist.length === 2, '应有两条按次入库记录：' + brief(hist));
+    need(hist[0][0] === p4D4 && Number(hist[0][2]) === 6, '第一次到货日/数量不符：' + brief(hist[0]));
+    need(hist[1][0] === dayOff(p4D4, 2) && Number(hist[1][2]) === 4, '第二次到货日/数量不符：' + brief(hist[1]));
+    need(String(hist[0][3]).indexOf(srvToday) === 0, '入库记录应带录入时间：' + brief(hist[0]));
+    return '领料日期 + 两行到货历史（' + hist.map(x => x[0]).join(' / ') + '）';
+  });
+
+  await step('materials', 'P4-6-C 出库列表按出库日倒序（补录单不再排最前）', async () => {
+    const m = await p4Mat('O', 100);
+    const r = await p4Req(m.id, 20, p4D4);
+    needOk(await p4Confirm(r.id, m.id, 20, p4D4), 'P4-6-C confirm');
+    const oOld = await p4Out(m.id, 1, { outDate: p4D4 });
+    needOk(oOld, 'P4-6-C 补录 ' + p4D4 + ' 出库');
+    const oNew = await p4Out(m.id, 1, {});
+    needOk(oNew, 'P4-6-C 今天出库');
+    const list = needOk(await api('GET', '/api/materialOutbound/orders?project=' + encodeURIComponent(P4PJ), { token }), 'orders');
+    const ids = (list || []).map(x => x.id);
+    const iNew = ids.indexOf(oNew.data.data.id), iOld = ids.indexOf(oOld.data.data.id);
+    need(iNew >= 0 && iOld >= 0 && iNew < iOld, '今天的单应排在补录单之前：' + brief(ids.slice(0, 5)));
+    return 'outDate 倒序 · 今天在前、补录在后';
   });
 
   /* ---------- 汇总 ---------- */

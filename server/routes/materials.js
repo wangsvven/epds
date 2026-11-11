@@ -149,6 +149,13 @@ function reqUsedQty(reqId, materialId) {
   });
   return roundQty(used);
 }
+// P4-6：出库单默认按「出库日」倒序，同一天按单号流水倒序（补录单不再因今天录入排最前）
+function byOutDateDesc(a, b) {
+  const da = String((a && a.outDate) || '').slice(0, 10);
+  const db = String((b && b.outDate) || '').slice(0, 10);
+  if (da !== db) return db.localeCompare(da);
+  return String((b && b.outNo) || '').localeCompare(String((a && a.outNo) || ''));
+}
 // 出库单读侧补关联：明细行补来源领料单号、单头补计划名称（按当前数据解析，不落库快照）
 function withOutboundLinks(list) {
   const reqNoMap = {};
@@ -165,7 +172,7 @@ function withOutboundLinks(list) {
 app.get('/api/materialOutbound/orders', (req, res) => {
   const project = String(req.query.project || '');
   const list = DB.materialOutbound.filter(o => !o.deleted && (!project || o.project === project))
-    .slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    .slice().sort(byOutDateDesc);
   res.json(withOutboundLinks(list));
 });
 // P1：以该领料单为来源的出库单（含已作废，带状态标记）
@@ -175,7 +182,7 @@ app.get('/api/materialRequisitions/:id/outbounds', (req, res) => {
   const list = DB.materialOutbound
     .filter(o => !o.deleted && (o.items || []).some(it => it && it.requisitionId === rec.id))
     .slice()
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    .sort(byOutDateDesc);
   res.json(withOutboundLinks(list));
 });
 // P1：按计划汇总已关联出库的净出库（材料编码 + 描述维度；有效单领取 − 归还，作废单计 0）
@@ -927,10 +934,27 @@ app.get('/api/materialRequisitions/:id/download', (req, res) => {
   const docUnit = requisitionUnitName(rec);
   aoa.push([(docUnit ? docUnit + '过渡仓代保管物资领料单' : '物资领料单'), '', '', '', '', '', '']);
   aoa.push(['项目部门：', '', '', '', '', '', '']);
+  // P4-6：补领料日期与单号（单号日期即开单日，两者都应能在打印表上看到）
+  aoa.push(['领料日期：' + (rec.reqDate || '') + '　　领料单号：' + (rec.reqNo || '') + (rec.correctedFromNo ? '　　更正自：' + rec.correctedFromNo : ''), '', '', '', '', '', '']);
   aoa.push(['序号', '物料编码', '物料描述', '计量单位', '数量', '项目名称', '备注']);
   rec.items.forEach((it, i) => {
     aoa.push([String(i + 1), it.code, it.description, it.unit, it.qty, it.project, it.orderNo === '-' ? '' : it.orderNo]);
   });
+  // 按次列出入库历史（每一次 confirm 一块，整单一个到货日；待入库单不虚构）
+  const hist = Array.isArray(rec.history) ? rec.history : [];
+  if (hist.length) {
+    aoa.push(['', '', '', '', '', '', '']);
+    aoa.push(['入库记录（按次）', '', '', '', '', '', '']);
+    aoa.push(['到货日期', '物料描述', '本次数量', '录入时间', '', '', '']);
+    hist.forEach(h => {
+      const day = String((h && h.arrivalDate) || (h && h.at) || '').slice(0, 10);
+      const at = String((h && h.at) || '');
+      (h.rows || []).forEach(r => {
+        const it = rec.items.find(x => x.materialId === r.materialId) || {};
+        aoa.push([day, it.description || '', r.thisQty, at, '', '', '']);
+      });
+    });
+  }
   for (let i = 0; i < 5; i++) aoa.push(['', '', '', '', '', '', '']);
   aoa.push(['项目部门负责人：                                    项目部门分管领导：                                            领料人：                                      库管员：    ', '', '', '', '', '', '']);
   aoa.push(['说明：备注栏填写原订单号。', '', '', '', '', '', '']);
@@ -938,6 +962,7 @@ app.get('/api/materialRequisitions/:id/download', (req, res) => {
   ws['!merges'] = [
     { s: { c: 0, r: 0 }, e: { c: 6, r: 0 } },
     { s: { c: 0, r: 1 }, e: { c: 6, r: 1 } },
+    { s: { c: 0, r: 2 }, e: { c: 6, r: 2 } },
     { s: { c: 0, r: aoa.length - 2 }, e: { c: 6, r: aoa.length - 2 } },
     { s: { c: 0, r: aoa.length - 1 }, e: { c: 6, r: aoa.length - 1 } }
   ];

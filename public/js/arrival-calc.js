@@ -69,6 +69,9 @@
     };
   }
 
+  /* recentArrivals：入库事件按「到货日」倒序（P4-6）。
+   * 到货日取 history.arrivalDate，缺省回退 history.at 的日期（双读兼容尚未迁到新字段的库）；
+   * 录入时间仍保留在 at，供界面同时展示「到货日 + 录入时间」。 */
   function recentArrivals(requisitions, projectNames, limit) {
     const set = nameSet(projectNames);
     const out = [];
@@ -80,10 +83,12 @@
       ps.forEach(p => { if (set.has(p)) inPlan = true; });
       if (!inPlan) return;
       (rec.history || []).forEach(h => {
+        const day = String((h && h.arrivalDate) || (h && h.at) || '').slice(0, 10);
         (h.rows || []).forEach(r => {
           const it = items.find(x => x.materialId === r.materialId) || {};
           out.push({
             at: h.at || '',
+            arrivalDate: day,
             reqNo: rec.reqNo || '',
             description: it.description || '',
             code: it.code || '',
@@ -95,7 +100,10 @@
         });
       });
     });
-    out.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    out.sort((a, b) => {
+      if (a.arrivalDate !== b.arrivalDate) return String(b.arrivalDate).localeCompare(String(a.arrivalDate));
+      return String(b.at).localeCompare(String(a.at));
+    });
     return out.slice(0, limit || 50);
   }
 
