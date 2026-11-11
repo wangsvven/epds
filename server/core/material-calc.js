@@ -43,9 +43,16 @@ function materialStatus(m) {
 
 /* ---------- 按业务日期回放库存（P4-4） ----------
  * 口径：以材料行 id（不是编码）为准，把该材料的入库（arrivalDate）、出库（outDate）、
- * 归还（returnDate）摆到时间轴上，从涉及的最早业务日起逐日累加，任一天可用 < 0 即拒绝。
+ * 归还（returnDate）摆到时间轴上，逐日累加，任一天可用 < 0 即拒绝。
  * 同日顺序固定为「先入库/归还，后出库」：同一天先入后出必须能过，先出后入必须被拒。
  * 作废的领料单、作废的出库单都不产生事件（其数量已经从材料账上冲销）。
+ *
+ * 期初余额（openingAvailable / openingDate / openingAt）：
+ *   迁移那一刻按「已到 − 有效出库净额」给每条材料写死一个期初值，回放从期初起算；
+ *   创建时间不晚于 openingAt 的流水已经包含在期初里，不再重复参与判定——老账里的历史负数
+ *   从此不卡新单，问题留给 P0-4 报告人工处理。
+ *   期初之前（业务日 < openingDate）后补的新单并入期初基数，不做负库存判定。
+ *
  * 只算、不写库；extraEvents 用于把「即将写入、尚未 saveDB」的变动纳入试算：
  *   { date, kind: 'in'|'out', qty, refNo?, self?, label? }，冲销用负数 kind:'in'。
  */
@@ -53,6 +60,10 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 function dayPart(v) {
   const s = String(v == null ? '' : v).slice(0, 10);
   return DAY_RE.test(s) ? s : '';
+}
+function timePart(v) {
+  const s = String(v == null ? '' : v).trim().slice(0, 16);
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s) ? s : '';
 }
 function eventsOf(materialId) {
   const DB = DB_();
@@ -66,7 +77,7 @@ function eventsOf(materialId) {
       if (qty <= 0) return;
       const d = dayPart(h.arrivalDate) || dayPart(h.at) || dayPart(r.confirmedAt) || dayPart(r.reqDate);
       if (!d) return; // 没有可用日期的事件不参与回放（迁移已保证新库都有）
-      out.push({ date: d, kind: 'in', qty, refNo: r.reqNo || '', self: false });
+      out.push({ date: d, kind: 'in', qty, refNo: r.reqNo || '', self: false, at: timePart(h.at) || timePart(r.confirmedAt) });
     });
   });
   (DB.materialOutbound || []).forEach(o => {
@@ -75,35 +86,51 @@ function eventsOf(materialId) {
     if (!it) return;
     const d = dayPart(o.outDate);
     const qty = Number(it.qty) || 0;
-    if (d && qty > 0) out.push({ date: d, kind: 'out', qty, refNo: o.outNo || '', self: false });
+    if (d && qty > 0) out.push({ date: d, kind: 'out', qty, refNo: o.outNo || '', self: false, at: timePart(o.createdAt) });
     (o.returns || []).forEach(x => {
       const row = (x && x.rows || []).find(y => y && y.materialId === materialId);
       const rq = Number(row && row.qty) || 0;
       if (rq <= 0) return;
       const rd = dayPart(x.returnDate) || d;
       if (!rd) return;
-      out.push({ date: rd, kind: 'in', qty: rq, refNo: o.outNo || '', self: false });
+      out.push({ date: rd, kind: 'in', qty: rq, refNo: o.outNo || '', self: false, at: timePart(x.at) });
     });
   });
   return out;
 }
 function replayAvailability(materialId, extraEvents) {
-  const events = eventsOf(materialId);
+  const DB = DB_();
+  const mat = (DB.materials || []).find(x => x && x.id === materialId);
+  const openingDate = dayPart(mat && mat.openingDate);
+  const openingAt = timePart(mat && mat.openingAt);
+  const opening = roundQty(Number(mat && mat.openingAvailable) || 0);
+  let events = eventsOf(materialId);
   (extraEvents || []).forEach(e => {
     const d = dayPart(e.date);
     const qty = Number(e.qty) || 0;
     if (!d || !qty) return;
     events.push({
       date: d, kind: e.kind === 'out' ? 'out' : 'in', qty,
-      refNo: String(e.refNo || ''), self: !!e.self, label: String(e.label || '')
+      refNo: String(e.refNo || ''), self: !!e.self, label: String(e.label || ''), at: ''
     });
   });
+  // 期初：截止时刻之前的流水已含在 openingAvailable 里；期初之前后补的流水并入基数（不判负）
+  let base = opening;
+  if (openingDate) {
+    const kept = [];
+    events.forEach(e => {
+      if (openingAt && e.at && e.at <= openingAt) return; // 已含在期初
+      if (e.date < openingDate) { base = roundQty(base + (e.kind === 'in' ? e.qty : -e.qty)); return; }
+      kept.push(e);
+    });
+    events = kept;
+  }
   events.sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
     if (a.kind !== b.kind) return a.kind === 'in' ? -1 : 1;
     return 0;
   });
-  let avail = 0, i = 0;
+  let avail = base, i = 0;
   while (i < events.length) {
     const date = events[i].date;
     // 当日先入（含归还、作废冲销负数）

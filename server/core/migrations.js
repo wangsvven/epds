@@ -154,7 +154,7 @@ const MIGRATIONS = [
         if (!r.reqDate) {
           // 单号日期 → createdAt 日期 → 今天（兜底只应对 createdAt 缺失的异常记录，正常库不会走到）
           let d = fromNo(r.reqNo, 'LL-') || dayOf(r.createdAt);
-          if (!d) { d = today; fallback++; }
+          if (!d) { d = today; fallback++; r.bizDateFallback = true; }
           r.reqDate = d; fReq++;
         }
         (r.history || []).forEach(h => {
@@ -168,7 +168,7 @@ const MIGRATIONS = [
         if (!o.outDate) {
           // 只认单号日期，绝不用 workDate（作业日）冒充出库日
           let d = fromNo(o.outNo, 'OUT-') || dayOf(o.createdAt);
-          if (!d) { d = today; fallback++; }
+          if (!d) { d = today; fallback++; o.bizDateFallback = true; }
           o.outDate = d; fOut++;
         }
         (o.returns || []).forEach(x => {
@@ -180,7 +180,59 @@ const MIGRATIONS = [
       console.log('[migrate] 业务日期回填：领料单 reqDate ' + fReq + ' / 入库 arrivalDate ' + fArr
         + ' / 出库 outDate ' + fOut + ' / 归还 returnDate ' + fRet
         + '；存量标记 领料 ' + markRq + ' 张、出库 ' + markOb + ' 张'
-        + (fallback ? '；兜底用今天 ' + fallback + ' 处（缺 createdAt，请人工复核）' : ''));
+        + (fallback ? '；兜底用今天 ' + fallback + ' 处并打 bizDateFallback=true（缺单号日期且缺 createdAt，请人工复核）' : ''));
+      return true;
+    }
+  }
+  ,
+  /* ---------- 迁移 4：材料期初余额（按日回放的起点） ----------
+   * 背景：存量账本来就可能不平（P0-4 检出的负可用、手工已到等）。如果按日回放把老流水全算进去，
+   * 存量物料会被历史某天的负数永远卡住，上线第一天就出不了库。
+   * 做法：迁移这一刻按「已到 − 有效出库净额」给每条材料写死一个期初值（当前可用口径，负数按 0 记），
+   * 连同截止日 openingDate 与截止时刻 openingAt 一起落在材料行上，可追溯；
+   * 回放从期初起算，截止时刻之前的流水视为已含在期初，不再参与负库存判定。
+   * 老账的问题继续由 P0-4 只读报告暴露、人工处理，不让规则去卡业务。
+   * 幂等：只给还没有 openingAvailable 的材料写，重复执行不改已写值。 */
+  {
+    id: '20261111-material-opening-balance',
+    desc: '材料期初余额：按迁移时刻的当前可用数写 openingAvailable / openingDate / openingAt',
+    needs(DB) {
+      const ms = Array.isArray(DB.materials) ? DB.materials : [];
+      return ms.some(m => m && m.openingAvailable === undefined);
+    },
+    run(DB) {
+      const ms = Array.isArray(DB.materials) ? DB.materials : [];
+      const obs = Array.isArray(DB.materialOutbound) ? DB.materialOutbound : [];
+      const round = n => Math.round((Number(n) || 0) * 10000) / 10000;
+      // 有效出库净额（按 工程 + 材料 归集，与 GET /api/materialOutbound/stock 同口径）
+      const net = {};
+      obs.forEach(o => {
+        if (!o || o.deleted || o.status !== '有效') return;
+        (o.items || []).forEach(it => {
+          if (!it || !it.materialId) return;
+          const k = String(o.project || '') + '\u0001' + it.materialId;
+          const s = net[k] || (net[k] = { taken: 0, returned: 0 });
+          s.taken = round(s.taken + (Number(it.qty) || 0));
+          s.returned = round(s.returned + (Number(it.returned) || 0));
+        });
+      });
+      const p2 = n => String(n).padStart(2, '0');
+      const d = new Date(Date.now() + 8 * 3600 * 1000);
+      const today = d.getUTCFullYear() + '-' + p2(d.getUTCMonth() + 1) + '-' + p2(d.getUTCDate());
+      const nowStr = today + ' ' + p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes());
+      let n = 0, neg = 0;
+      ms.forEach(m => {
+        if (!m || m.openingAvailable !== undefined) return;
+        const k = String(m.project || '') + '\u0001' + m.id;
+        const s = net[k] || { taken: 0, returned: 0 };
+        const raw = round(round(m.qtyArrived) - round(s.taken - s.returned));
+        if (raw < 0) neg++;
+        m.openingAvailable = Math.max(0, raw);
+        m.openingDate = today;
+        m.openingAt = nowStr;
+        n++;
+      });
+      console.log('[migrate] 材料期初余额已写入 ' + n + ' 条（截止 ' + nowStr + (neg ? '，其中 ' + neg + ' 条老账为负按 0 记' : '') + '）；回放自此往后算');
       return true;
     }
   }

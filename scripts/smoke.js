@@ -3979,6 +3979,38 @@ async function runSmoke() {
     return '存量作废成功 · P0-2 仍拦有效占用';
   });
 
+  await step('materials', 'P4-4-H 期初余额：老账历史负数不再卡新单', async () => {
+    const m = await p4Mat('L', 100);
+    const r1 = await p4Req(m.id, 10, p4D4);
+    needOk(await p4Confirm(r1.id, m.id, 10, p4D4), 'P4-4-H confirm1');
+    const o = await p4Out(m.id, 8, { outDate: dayOff(p4D4, 1) });
+    needOk(o, 'P4-4-H 出库 8');
+    const r2 = await p4Req(m.id, 10, dayOff(p4D4, 2));
+    needOk(await p4Confirm(r2.id, m.id, 10, dayOff(p4D4, 2)), 'P4-4-H confirm2');
+    // 造期初：三张单的创建时间压到当天 00:10，期初截止 00:20、余额 12 → 老账（含 8 日负）全部含在期初
+    const port = Number(String(base).split(':').pop());
+    const early = srvToday + ' 00:10', cut = srvToday + ' 00:20';
+    await stopServer();
+    const p4db = path.join(TMP, 'data', 'db.json');
+    const db2 = JSON.parse(fs.readFileSync(p4db, 'utf8'));
+    const mm = db2.materials.find(x => x.id === m.id);
+    mm.openingAvailable = 12; mm.openingDate = srvToday; mm.openingAt = cut;
+    db2.materialRequisitions.filter(x => x.id === r1.id || x.id === r2.id).forEach(x => {
+      x.legacy = true; x.createdAt = early; x.confirmedAt = early;
+      (x.history || []).forEach(h => { h.at = early; });
+    });
+    const oo = db2.materialOutbound.find(x => x.id === o.data.data.id);
+    oo.legacy = true; oo.createdAt = early;
+    fs.writeFileSync(p4db, JSON.stringify(db2, null, 2), 'utf8');
+    await startServer(port);
+    // 期初 12：再出 12 恰好放行（老账 8 日的负不再参与），再出 1 拒
+    const ok1 = await p4Out(m.id, 12, { outDate: srvToday });
+    needOk(ok1, '期初 12 应可出 12（老账负数被期初吸收）');
+    const bad = await p4Out(m.id, 1, { outDate: srvToday });
+    need(bad.status === 400 && bad.data.date === srvToday, '期初用尽后再出 1 应被拒：' + brief(bad.data));
+    return '期初 12 → 出 12 放行 · 再出 1 拒';
+  });
+
   /* ---------- 汇总 ---------- */
   await stopServer();
   const pass = results.filter(r => r.ok).length;
