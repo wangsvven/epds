@@ -1060,6 +1060,30 @@ async function runSmoke() {
     return '下拉 id+姓名 · 提交 workerId · 姓名兼容';
   });
 
+  /* ---------- P0-4 存量不一致只读检测（接口与权限） ---------- */
+  await step('materials', 'P0-4 权限：非超管 GET 检测 → 403（与删除导入批次同口径）', async () => {
+    const lg = needOk(await api('POST', '/api/login', { body: { username: 'smoke_cly', password: 'Smoke@2026' } }), 'login cly');
+    const r = await api('GET', '/api/materials/audit/inconsistencies?project=' + encodeURIComponent(MP_C), { token: lg.token });
+    need(r.status === 403, '应 403，实际 ' + r.status + ' ' + brief(r.data));
+    need(/仅超级用户/.test(r.data.error), '文案不符：' + r.data.error);
+    return '403 · 仅超级用户';
+  });
+
+  await step('materials', 'P0-4-B 干净项目 → 该项目下结果为空', async () => {
+    const cleanProject = 'ZT测试-干净检测项目';
+    needOk(await api('POST', '/api/projects', { token, body: { name: cleanProject, batch: '2026-11', substation: '冒烟供电所', workType: '配网', category: '自有工程' } }), 'projects POST clean');
+    const m = needOk(await api('POST', '/api/materials', {
+      token, body: { project: cleanProject, source: '甲供材料', description: 'ZT测试-干净物料', qtyRequired: 5, unit: '个', code: 'ZT-CLEAN-01', orderNo: 'PO-ZT-CLEAN' }
+    }), 'materials POST clean');
+    const rows = needOk(await api('GET', '/api/materials/audit/inconsistencies?project=' + encodeURIComponent(cleanProject), { token }), 'audit clean');
+    need(Array.isArray(rows), '检测应返回数组：' + brief(rows));
+    need(rows.length === 0, '干净项目不应有检出，实际 ' + brief(rows));
+    // 该项目只有这一条材料，且未到货、无出库、无领料
+    const one = needOk(await api('GET', '/api/materials/' + m.id, { token }), 'material clean');
+    need(one.qtyArrived === 0, '干净物料已到应为 0');
+    return '0 条检出';
+  });
+
   /* ---------- 计划编号（纯函数与前端共用） ---------- */
   const planNo = (() => {
     const vm = require('vm');
@@ -3252,6 +3276,86 @@ async function runSmoke() {
       && /\.ob-filters \{ display:grid !important; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(html),
       '≤768px 四框应改两列网格，避免被压成「在..」「全..」');
     return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列';
+  });
+
+  /* ---------- P0-4 存量不一致：脏数据夹具 + 只读性（放最后，需重启临时服务） ---------- */
+  await step('materials', 'P0-4-A 存量脏数据：八类全命中 + 检测前后数据零变化', async () => {
+    const MP_AUD = 'ZT测试-存量脏数据';
+    const port = Number(new URL(base).port);
+    // 1) 停服 → 直接改临时库（模拟历史遗留脏数据；这些形态新接口已无法造出）→ 重启
+    await stopServer();
+    const dbFile = path.join(TMP, 'data', 'db.json');
+    const db = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+    const mkMat = (id, over) => Object.assign({
+      id, createdAt: '2026-11-11T00:00:00.000Z', project: MP_AUD,
+      description: 'ZT测试-存量-' + id, qtyRequired: 5, qtyArrived: 0, qtyNotArrived: 5,
+      unit: '根', code: 'ZT-AUD-' + id, orderNo: 'PO-ZT-AUD-' + id,
+      source: '甲供材料', sourceNote: '', inWeeklyPlan: true,
+      modifyReason: '', modifiedAt: '', status: '未到库', deleted: false
+    }, over || {});
+    db.materials.push(
+      mkMat('a1', { qtyArrived: 6 }),                                        // 已到 6 但无入库记录 + 已到 > 应到
+      mkMat('a2', { qtyRequired: 0, qtyNotArrived: 0 }),                     // 应到 0
+      mkMat('a3'),                                                           // 无到货却已出库 → 负可用 / 库存隐藏
+      mkMat('a4', { qtyRequired: 4, qtyArrived: 4, qtyNotArrived: 0 }),      // 出库占满 → 库存隐藏
+      mkMat('a5'),                                                           // 作废领料单 + 有效出库
+      mkMat('a7', { code: 'ZT-DUP-PO', orderNo: 'PO-ZT-DUP' }),              // 同编码同订单两行
+      mkMat('a8', { code: 'ZT-DUP-PO', orderNo: 'PO-ZT-DUP' })
+    );
+    db.materialRequisitions.push({
+      id: 'ztaudr1', reqNo: 'LL-ZTAUDIT-0001', projects: [MP_AUD],
+      items: [{ materialId: 'a5', code: 'ZT-AUD-a5', description: 'ZT测试-存量-a5', unit: '根', qty: 3 }],
+      status: '已作废', createdAt: '2026-11-11 09:00', confirmRows: null, voidDeduct: 0, deleted: false
+    });
+    const mkOut = (id, no, mid, qty, recv) => ({
+      id, outNo: no, project: MP_AUD, receiver: recv, status: '有效', createdAt: '2026-11-11 10:00',
+      items: [{ materialId: mid, code: 'ZT-AUD-' + mid, description: 'ZT测试-存量-' + mid, unit: '根', qty, returned: 0 }],
+      returns: [], compensated: 0, deleted: false
+    });
+    db.materialOutbound.push(
+      mkOut('ztaudo1', 'OUT-ZTAUDIT-0001', 'a3', 2, '查无此人甲'),
+      mkOut('ztaudo2', 'OUT-ZTAUDIT-0002', 'a4', 4, '查无此人乙'),
+      mkOut('ztaudo3', 'OUT-ZTAUDIT-0003', 'a5', 3, '查无此人丙')
+    );
+    fs.writeFileSync(dbFile, JSON.stringify(db, null, 2), 'utf8');
+    await startServer(port);
+    if ((await api('GET', '/api/me', { token })).status === 401) {
+      token = needOk(await api('POST', '/api/login', { body: { username: 'admin', password: 'admin123' } }), 'relogin').token;
+    }
+    // 2) 只读性：检测前后 db.json 逐字节一致
+    const before = fs.readFileSync(dbFile);
+    const rows = needOk(await api('GET', '/api/materials/audit/inconsistencies?project=' + encodeURIComponent(MP_AUD), { token }), 'audit dirty');
+    const rowsAll = needOk(await api('GET', '/api/materials/audit/inconsistencies', { token }), 'audit all');
+    const after = fs.readFileSync(dbFile);
+    need(before.equals(after), '检测接口应为纯只读：db.json 在检测前后发生变化');
+    need(rowsAll.length >= rows.length, '全库检测条数应不少于单项目检测');
+    // 3) 八类全命中
+    const types = new Set(rows.map(r => r.type));
+    ['arrived_without_inbound', 'arrived_gt_required', 'required_not_positive', 'voided_req_with_active_out',
+      'negative_available', 'stock_hidden_but_outbound_active', 'receiver_not_admitted', 'duplicate_code_po']
+      .forEach(t => need(types.has(t), '未命中类型 ' + t + '（实际：' + Array.from(types).join(',') + '）'));
+    // 4) 关键字段与数值
+    const one = (t, mid) => rows.find(r => r.type === t && r.materialId === mid);
+    const a1 = one('arrived_without_inbound', 'a1');
+    need(a1 && a1.qty.arrived === 6 && a1.qty.inboundSum === 0 && a1.qty.diff === 6,
+      'a1 差额应为 6：' + brief(a1));
+    need(one('arrived_gt_required', 'a1'), 'a1 应命中 已到 > 应到');
+    need(one('required_not_positive', 'a2'), 'a2 应命中 应到 ≤ 0');
+    const v5 = one('voided_req_with_active_out', 'a5');
+    need(v5 && v5.docNos.indexOf('LL-ZTAUDIT-0001') > -1 && v5.docNos.indexOf('OUT-ZTAUDIT-0003') > -1,
+      'a5 应同时列作废领料单号与有效出库单号：' + brief(v5));
+    const n3 = one('negative_available', 'a3');
+    need(n3 && n3.qty.available === -2, 'a3 可用应为 -2：' + brief(n3));
+    need(one('stock_hidden_but_outbound_active', 'a4'), 'a4 应命中 库存隐藏但出库有效');
+    const rn = rows.filter(r => r.type === 'receiver_not_admitted');
+    need(rn.length === 3 && rn.every(r => r.receiver && r.docNos.length),
+      '领取人未准入应 3 条且带出库单号：' + brief(rn));
+    const dup = one('duplicate_code_po', 'a7');
+    need(dup && dup.qty.count === 2 && dup.qty.rows.length === 2 && dup.qty.rows.every(x => x.id && 'qtyRequired' in x),
+      '同编码同订单应 1 组 2 行并列出各行 id/应到：' + brief(dup));
+    need(rows.every(r => r.type && r.project && 'materialId' in r && 'docNos' in r && 'qty' in r && r.advice),
+      '每条结果都应含 type/项目/材料/相关单号/关键数量/处置建议');
+    return '八类命中 · 检测前后 db.json 字节一致 · ' + rows.length + ' 条';
   });
 
   /* ---------- 汇总 ---------- */

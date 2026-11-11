@@ -205,6 +205,157 @@ app.delete('/api/materialImports/:id', (req, res) => {
 // 与 public/js/views/materials.js 的同名枚举必须保持一致；scripts/smoke.js 有逐项相等断言防漂移。
 const SOURCE_TYPES = ['ERP采购申请', '甲供材料', '库存调拨', '乙供/自购', '运检项目'];
 
+/* ---------- 存量不一致只读检测（P0-4） ----------
+ * 纯只读：不写任何集合、不生成批次；权限与「删除导入批次」同口径（仅超级用户）。
+ * 口径：有效出库 = 未删除且 status=有效（作废单已补回，不计）；确认入库合计 = 未删除且未作废领料单的 confirmRows 累计。
+ * 处置建议只是文案，接口不提供任何一键修复/回滚入口。 */
+// 有效出库按材料聚合：materialId → [{ out, item, net }]，net = 领取 − 归还（只收净占用 > 0 的行）
+function activeOutByMaterial(project) {
+  const map = new Map();
+  DB.materialOutbound.forEach(o => {
+    if (!o || o.deleted || o.status !== '有效') return;
+    if (project && o.project !== project) return;
+    (o.items || []).forEach(it => {
+      if (!it || !it.materialId) return;
+      const net = roundQty(roundQty(it.qty) - roundQty(it.returned));
+      if (net <= 0) return;
+      if (!map.has(it.materialId)) map.set(it.materialId, []);
+      map.get(it.materialId).push({ out: o, item: it, net });
+    });
+  });
+  return map;
+}
+// 确认入库累计：materialId → { sum, reqNos }
+function inboundByMaterial() {
+  const map = new Map();
+  DB.materialRequisitions.forEach(r => {
+    if (!r || r.deleted || r.status === '已作废') return;
+    (r.confirmRows || []).forEach(cr => {
+      if (!cr || !cr.materialId) return;
+      const q = roundQty(cr.thisQty);
+      if (!(q > 0)) return;
+      const e = map.get(cr.materialId) || { sum: 0, reqNos: [] };
+      e.sum = roundQty(e.sum + q);
+      if (r.reqNo && e.reqNos.indexOf(r.reqNo) < 0) e.reqNos.push(r.reqNo);
+      map.set(cr.materialId, e);
+    });
+  });
+  return map;
+}
+// 已作废领料单涉及的材料：materialId → [reqNo]
+function voidedReqByMaterial() {
+  const map = new Map();
+  DB.materialRequisitions.forEach(r => {
+    if (!r || r.deleted || r.status !== '已作废') return;
+    (r.items || []).forEach(it => {
+      if (!it || !it.materialId) return;
+      const arr = map.get(it.materialId) || [];
+      if (r.reqNo && arr.indexOf(r.reqNo) < 0) arr.push(r.reqNo);
+      map.set(it.materialId, arr);
+    });
+  });
+  return map;
+}
+app.get('/api/materials/audit/inconsistencies', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: '仅超级用户可以查看存量不一致检测' });
+  const project = String(req.query.project || '').trim();
+  const todayStr = bjStr().slice(0, 10);
+  const rows = [];
+  const add = (type, m, docNos, qty, advice) => rows.push({
+    type, project: m.project, materialId: m.id,
+    code: String(m.code || ''), description: String(m.description || ''),
+    docNos: docNos || [], qty: qty || {}, advice
+  });
+  const inbound = inboundByMaterial();
+  const actives = activeOutByMaterial(project);
+  const voided = voidedReqByMaterial();
+  const materials = DB.materials.filter(aliveFilter()).filter(m => !project || m.project === project);
+
+  materials.forEach(m => {
+    const required = roundQty(m.qtyRequired);
+    const arrived = roundQty(m.qtyArrived);
+    const inb = inbound.get(m.id) || { sum: 0, reqNos: [] };
+    const acts = actives.get(m.id) || [];
+    const net = roundQty(acts.reduce((s, x) => s + x.net, 0));
+    const outNos = [];
+    acts.forEach(x => { const no = x.out.outNo || ''; if (no && outNos.indexOf(no) < 0) outNos.push(no); });
+    const avail = roundQty(arrived - net);
+    if (arrived > 0 && roundQty(arrived - inb.sum) !== 0) {
+      add('arrived_without_inbound', m, inb.reqNos, { required, arrived, inboundSum: inb.sum, diff: roundQty(arrived - inb.sum) },
+        '已到与入库记录对不上：先核对领料/入库单据，缺确认的补确认，确无来源的按实际到货补录入库或调整应到');
+    }
+    if (arrived > required) {
+      add('arrived_gt_required', m, [], { required, arrived, over: roundQty(arrived - required) },
+        '已到大于应到：核对是否应到录错（改应到需填原因），到货确有超量时调整应到');
+    }
+    if (required <= 0) {
+      add('required_not_positive', m, [], { required },
+        '应到数量不为正数：按实际需用数量修正应到（修改需填原因）');
+    }
+    const vreqs = voided.get(m.id) || [];
+    if (vreqs.length && net > 0) {
+      add('voided_req_with_active_out', m, vreqs.concat(outNos), { arrived, net },
+        '领料单已作废但仍有效出库占用：先归还或作废占用出库，再核对库存');
+    }
+    if (avail < 0) {
+      add('negative_available', m, outNos, { arrived, net, available: avail },
+        '可用库存为负：先归还或作废占用出库，再视需要补录入库或调整应到');
+    }
+    if (net > 0 && avail <= 0) {
+      add('stock_hidden_but_outbound_active', m, outNos, { arrived, net, available: avail },
+        '材料在库存口径下已不显示但出库仍有效：先归还/作废出库，再核对入库是否漏记');
+    }
+  });
+
+  // 领取人不是已准入工人（含查无此人）：逐材料行列出，便于按材料核对
+  DB.materialOutbound.forEach(o => {
+    if (!o || o.deleted || o.status !== '有效') return;
+    if (project && o.project !== project) return;
+    const name = String(o.receiver || '').trim();
+    const ok = !!name && DB.workers.some(w => String(w.name || '').trim() === name && isWorkerAdmitted(w, todayStr));
+    if (ok) return;
+    const its = (o.items || []).filter(it => it && it.materialId);
+    (its.length ? its : [{}]).forEach(it => {
+      rows.push({
+        type: 'receiver_not_admitted', project: o.project, materialId: it.materialId || '',
+        code: String(it.code || ''), description: String(it.description || ''),
+        docNos: [o.outNo || ''], receiver: name,
+        qty: {
+          qty: roundQty(it.qty), returned: roundQty(it.returned),
+          net: it.qty === undefined ? 0 : roundQty(roundQty(it.qty) - roundQty(it.returned))
+        },
+        advice: '领取人不在已准入工人名单：新单请从名单选择；存量单据只做登记，不自动改也不作废'
+      });
+    });
+  });
+
+  // 同项目 + 同物料编码 + 同采购订单号 多行
+  const groups = new Map();
+  materials.forEach(m => {
+    const code = String(m.code || '').trim();
+    if (!code) return;
+    const key = m.project + '\u0001' + code + '\u0001' + String(m.orderNo || '').trim();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  });
+  groups.forEach(g => {
+    if (g.length < 2) return;
+    const orderNo = String(g[0].orderNo || '').trim();
+    rows.push({
+      type: 'duplicate_code_po', project: g[0].project, materialId: g[0].id,
+      code: String(g[0].code || ''), description: g.map(x => String(x.description || '')).join(' / '),
+      docNos: orderNo ? [orderNo] : [],
+      qty: {
+        count: g.length,
+        rows: g.map(x => ({ id: x.id, qtyRequired: roundQty(x.qtyRequired), arrived: roundQty(x.qtyArrived) }))
+      },
+      advice: '同项目同编码同采购订单号存在多行：核对是否重复录入，确认重复的删除多余行或合并应到数量'
+    });
+  });
+
+  res.json(rows);
+});
+
 app.get('/api/materials', (req, res) => res.json(DB.materials.filter(aliveFilter()).map(withGen)));
 app.get('/api/materials/:id', (req, res) => {
   const it = DB.materials.find(x => x.id === req.params.id);
