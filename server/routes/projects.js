@@ -10,6 +10,7 @@ const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO, aliveFilter, fmtNow, buildStoreZip } = require('../core/util');
 const { resolveDocPath } = require('../core/doc-templates');
+const { isAdmin } = require('../core/auth');
 
 // ---------- 项目详情：资料管理（设计图纸/奥维地图/现场照片/规范图纸） ----------
 // 需在通用 CRUD 之前注册：DELETE /:id 覆盖工厂版本以清理上传文件
@@ -36,6 +37,39 @@ function projectRefsOf(p) {
   add('竣工资料', (DB.completionDocuments || []).filter(c => !c.deleted && (c.projectId === p.id || inNames(c.project))));
   return refs;
 }
+// ---------- P3-7 项目重复 id 只读诊断 ----------
+// 按 id 分组列出存在多条记录/多个名称的项目 id，每条记录带「按项目名计」的材料数与计划数两个维度。
+// 只诊断、不修数据（修复方案不在本批）；权限与材料批次删除一致的超管口径。
+app.get('/api/projects/audit/duplicate-ids', (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: '仅超级用户可以查看重复 ID 诊断' });
+  const byId = {};
+  (DB.projects || []).forEach(p => {
+    if (!p || !p.id) return;
+    (byId[p.id] = byId[p.id] || []).push(p);
+  });
+  const data = [];
+  Object.keys(byId).forEach(id => {
+    const rows = byId[id];
+    if (rows.length < 2) return;
+    const names = [...new Set(rows.map(p => String(p.name || '').trim()).filter(Boolean))];
+    data.push({
+      id,
+      count: rows.length,
+      names,
+      records: rows.map(p => {
+        const name = String(p.name || '').trim();
+        return {
+          name,
+          deleted: !!p.deleted,
+          createdAt: p.createdAt || '',
+          materialCount: name ? (DB.materials || []).filter(m => !m.deleted && String(m.project || '') === name).length : 0,
+          planCount: name ? (DB.workPlans || []).filter(w => !w.deleted && String(w.project || '') === name).length : 0
+        };
+      })
+    });
+  });
+  res.json({ ok: true, total: data.length, data });
+});
 app.delete('/api/projects/:id', (req, res) => {
   const p = DB.projects.find(x => x.id === req.params.id);
   if (!p || p.deleted) return res.status(404).json({ error: '未找到项目' });

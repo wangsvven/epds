@@ -19,7 +19,8 @@ const MaterialsView = {
     const SOURCE_TYPES = ['ERP采购申请', '甲供材料', '库存调拨', '乙供/自购', '运检项目'];
     const sourceColors = { 'ERP采购申请': '#3370ff', '甲供材料': '#7c4dbe', '库存调拨': '#0e9e9e', '乙供/自购': '#d48806', '运检项目': '#389e0d' };
     const statusColors = { '全部到库': '#389e0d', '部分到库': '#e6932c', '未到库': '#f56c6c', '已生成领料单': '#3370ff' };
-    const emptyForm = () => ({ project: '', source: '甲供材料', inWeeklyPlan: true, sourceNote: '', description: '', qtyRequired: null, qtyArrived: 0, unit: '', code: '', orderNo: '-', modifyReason: '' });
+    // P3-1：新增材料默认不计入周计划进度（用户仍可手工勾选；存量数据不动）
+    const emptyForm = () => ({ project: '', source: '甲供材料', inWeeklyPlan: false, sourceNote: '', description: '', qtyRequired: null, qtyArrived: 0, unit: '', code: '', orderNo: '-', modifyReason: '' });
     const form = reactive(emptyForm());
 
     async function load() {
@@ -644,7 +645,7 @@ const MaterialsView = {
           <el-table-column prop="unit" label="单位" width="70" />
           <el-table-column label="领料数量" width="190">
             <template #default="{row}">
-              <el-input-number v-model="stagingQty[row.id]" :min="0" :max="Number(row.qtyCanGen) || 0"
+              <el-input-number v-model="stagingQty[row.id]" :min="0" :max="Number(row.qtyCanGen) || 0" :precision="4" :step="0.1"
                 controls-position="right" size="small" class="stg-qty-input" style="width:120px" placeholder="领料数量" />
               <div style="color:var(--text-3);font-size:12px;line-height:18px;margin-top:2px">可继续领料 {{ fmtQty(row.qtyCanGen) }} {{ row.unit }}（应到 {{ fmtQty(row.qtyRequired) }} / 已生成 {{ fmtQty(row.qtyGenerated) }}）</div>
             </template>
@@ -698,7 +699,7 @@ const MaterialsView = {
                 </div>
                 <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ relHist(row).length }} 次</span></div>
                 <el-table v-if="relHist(row).length" :data="relHist(row)" size="small" border>
-                  <el-table-column prop="at" label="入库时间" width="170" />
+                  <el-table-column label="入库时间" width="170"><template #default="{row}">{{ fmtTime(row.at) }}</template></el-table-column>
                   <el-table-column label="本次入库数量" width="120" align="right"><template #default="{row:h}">{{ fmtQty(h.thisQty) }}</template></el-table-column>
                   <el-table-column label="入库情况" width="100" align="center"><template #default="{row:h}"><el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag></template></el-table-column>
                   <el-table-column prop="reason" label="异常原因" min-width="200"><template #default="{row:h}">{{ h.reason || '-' }}</template></el-table-column>
@@ -714,7 +715,7 @@ const MaterialsView = {
           <el-table-column label="明细" width="110">
             <template #default="{row}">{{ (row.items || []).length }} 项 / {{ fmtQty(relItem(row).qty) }}</template>
           </el-table-column>
-          <el-table-column prop="createdAt" label="创建时间" width="170" />
+          <el-table-column label="创建时间" width="170"><template #default="{row}">{{ fmtTime(row.createdAt) }}</template></el-table-column>
           <el-table-column label="状态" width="110">
             <template #default="{row}"><el-tag size="small" :type="relStatusType(row.status)">{{ row.status }}</el-tag></template>
           </el-table-column>
@@ -1059,7 +1060,7 @@ const Requisitions = {
               </div>
               <div class="rq-hist-head">入库记录<span class="rq-hist-n">共 {{ itemHistory(row, it.materialId).length }} 次</span></div>
               <el-table v-if="itemHistory(row, it.materialId).length" :data="itemHistory(row, it.materialId)" size="small" border class="rq-hist-table">
-                <el-table-column prop="at" label="入库时间" width="160" />
+                <el-table-column label="入库时间" width="170"><template #default="{row:h}">{{ fmtTime(h.at) }}</template></el-table-column>
                 <el-table-column label="本次入库数量" width="120" align="right"><template #default="{row:h}">{{ fmtQty(h.thisQty) }}</template></el-table-column>
                 <el-table-column label="入库情况" width="100" align="center"><template #default="{row:h}"><el-tag size="small" :type="h.abnormal ? 'danger' : 'success'">{{ h.abnormal ? '异常' : '正常' }}</el-tag></template></el-table-column>
                 <el-table-column prop="reason" label="异常原因" min-width="200"><template #default="{row:h}">{{ h.reason || '-' }}</template></el-table-column>
@@ -1085,7 +1086,7 @@ const Requisitions = {
       <el-table-column label="明细" width="110">
         <template #default="{row}">{{ row.items.length }} 项 / {{ sumQty(row) }}</template>
       </el-table-column>
-      <el-table-column prop="createdAt" label="创建时间" width="150" />
+      <el-table-column label="创建时间" width="150"><template #default="{row}">{{ fmtTime(row.createdAt) }}</template></el-table-column>
       <el-table-column label="状态" width="90">
         <template #default="{row}"><el-tag size="small" :type="statusType(row.status)">{{ row.status }}</el-tag></template>
       </el-table-column>
@@ -1262,7 +1263,7 @@ const Imports = {
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="importedAt" label="导入时间" width="170" />
+      <el-table-column label="导入时间" width="170"><template #default="{row}">{{ fmtTime(row.importedAt) }}</template></el-table-column>
       <el-table-column prop="fileName" label="文件名" min-width="170" show-overflow-tooltip />
       <el-table-column prop="project" label="项目归属" min-width="230" show-overflow-tooltip />
       <el-table-column label="行数（总/匹配/跳过）" width="170" align="center">
@@ -1422,8 +1423,8 @@ const Outbounds = {
       || String(r.description || '').includes(keyword.value.trim()) || String(r.code || '').includes(keyword.value.trim())));
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
     function onSel(rows) {
+      // P3-2：勾选只决定范围，出库数量默认留空由用户填写（不再自动填可用量）
       selection.value = rows;
-      rows.forEach(r => { if (!(Number(outQty[r.id]) > 0)) outQty[r.id] = Number(r.available) || 0; });
     }
     function isSelected(row) { return selection.value.some(s => s.id === row.id); }
     function sumQty(o) { return (o.items || []).reduce((s, i) => s + (Number(i.qty) || 0), 0); }
@@ -1431,14 +1432,16 @@ const Outbounds = {
 
     function openDlg() {
       if (!selection.value.length) { ElementPlus.ElMessage.info('请先勾选需要出库的材料'); return; }
-      dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: Number(outQty[r.id]) || 0, requisitionId: '' }));
+      // P3-2：未填数量时保持为空（不用 0 占位），提交由前端拦截提示
+      const q0 = v => (v === undefined || v === null || v === '' ? null : Number(v));
+      dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: q0(outQty[r.id]), requisitionId: '' }));
       dlg.workerId = ''; dlg.workPlanId = ''; dlg.workDate = ''; dlg.processName = ''; dlg.visible = true;
     }
     async function submitOut() {
       const w = workers.value.find(x => x.id === dlg.workerId);
       if (!w) { ElementPlus.ElMessage.warning('请选择领取人'); return; }
       for (const r of dlg.rows) {
-        if (!(Number(r.qty) > 0)) { ElementPlus.ElMessage.error('「' + r.description + '」出库数量必须大于 0'); return; }
+        if (!(Number(r.qty) > 0)) { ElementPlus.ElMessage.error('请填写出库数量（' + r.description + '）'); return; }
         if (Number(r.qty) > Number(r.available) + 1e-9) { ElementPlus.ElMessage.error('「' + r.description + '」本次出库 ' + r.qty + ' 超过可用库存 ' + r.available); return; }
       }
       try {
@@ -1700,7 +1703,7 @@ const Outbounds = {
             <el-table-column label="状态" width="90">
               <template #default="{row}"><el-tag size="small" :type="row.status === '有效' ? 'success' : 'info'">{{ row.status }}</el-tag></template>
             </el-table-column>
-            <el-table-column prop="createdAt" label="登记时间" width="160" />
+            <el-table-column label="登记时间" width="160"><template #default="{row}">{{ fmtTime(row.createdAt) }}</template></el-table-column>
             <el-table-column label="操作" width="230">
               <template #default="{row}">
                 <el-button link type="primary" size="small" @click="openOrder(row)">查看</el-button>
@@ -1781,7 +1784,7 @@ const Outbounds = {
         <div>领取人：{{ od.rec.receiver }}</div>
         <div>单据状态：<el-tag size="small" :type="od.rec.status === '有效' ? 'success' : 'info'">{{ od.rec.status }}</el-tag></div>
         <div>补回未归还数量：{{ od.rec.compensated || 0 }}</div>
-        <div>登记时间：{{ od.rec.createdAt }}</div>
+        <div>登记时间：{{ fmtTime(od.rec.createdAt) }}</div>
         <div>关联计划：{{ od.rec.workPlanName || '—' }}</div>
         <div>作业日：{{ od.rec.workDate || '—' }}</div>
         <div>工序 / 工作内容：{{ od.rec.processName || '—' }}</div>
@@ -1809,7 +1812,7 @@ const Outbounds = {
         <div>出库编号：{{ rdlg.rec.outNo }}</div>
         <div>工程：{{ rdlg.rec.project }}</div>
         <div>原领取人：{{ rdlg.rec.receiver }}</div>
-        <div>登记时间：{{ rdlg.rec.createdAt }}</div>
+        <div>登记时间：{{ fmtTime(rdlg.rec.createdAt) }}</div>
       </div>
       <el-table :data="rdlg.rows" size="small" border style="width:100%">
         <el-table-column prop="description" label="材料" min-width="180" />
@@ -1852,7 +1855,7 @@ const Outbounds = {
             <td style="width:90px;background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">出库批次</td>
             <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.outNo }}</td>
             <td style="width:90px;background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">登记时间</td>
-            <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.createdAt }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ fmtTime(pdlg.rec.createdAt) }}</td>
           </tr>
           <tr>
             <td style="background:var(--surface-3);font-weight:600;border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">工程</td>

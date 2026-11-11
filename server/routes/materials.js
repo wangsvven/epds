@@ -538,7 +538,7 @@ app.post('/api/materials', (req, res) => {
     unit: String(b.unit || '').trim(), code: String(b.code || '').trim(),
     orderNo: String(b.orderNo || '').trim() || '-',
     source: String(b.source).trim(), sourceNote: String(b.sourceNote || '').trim(),
-    inWeeklyPlan: b.inWeeklyPlan !== false,
+    inWeeklyPlan: b.inWeeklyPlan === true,   // P3-1：默认不计入周计划进度（显式勾选才计入）
     modifyReason: '', modifiedAt: ''
   };
   item.qtyNotArrived = roundQty(Math.max(0, item.qtyRequired - item.qtyArrived));
@@ -702,7 +702,7 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
         project: r.project, description: r.description,
         qtyRequired: r.qty, qtyArrived: 0, qtyNotArrived: r.qty,
         unit: r.unit, code: r.code, orderNo: r.orderNo, source: r.source,
-        sourceNote: '', inWeeklyPlan: true, modifyReason: '', modifiedAt: ''
+        sourceNote: '', inWeeklyPlan: false, modifyReason: '', modifiedAt: ''   // P3-1：导入行默认不计入
       };
       item.status = materialStatus(item);
       item.deleted = false;
@@ -787,12 +787,32 @@ app.post('/api/requisitions/create', (req, res) => {
   res.json({ ok: true, data: rec });
 });
 
+// P3-4 领料单导出标题的「单位」取值：项目所属单位专用字段 → 项目 substation（属地供电所）
+// → 系统设置企业名称 → ''（兜底为「物资领料单」）。
+// 注：现行项目记录的字段集里没有「所属单位」专用字段（见 projects 集合），这里只做存在性兼容读取，取不到即跳过。
+function requisitionUnitName(rec) {
+  const names = [];
+  (rec.projects || []).forEach(n => names.push(n));
+  (rec.items || []).forEach(it => { if (it && it.project) names.push(it.project); });
+  const uniq = [...new Set(names.map(x => String(x || '').trim()).filter(Boolean))];
+  for (const n of uniq) {
+    const p = DB.projects.find(x => !x.deleted && (String(x.name || '').trim() === n
+      || (x.subProjects || []).some(s => String((s || {}).name || '').trim() === n)));
+    if (!p) continue;
+    const unit = String(p.unitName || p.unit || '').trim();
+    if (unit) return unit;
+    const sub = String(p.substation || '').trim();
+    if (sub) return sub;
+  }
+  return String((DB.settings || {}).companyName || '').trim();
+}
 // 下载领料单 Excel（格式对齐原系统样例：LL-20261009-222544.xlsx）
 app.get('/api/materialRequisitions/:id/download', (req, res) => {
   const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
   const aoa = [];
-  aoa.push(['国网富顺县供电公司过渡仓代保管物资领料单', '', '', '', '', '', '']);
+  const docUnit = requisitionUnitName(rec);
+  aoa.push([(docUnit ? docUnit + '过渡仓代保管物资领料单' : '物资领料单'), '', '', '', '', '', '']);
   aoa.push(['项目部门：', '', '', '', '', '', '']);
   aoa.push(['序号', '物料编码', '物料描述', '计量单位', '数量', '项目名称', '备注']);
   rec.items.forEach((it, i) => {
@@ -822,7 +842,7 @@ app.get('/api/materialRequisitions/:id/download', (req, res) => {
 app.put('/api/materialRequisitions/:id/confirm', (req, res) => {
   const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
-  if (rec.status !== '待入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单已' + rec.status + '，不能重复入库' });
+  if (rec.status !== '待入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单' + rec.status + '，不能重复入库' });
   const rows = Array.isArray((req.body || {}).rows) ? req.body.rows : [];
   const results = (rec.confirmRows || []).map(x => ({ ...x })); // 已累计的入库记录
   const opRows = []; // 本次操作的逐条记录（写入 history，供详情展示与 Excel 下载）
@@ -910,7 +930,7 @@ function voidAvailabilityCheck(rec) {
 app.put('/api/materialRequisitions/:id/void', (req, res) => {
   const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
-  if (rec.status !== '待入库' && rec.status !== '已入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单已' + rec.status + '，不能作废' });
+  if (rec.status !== '待入库' && rec.status !== '已入库' && rec.status !== '部分到库') return res.status(400).json({ error: '该领料单' + rec.status + '，不能作废' });
   const reason = String((req.body || {}).reason || '').trim();
   if (!reason) return res.status(400).json({ error: '请填写作废原因' });
   // 冲销不得把可用库存冲成负数（否则料从库存消失、而出库单仍然占用）

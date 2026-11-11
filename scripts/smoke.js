@@ -1284,6 +1284,123 @@ async function runSmoke() {
     return '计划/作业日/工序 + 行级来源领料单 + 详情只读';
   });
 
+  /* ---------- P3 小项组 ---------- */
+  await step('materials', 'P3-1 inWeeklyPlan 默认不计入：新增 / 导入缺省 false，显式勾选 true，编辑不改原值', async () => {
+    const m1 = needOk(await api('POST', '/api/materials', {
+      token, body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P31 默认不计入', qtyRequired: 2, unit: '个', code: 'ZT-P31-A' }
+    }), 'materials POST P31 缺省');
+    need(m1.inWeeklyPlan === false, '新增缺省应 false，实际 ' + m1.inWeeklyPlan);
+    const m2 = needOk(await api('POST', '/api/materials', {
+      token, body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P31 显式计入', qtyRequired: 2, unit: '个', code: 'ZT-P31-B', inWeeklyPlan: true }
+    }), 'materials POST P31 显式');
+    need(m2.inWeeklyPlan === true, '显式勾选应 true，实际 ' + m2.inWeeklyPlan);
+    const edited = needOk(await api('PUT', '/api/materials/' + m2.id, {
+      token, body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P31 显式计入（改名）', qtyRequired: 2, unit: '个', code: 'ZT-P31-B' }
+    }), 'materials PUT P31');
+    need(edited.inWeeklyPlan === true, '编辑不应把已计入改回 false，实际 ' + edited.inWeeklyPlan);
+    return '缺省 false · 显式 true · 编辑保留';
+  });
+
+  await step('materials', 'P3-2/P3-3 前端：勾选不自动填数量、未填拦截提示；暂存框精度 4', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(!/outQty\[r\.id\] = Number\(r\.available\)/.test(src), '勾选不应再自动填可用量');
+    need(/请填写出库数量/.test(src), '未填数量应提示「请填写出库数量」');
+    need(/stagingQty\[row\.id\][\s\S]{0,120}:precision="4"/.test(src), '暂存数量框应支持 4 位小数');
+    return '不自动填量 · 未填拦截 · 暂存 precision=4';
+  });
+
+  await step('materials', 'P3-3 暂存小数：0.5 生成领料单成功并落库 0.5', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token, body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P33 暂存小数', qtyRequired: 2, unit: '根', code: 'ZT-P33' }
+    }), 'materials POST P33');
+    const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 0.5 }] } }), 'requisition create P33');
+    const row = (d.data.items || []).find(x => x.materialId === m.id);
+    need(row && row.qty === 0.5, '领料数量应落 0.5，实际 ' + (row && row.qty));
+    return '0.5 生成成功 · 落库 0.5';
+  });
+
+  await step('materials', 'P3-4 领料单导出标题按项目动态生成（substation → 企业名称 → 兜底）', async () => {
+    const mkProj = async (name, substation) => needOk(await api('POST', '/api/projects', {
+      token, body: { name, batch: '2026-11', substation, workType: '配网', category: '自有工程' }
+    }), 'projects POST ' + name);
+    const p1 = await mkProj('ZT测试-P34 有供电所', 'ZT测试供电所甲');
+    const p0 = await mkProj('ZT测试-P34 无供电所', '');
+    const settings = needOk(await api('GET', '/api/settings', { token }), 'settings');
+    const comp = String((settings && settings.companyName) || '').trim();
+    const mk = async (proj, code) => {
+      const m = needOk(await api('POST', '/api/materials', {
+        token, body: { project: proj, source: '甲供材料', description: 'ZT测试-P34 物料', qtyRequired: 2, unit: '个', code, orderNo: 'PO-ZT-P34' }
+      }), 'materials POST ' + code);
+      const rid = await mkReqOf(m.id, 1);
+      return rid;
+    };
+    const readTitle = async (rid) => {
+      const r = await fetch(base + '/api/materialRequisitions/' + rid + '/download', { headers: { Authorization: 'Bearer ' + token } });
+      const buf = Buffer.from(await r.arrayBuffer());
+      const wb2 = xlsx.read(buf, { type: 'buffer' });
+      const ws2 = wb2.Sheets[wb2.SheetNames[0]];
+      return {
+        title: String((ws2.A1 || {}).v || ''),
+        head: String((ws2.A3 || {}).v || ''),
+        remark: String((ws2.G4 || {}).v || '')   // 备注列（第 7 列）应仍为采购订单号
+      };
+    };
+    const t1 = await readTitle(await mk(p1.name, 'ZT-P34-A'));
+    need(t1.title === 'ZT测试供电所甲过渡仓代保管物资领料单', '标题应含项目 substation：' + t1.title);
+    need(!/国网富顺县供电公司/.test(t1.title), '标题不应再含写死单位：' + t1.title);
+    need(t1.remark === 'PO-ZT-P34', '备注栏应仍为采购订单号，实际 ' + t1.remark);
+    const t0 = await readTitle(await mk(p0.name, 'ZT-P34-B'));
+    const exp0 = (comp ? comp + '过渡仓代保管物资领料单' : '物资领料单');
+    need(t0.title === exp0, '无 substation 应回落企业名称「' + exp0 + '」，实际 ' + t0.title);
+    return 'substation 优先 · 回落企业名称 · 备注仍为订单号';
+  });
+
+  await step('materials', 'P3-5 时间展示统一：带 Z 转北京时间、无时区按北京时间，无 8 小时偏差', async () => {
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'utils.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    const f = sandbox.window.fmtBizTime;
+    need(typeof f === 'function', 'window.fmtBizTime 未导出');
+    const cases = [
+      ['2026-10-22T08:49:15.045Z', '2026-10-22 16:49:15'],
+      ['2026-11-11 09:37', '2026-11-11 09:37:00'],
+      ['2026-11-11T09:37', '2026-11-11 09:37:00'],
+      ['2026-11-11T09:37:00+08:00', '2026-11-11 09:37:00'],
+      ['2026-11-11', '2026-11-11 00:00:00'],
+      ['', '']
+    ];
+    cases.forEach(([inp, exp]) => {
+      const got = f(inp);
+      need(got === exp, '「' + inp + '」应为 ' + exp + '，实际 ' + got);
+    });
+    // 同一列表口径一致：带 Z 与无时区两类时间都输出 19 位
+    need(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(f('2026-10-22T08:49:15.045Z')), '带 Z 应输出 19 位');
+    return '6 组样本一致（无 8 小时偏差）';
+  });
+
+  await step('materials', 'P3-6 已入库单再次确认 → 400「该领料单已入库，不能重复入库」', async () => {
+    const r = await api('PUT', '/api/materialRequisitions/' + p1ReqId + '/confirm', { token, body: { rows: [] } });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(r.data.error === '该领料单已入库，不能重复入库', '文案不符：' + r.data.error);
+    const src = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'materials.js'), 'utf8');
+    need(!/'该领料单已' \+/.test(src), '不应再有「已」+状态 的重复拼接');
+    return '文案正确 · 无「已已」拼接';
+  });
+
+  await step('materials', 'P3-7 项目重复 id 只读诊断：非超管 403；无重复 id 的副本返回空', async () => {
+    const lg = needOk(await api('POST', '/api/login', { body: { username: 'smoke_cly', password: 'Smoke@2026' } }), 'login cly');
+    const r = await api('GET', '/api/projects/audit/duplicate-ids', { token: lg.token });
+    need(r.status === 403, '非超管应 403，实际 ' + r.status + ' ' + brief(r.data));
+    need(/仅超级用户/.test(r.data.error), '文案不符：' + r.data.error);
+    const res = needOk(await api('GET', '/api/projects/audit/duplicate-ids', { token }), 'audit duplicate-ids');
+    need(res && Array.isArray(res.data), '响应应为 { data: [] }：' + brief(res));
+    need(res.data.length === 0, '本副本无重复 id，应返回空：' + brief(res.data.map(x => x.id)));
+    need(res.total === 0, 'total 应为 0，实际 ' + res.total);
+    return '403（非超管） · 干净副本返回空';
+  });
+
   /* ---------- P0-4 存量不一致只读检测（接口与权限） ---------- */
   await step('materials', 'P0-4 权限：非超管 GET 检测 → 403（与删除导入批次同口径）', async () => {
     const lg = needOk(await api('POST', '/api/login', { body: { username: 'smoke_cly', password: 'Smoke@2026' } }), 'login cly');

@@ -323,7 +323,9 @@ app.mixin({
       if (!Auth.loaded) return false;
       return Auth.writeModules.includes('*') || Auth.writeModules.includes(mod);
     },
-    canAdmin() { return !!Auth.isAdmin; }
+    canAdmin() { return !!Auth.isAdmin; },
+    // 时间展示统一（P3-5）：带 Z 的按 UTC 解析转北京时间，无时区的按北京时间解析，统一 YYYY-MM-DD HH:mm:ss
+    fmtTime(v) { return (typeof window.fmtBizTime === 'function') ? window.fmtBizTime(v) : (v == null ? '' : String(v)); }
   }
 });
 const lp = (typeof ElementPlusLocaleZhCn !== 'undefined') ? { locale: ElementPlusLocaleZhCn } : ((ElementPlus.lang && ElementPlus.lang.zhCn) ? { locale: ElementPlus.lang.zhCn } : {});

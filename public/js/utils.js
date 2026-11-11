@@ -179,3 +179,24 @@ function workerAlerts(list, todayStr) {
   return out;
 }
 if (typeof window !== 'undefined') window.WorkerStatus = { of: workerStatusOf, alerts: workerAlerts };
+
+/* 时间展示统一（P3-5）：存储口径不动（北京时间字符串），只把展示归一为 YYYY-MM-DD HH:mm:ss。
+   - 带时区的串（ISO …Z / ±hh:mm）：按真实时刻解析，再转北京时间（UTC+8）输出；
+   - 无时区的串（YYYY-MM-DD[ HH:mm[:ss]]）：视为北京时间，补齐秒；
+   - 无法解析时原样返回，避免把脏数据吞成空。 */
+function fmtBizTime(v) {
+  if (v === undefined || v === null || v === '') return '';
+  const s = String(v).trim();
+  if (!s) return '';
+  const p = n => String(n).padStart(2, '0');
+  if (/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(s)) {
+    const m = s.replace('T', ' ').match(/^(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    return m[1] + ' ' + (m[2] || '00') + ':' + (m[3] || '00') + ':' + (m[4] || '00');
+  }
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  const b = new Date(d.getTime() + 8 * 3600000);
+  return b.getUTCFullYear() + '-' + p(b.getUTCMonth() + 1) + '-' + p(b.getUTCDate()) + ' ' +
+    p(b.getUTCHours()) + ':' + p(b.getUTCMinutes()) + ':' + p(b.getUTCSeconds());
+}
+if (typeof window !== 'undefined') window.fmtBizTime = fmtBizTime;
