@@ -6,9 +6,10 @@ const app = require('../core/app');
 const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
-const { genId, nowISO, aliveFilter, fmtNow, bjDate } = require('../core/util');
+const { genId, nowISO, aliveFilter, fmtNow, bjDate, bjStr } = require('../core/util');
 const { withGen, materialStatus, roundQty } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
+const { isWorkerAdmitted } = require('../core/worker-status');
 
 // 领料单删除：仅已作废的领料单可删除（须注册在通用 CRUD 工厂之前以覆盖默认删除）
 app.delete('/api/materialRequisitions/:id', (req, res) => {
@@ -63,9 +64,27 @@ app.get('/api/materialOutbound/orders', (req, res) => {
 app.post('/api/materialOutbound/create', (req, res) => {
   const b = req.body || {};
   const project = String(b.project || '').trim();
-  const receiver = String(b.receiver || '').trim();
   if (!project) return res.status(400).json({ error: '请选择工程' });
-  if (!receiver) return res.status(400).json({ error: '请选择领取人' });
+  // 领取人（P0-3）：必须是作业人员名单里「已准入」的工人，按服务器北京日期判定。
+  // 带 workerId → 直接认人，落库姓名取该工人的当前姓名快照（不信任前端传来的姓名）；
+  // 只带姓名 → 须与唯一一名已准入工人精确同名；项目班组长、用户库人员都不算数。
+  const workerId = String(b.workerId || '').trim();
+  const nameInput = String(b.receiver || '').trim();
+  const todayStr = bjStr().slice(0, 10);
+  let receiver = nameInput;
+  if (workerId) {
+    const w = DB.workers.find(x => x.id === workerId && !x.deleted);
+    if (!w) return res.status(400).json({ error: '所选领取人不在已准入工人名单' });
+    if (!isWorkerAdmitted(w, todayStr)) return res.status(400).json({ error: '领取人「' + w.name + '」不在已准入工人名单' });
+    receiver = String(w.name || '').trim();
+  } else if (!receiver) {
+    return res.status(400).json({ error: '请选择领取人' });
+  } else {
+    const same = DB.workers.filter(x => String(x.name || '').trim() === receiver && isWorkerAdmitted(x, todayStr));
+    if (!same.length) return res.status(400).json({ error: '领取人「' + receiver + '」不在已准入工人名单' });
+    if (same.length > 1) return res.status(400).json({ error: '工人名单中有 ' + same.length + ' 名同名的已准入人员，请改用名单选择' });
+    receiver = String(same[0].name || '').trim();
+  }
   const items = Array.isArray(b.items) ? b.items : [];
   if (!items.length) return res.status(400).json({ error: '请勾选需要出库的材料' });
   const stats = outboundStats(project);

@@ -1267,7 +1267,7 @@ const Outbounds = {
     const page = ref(1); const pageSize = ref(50);
     const opage = ref(1); const opageSize = ref(30);
     // 登记出库 / 出库单详情 / 归还 / 打印预览
-    const dlg = reactive({ visible: false, receiver: '', rows: [] });
+    const dlg = reactive({ visible: false, workerId: '', rows: [] });
     const od = reactive({ visible: false, rec: null });
     const rdlg = reactive({ visible: false, rec: null, rows: [] });
     const vdlg = reactive({ visible: false, rec: null, reason: '' });
@@ -1287,10 +1287,11 @@ const Outbounds = {
       } catch (e) {}
       try {
         const r = await api.get('/api/workers');
-        // 领取人只列派生状态为已准入者（已准入且准入有效期未超期）
+        // 领取人只列派生状态为已准入者（已准入且准入有效期未超期）；下拉保留 id + 姓名，提交按 workerId
         const arr = Array.isArray(r) ? r : (r.data || []);
         const today = ServerTime.ymd();
-        workers.value = arr.filter(w => w && w.name && WorkerStatus.of(w, today).admitted).map(w => w.name);
+        workers.value = arr.filter(w => w && w.name && WorkerStatus.of(w, today).admitted)
+          .map(w => ({ id: w.id, name: w.name, team: String(w.team || '') }));
       } catch (e) {}
     }
     // 导入情况：该项目名下是否存在「带 importId 的材料行」（手工录入的不算导入）
@@ -1356,17 +1357,18 @@ const Outbounds = {
     function openDlg() {
       if (!selection.value.length) { ElementPlus.ElMessage.info('请先勾选需要出库的材料'); return; }
       dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: Number(outQty[r.id]) || 0 }));
-      dlg.receiver = ''; dlg.visible = true;
+      dlg.workerId = ''; dlg.visible = true;
     }
     async function submitOut() {
-      if (!dlg.receiver) { ElementPlus.ElMessage.warning('请选择领取人'); return; }
+      const w = workers.value.find(x => x.id === dlg.workerId);
+      if (!w) { ElementPlus.ElMessage.warning('请选择领取人'); return; }
       for (const r of dlg.rows) {
         if (!(Number(r.qty) > 0)) { ElementPlus.ElMessage.error('「' + r.description + '」出库数量必须大于 0'); return; }
         if (Number(r.qty) > Number(r.available) + 1e-9) { ElementPlus.ElMessage.error('「' + r.description + '」本次出库 ' + r.qty + ' 超过可用库存 ' + r.available); return; }
       }
       try {
         const res = await api.post('/api/materialOutbound/create', {
-          project: project.value, receiver: dlg.receiver,
+          project: project.value, workerId: w.id, receiver: w.name,
           items: dlg.rows.map(r => ({ materialId: r.id, qty: Number(r.qty) }))
         });
         ElementPlus.ElMessage.success('出库单 ' + res.data.outNo + ' 已登记');
@@ -1648,8 +1650,11 @@ const Outbounds = {
           <el-select v-model="project" disabled style="width:100%" placeholder="请选择工程" />
         </el-form-item>
         <el-form-item label="领取人" required style="margin-top:-8px">
-          <el-select v-model="dlg.receiver" placeholder="选择领取人" filterable style="width:100%">
-            <el-option v-for="w in workers" :key="w" :label="w" :value="w" />
+          <el-select v-model="dlg.workerId" placeholder="选择领取人" filterable style="width:100%">
+            <el-option v-for="w in workers" :key="w.id" :label="w.name" :value="w.id">
+              <span>{{ w.name }}</span>
+              <span v-if="w.team" style="float:right;color:var(--text-2);font-size:12px">{{ w.team }}</span>
+            </el-option>
           </el-select>
         </el-form-item>
       </el-form>
@@ -1665,7 +1670,7 @@ const Outbounds = {
       </el-table>
       <template #footer>
         <el-button @click="dlg.visible=false">取 消</el-button>
-        <el-button type="primary" :disabled="!dlg.receiver" @click="submitOut">确认出库</el-button>
+        <el-button type="primary" :disabled="!dlg.workerId" @click="submitOut">确认出库</el-button>
       </template>
     </el-dialog>
 

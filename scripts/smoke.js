@@ -776,6 +776,21 @@ async function runSmoke() {
     return '应到 3 · 已到 0 · 未到库';
   });
 
+  // P0-3 起效后出库必须填已准入工人：先落一名固定工人供 P0-2/P0-3 各出库用例使用
+  let smokeWorker = null;
+  let srvToday = '';
+  const dayOff = (dstr, off) => new Date(Date.parse(dstr + 'T00:00:00Z') + off * 86400000).toISOString().slice(0, 10);
+  await step('materials', 'P0-3 前置：落一名已准入工人（出库领取人的合法来源）+ 服务器北京日期', async () => {
+    const st = needOk(await api('GET', '/api/server-time'), 'server-time');
+    srvToday = String(st.now || '').slice(0, 10);
+    need(/^\d{4}-\d{2}-\d{2}$/.test(srvToday), '服务器日期格式不符：' + st.now);
+    smokeWorker = needOk(await api('POST', '/api/workers', {
+      token, body: { name: '冒烟领料人', status: '已准入', validStart: '2020-01-01', validEnd: '2099-12-31', identity: '技工（计入高处作业人员）', team: '冒烟班组' }
+    }), 'workers POST 冒烟领料人');
+    need(smokeWorker && smokeWorker.id, '工人响应缺少 id');
+    return '工人 id=' + smokeWorker.id + ' · 服务器日期 ' + srvToday;
+  });
+
   let p02MatId = '', p02ReqId = '', p02OutId = '';
   await step('materials', 'P0-2-A 有效出库占用 3.5 时作废领料单 → 拒、refs 含单号与净 3.5、库存不变', async () => {
     const m = needOk(await api('POST', '/api/materials', {
@@ -786,7 +801,7 @@ async function runSmoke() {
     p02ReqId = await arriveVia(m.id, 6);
     const ob = needOk(await api('POST', '/api/materialOutbound/create', {
       token,
-      body: { project: MP_C, receiver: '冒烟领料人', items: [{ materialId: m.id, qty: 3.5 }] }
+      body: { project: MP_C, workerId: smokeWorker.id, receiver: '冒烟领料人', items: [{ materialId: m.id, qty: 3.5 }] }
     }), 'outbound create P02A');
     p02OutId = ob.data.id;
     const outNo = ob.data.outNo;
@@ -830,7 +845,7 @@ async function runSmoke() {
     const rid = await arriveVia(m.id, 2);
     const ob = needOk(await api('POST', '/api/materialOutbound/create', {
       token,
-      body: { project: MP_C, receiver: '冒烟领料人', items: [{ materialId: m.id, qty: 2 }] }
+      body: { project: MP_C, workerId: smokeWorker.id, receiver: '冒烟领料人', items: [{ materialId: m.id, qty: 2 }] }
     }), 'outbound create P02C');
     needOk(await api('PUT', '/api/materialOutbound/' + ob.data.id + '/return', { token, body: { rows: [{ materialId: m.id, qty: 2 }] } }), 'outbound return P02C');
     needOk(await api('PUT', '/api/materialRequisitions/' + rid + '/void', { token, body: { reason: 'ZT测试-归还后作废' } }), 'requisition void P02C');
@@ -896,6 +911,153 @@ async function runSmoke() {
     need(/const refs = e && e\.data && e\.data\.refs;[\s\S]{0,400}r\.outNo[\s\S]{0,160}fmtQty\(r\.net\)/.test(src),
       '作废失败应列出出库单号与净出库');
     return '作废失败列出单号+净出库';
+  });
+
+  /* ---------- P0-3 出库领取人服务端校验 ---------- */
+  let p03MatId = '';
+  await step('materials', 'P0-3 前置：可出库材料（应到 20 / 入库 10）', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token, body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P03 领取人校验主料', qtyRequired: 20, unit: '根', code: 'ZT-P03' }
+    }), 'materials POST P03');
+    p03MatId = m.id;
+    await arriveVia(m.id, 10);
+    return 'id=' + p03MatId + ' · 可用 10';
+  });
+
+  await step('materials', 'P0-3-A 已准入工人带 workerId 出库成功、receiver 为姓名快照', async () => {
+    const r = needOk(await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, receiver: '前端乱写的名字', items: [{ materialId: p03MatId, qty: 1 }] }
+    }), 'outbound create P03A');
+    need(r.data.receiver === '冒烟领料人', 'receiver 应取工人姓名快照，实际 ' + r.data.receiver);
+    return '成功 · receiver=冒烟领料人（忽略前端姓名）';
+  });
+
+  await step('materials', 'P0-3-B 不存在的姓名 → 400 不建单', async () => {
+    const before = (await listOk('/api/materialOutbound', token)).length;
+    const r = await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, receiver: '查无此工人', items: [{ materialId: p03MatId, qty: 1 }] }
+    });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(r.data.error === '领取人「查无此工人」不在已准入工人名单', '文案不符：' + r.data.error);
+    const after = (await listOk('/api/materialOutbound', token)).length;
+    need(after === before, '被拒后出库单数不应变化：' + before + ' → ' + after);
+    return '400 · 未建单';
+  });
+
+  await step('materials', 'P0-3-C 用户库人员/项目班组长不算已准入工人 → 400', async () => {
+    // 建一个班组长账号（用户库），其姓名不在作业人员名单里
+    needOk(await api('POST', '/api/users', {
+      token, body: { loginName: 'smoke_lead', email: 'smoke_lead@example.com', name: '冒烟班组长甲', password: 'Smoke@2026', userGroup: '班组长' }
+    }), 'users POST 冒烟班组长甲');
+    const r = await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, receiver: '冒烟班组长甲', items: [{ materialId: p03MatId, qty: 1 }] }
+    });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(/不在已准入工人名单/.test(r.data.error), '文案不符：' + r.data.error);
+    return '400 · 用户库人员不算数';
+  });
+
+  await step('materials', 'P0-3-D 空领取人 → 400「请选择领取人」', async () => {
+    const r = await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, items: [{ materialId: p03MatId, qty: 1 }] }
+    });
+    need(r.status === 400, '应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(r.data.error === '请选择领取人', '文案不符：' + r.data.error);
+    return '400 · 请选择领取人';
+  });
+
+  await step('materials', 'P0-3-E 超期/待定/已退场/已删除 → 400；截止日当天 → 允许（服务器北京日期）', async () => {
+    const mk = async (name, body) => needOk(await api('POST', '/api/workers', {
+      token, body: Object.assign({ name, status: '已准入', identity: '技工（计入高处作业人员）' }, body)
+    }), 'workers POST ' + name);
+    const overdue = await mk('ZT超期工人', { validEnd: dayOff(srvToday, -1) });
+    const pending = await mk('ZT待定工人', { status: '待定', validEnd: '2099-12-31' });
+    const exited = await mk('ZT退场工人', { status: '已退场', validEnd: '2099-12-31' });
+    const deleted = await mk('ZT已删工人', { validEnd: '2099-12-31' });
+    needOk(await api('DELETE', '/api/workers/' + deleted.id, { token }), 'workers DELETE');
+    const todayEnd = await mk('ZT截止日工人', { validEnd: srvToday });
+    const tryOut = (body) => api('POST', '/api/materialOutbound/create', {
+      token, body: Object.assign({ project: MP_C, items: [{ materialId: p03MatId, qty: 0.5 }] }, body)
+    });
+    for (const [label, wid] of [['超期', overdue.id], ['待定', pending.id], ['已退场', exited.id], ['已删除', deleted.id]]) {
+      const r = await tryOut({ workerId: wid });
+      need(r.status === 400, label + ' 应 400，实际 ' + r.status + ' ' + brief(r.data));
+      need(/不在已准入工人名单/.test(r.data.error), label + ' 文案不符：' + r.data.error);
+    }
+    const ok = needOk(await tryOut({ workerId: todayEnd.id }), 'outbound create 截止日');
+    need(ok.data.receiver === 'ZT截止日工人', '截止日当天应允许，receiver=' + ok.data.receiver);
+    return '超期/待定/已退场/已删除 各 400 · 截止日当天允许';
+  });
+
+  await step('materials', 'P0-3-F 归还不接受改领取人', async () => {
+    const ob = needOk(await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p03MatId, qty: 1 }] }
+    }), 'outbound create P03F');
+    const r = needOk(await api('PUT', '/api/materialOutbound/' + ob.data.id + '/return', {
+      token, body: { rows: [{ materialId: p03MatId, qty: 1 }], receiver: '别人', workerId: 'someone-else' }
+    }), 'outbound return P03F');
+    need(r.data.receiver === '冒烟领料人', '归还后领取人应不变，实际 ' + r.data.receiver);
+    return '归还后 receiver 仍为 冒烟领料人';
+  });
+
+  await step('materials', 'P0-3 重名：只传姓名 → 400，带 workerId → 成功', async () => {
+    const mk = async () => needOk(await api('POST', '/api/workers', {
+      token, body: { name: 'ZT重名工人', status: '已准入', validEnd: '2099-12-31', identity: '技工（计入高处作业人员）' }
+    }), 'workers POST ZT重名工人');
+    await mk();
+    const b = await mk();
+    const r1 = await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, receiver: 'ZT重名工人', items: [{ materialId: p03MatId, qty: 0.5 }] }
+    });
+    need(r1.status === 400, '重名只传姓名应 400，实际 ' + r1.status + ' ' + brief(r1.data));
+    need(/同名的已准入人员，请改用名单选择/.test(r1.data.error), '文案不符：' + r1.data.error);
+    const r2 = needOk(await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, workerId: b.id, items: [{ materialId: p03MatId, qty: 0.5 }] }
+    }), 'outbound create 重名 workerId');
+    need(r2.data.receiver === 'ZT重名工人', 'receiver 不符：' + r2.data.receiver);
+    return '重名 400 · workerId 成功';
+  });
+
+  await step('materials', 'P0-3 防漂移：服务端已准入判定与前端 WorkerStatus.of 同口径', async () => {
+    const WS = require('../server/core/worker-status');
+    const vm = require('vm');
+    const code = fs.readFileSync(path.join(ROOT, 'public', 'js', 'utils.js'), 'utf8');
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox);
+    const fe = sandbox.window.WorkerStatus.of;
+    const samples = [
+      { label: '已准入有效期内', w: { status: '已准入', validEnd: '2099-12-31' } },
+      { label: '超期派生待定', w: { status: '已准入', validEnd: dayOff(srvToday, -1) } },
+      { label: '待定', w: { status: '待定', validEnd: '2099-12-31' } },
+      { label: '已退场', w: { status: '已退场', validEnd: '2099-12-31' } },
+      { label: '有效期为空', w: { status: '已准入', validEnd: '' } },
+      { label: '截止日当天', w: { status: '已准入', validEnd: srvToday } }
+    ];
+    samples.forEach(s => {
+      const a = WS.workerStatusOf(s.w, srvToday), b = fe(s.w, srvToday);
+      need(a.derived === b.derived && a.admitted === b.admitted && a.days === b.days,
+        s.label + ' 前后端口径不一致：服务端 ' + a.derived + '/' + a.days + '，前端 ' + b.derived + '/' + b.days);
+    });
+    need(WS.isWorkerAdmitted({ status: '已准入', validEnd: '2099-12-31', deleted: true }, srvToday) === false,
+      '已删除工人不应算已准入');
+    need(WS.isWorkerAdmitted({ status: '已准入', validEnd: srvToday }, srvToday) === true,
+      '截止日当天应算已准入');
+    need(WS.isWorkerAdmitted({ status: '已准入', validEnd: dayOff(srvToday, -1) }, srvToday) === false,
+      '超期工人不应算已准入');
+    return samples.length + ' 组样例前后端一致 + 已删除拒绝 + 截止日允许';
+  });
+
+  await step('materials', 'P0-3.1 前端：领取人下拉带 id、提交 workerId + 姓名', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(/workers\.value = arr\.filter\([\s\S]{0,200}\.map\(w => \(\{ id: w\.id, name: w\.name/.test(src),
+      '领取人下拉应保留 id + 姓名');
+    need(/v-model="dlg\.workerId"[\s\S]{0,140}:key="w\.id"[\s\S]{0,100}:value="w\.id"/.test(src),
+      '下拉应绑定 workerId（值为工人 id）');
+    need(/workerId: w\.id, receiver: w\.name/.test(src), '提交应传 workerId 并以姓名作兼容字段');
+    need(!/v-model="dlg\.receiver"/.test(src), '领取人不应再直接绑定姓名');
+    return '下拉 id+姓名 · 提交 workerId · 姓名兼容';
   });
 
   /* ---------- 计划编号（纯函数与前端共用） ---------- */
