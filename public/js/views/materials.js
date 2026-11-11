@@ -1267,7 +1267,10 @@ const Outbounds = {
     const page = ref(1); const pageSize = ref(50);
     const opage = ref(1); const opageSize = ref(30);
     // 登记出库 / 出库单详情 / 归还 / 打印预览
-    const dlg = reactive({ visible: false, workerId: '', rows: [] });
+    // P1：出库可选关联 —— 计划（workPlanId）、作业日（workDate）、工序（processName），明细行来源领料单（requisitionId）
+    const dlg = reactive({ visible: false, workerId: '', workPlanId: '', workDate: '', processName: '', rows: [] });
+    const reqList = ref([]);   // 来源领料单候选（未作废即可，按材料行过滤）
+    const planList = ref([]);  // 关联计划候选（按工程同口径过滤）
     const od = reactive({ visible: false, rec: null });
     const rdlg = reactive({ visible: false, rec: null, rows: [] });
     const vdlg = reactive({ visible: false, rec: null, reason: '' });
@@ -1340,8 +1343,38 @@ const Outbounds = {
         list.value = Array.isArray(r) ? r : (r.data || []);
         const r2 = await api.get('/api/materialOutbound/orders?project=' + encodeURIComponent(project.value));
         orders.value = Array.isArray(r2) ? r2 : (r2.data || []);
+        await loadLinks();
       } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { loading.value = false; }
     }
+    // P1：关联候选（领料单 / 计划）—— 量小，随工程加载一并拉取；失败静默（关联是可选项）
+    async function loadLinks() {
+      try {
+        const r = await api.get('/api/materialRequisitions');
+        const arr = Array.isArray(r) ? r : (r.data || []);
+        reqList.value = arr.filter(x => x && x.status !== '已作废');
+      } catch (e) { reqList.value = []; }
+      try {
+        const r2 = await api.get('/api/workPlans');
+        planList.value = Array.isArray(r2) ? r2 : (r2.data || []);
+      } catch (e) { planList.value = []; }
+    }
+    // 项目名同口径（同名或同属一个父工程），与后端 sameProjectScope 一致
+    function sameScope(a, b) {
+      const na = String(a || '').trim(); const nb = String(b || '').trim();
+      if (!na || !nb) return false;
+      if (na === nb) return true;
+      const fam = n => {
+        const hit = allProjects.value.find(p => String(p.name || '').trim() === n
+          || (p.subProjects || []).some(s => String((s || {}).name || '').trim() === n));
+        return hit ? String(hit.name || '').trim() : '';
+      };
+      const fa = fam(na); const fb = fam(nb);
+      return !!fa && fa === fb;
+    }
+    function reqOptionsOf(materialId) {
+      return reqList.value.filter(r => (r.items || []).some(i => i && i.materialId === materialId));
+    }
+    const planOptions = computed(() => planList.value.filter(w => w && sameScope(w.project, project.value)));
     function onProjectChange() { selection.value = []; Object.keys(outQty).forEach(k => delete outQty[k]); page.value = 1; opage.value = 1; load(); }
     const filtered = computed(() => list.value.filter(r => !keyword.value.trim()
       || String(r.description || '').includes(keyword.value.trim()) || String(r.code || '').includes(keyword.value.trim())));
@@ -1356,8 +1389,8 @@ const Outbounds = {
 
     function openDlg() {
       if (!selection.value.length) { ElementPlus.ElMessage.info('请先勾选需要出库的材料'); return; }
-      dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: Number(outQty[r.id]) || 0 }));
-      dlg.workerId = ''; dlg.visible = true;
+      dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: Number(outQty[r.id]) || 0, requisitionId: '' }));
+      dlg.workerId = ''; dlg.workPlanId = ''; dlg.workDate = ''; dlg.processName = ''; dlg.visible = true;
     }
     async function submitOut() {
       const w = workers.value.find(x => x.id === dlg.workerId);
@@ -1369,7 +1402,8 @@ const Outbounds = {
       try {
         const res = await api.post('/api/materialOutbound/create', {
           project: project.value, workerId: w.id, receiver: w.name,
-          items: dlg.rows.map(r => ({ materialId: r.id, qty: Number(r.qty) }))
+          workPlanId: dlg.workPlanId || '', workDate: dlg.workDate || '', processName: (dlg.processName || '').trim(),
+          items: dlg.rows.map(r => ({ materialId: r.id, qty: Number(r.qty), requisitionId: r.requisitionId || '' }))
         });
         ElementPlus.ElMessage.success('出库单 ' + res.data.outNo + ' 已登记');
         dlg.visible = false;
@@ -1533,7 +1567,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf };
   },
   template: `
   <div>
@@ -1657,14 +1691,38 @@ const Outbounds = {
             </el-option>
           </el-select>
         </el-form-item>
+        <el-row :gutter="12" style="margin-top:-8px">
+          <el-col :span="12" :xs="24">
+            <el-form-item label="关联周计划（可选）">
+              <el-select v-model="dlg.workPlanId" clearable filterable placeholder="不关联计划" style="width:100%">
+                <el-option v-for="p in planOptions" :key="p.id" :label="p.name" :value="p.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" :xs="24">
+            <el-form-item label="作业日（可选）">
+              <el-date-picker v-model="dlg.workDate" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="工序 / 工作内容（可选）" style="margin-top:-8px">
+          <el-input v-model="dlg.processName" placeholder="如：立杆、架线、安装开关" />
+        </el-form-item>
       </el-form>
       <div style="color:var(--text-2);font-size:13px;margin:-6px 0 10px">已选择 {{ dlg.rows.length }} 种材料，提交时会再次核对当前可用库存。</div>
       <el-table :data="dlg.rows" size="small" border style="width:100%">
-        <el-table-column prop="description" label="材料" min-width="180" />
-        <el-table-column label="可用库存" width="110" align="right"><template #default="{row}">{{ fmt4(row.available) }}</template></el-table-column>
-        <el-table-column label="本次出库" width="150">
+        <el-table-column prop="description" label="材料" min-width="160" />
+        <el-table-column label="可用库存" width="100" align="right"><template #default="{row}">{{ fmt4(row.available) }}</template></el-table-column>
+        <el-table-column label="本次出库" width="140">
           <template #default="{row}">
-            <el-input-number v-model="row.qty" :min="0" :max="Number(row.available)" :precision="4" :controls="false" size="small" style="width:130px" />
+            <el-input-number v-model="row.qty" :min="0" :max="Number(row.available)" :precision="4" :controls="false" size="small" style="width:120px" />
+          </template>
+        </el-table-column>
+        <el-table-column label="来源领料单（可选）" width="180">
+          <template #default="{row}">
+            <el-select v-model="row.requisitionId" clearable filterable placeholder="不指定" size="small" style="width:100%">
+              <el-option v-for="rq in reqOptionsOf(row.id)" :key="rq.id" :label="rq.reqNo" :value="rq.id" />
+            </el-select>
           </template>
         </el-table-column>
       </el-table>
@@ -1682,11 +1740,15 @@ const Outbounds = {
         <div>单据状态：<el-tag size="small" :type="od.rec.status === '有效' ? 'success' : 'info'">{{ od.rec.status }}</el-tag></div>
         <div>补回未归还数量：{{ od.rec.compensated || 0 }}</div>
         <div>登记时间：{{ od.rec.createdAt }}</div>
+        <div>关联计划：{{ od.rec.workPlanName || '—' }}</div>
+        <div>作业日：{{ od.rec.workDate || '—' }}</div>
+        <div>工序 / 工作内容：{{ od.rec.processName || '—' }}</div>
       </div>
       <el-table :data="od.rec.items" size="small" border style="width:100%">
         <el-table-column prop="description" label="材料" min-width="180" />
         <el-table-column prop="code" label="编码" width="130" />
         <el-table-column prop="unit" label="单位" width="70" />
+        <el-table-column label="来源领料单" width="140"><template #default="{row}">{{ row.reqNo || '—' }}</template></el-table-column>
         <el-table-column label="已出库" width="100" align="right"><template #default="{row}">{{ fmt4(row.qty) }}</template></el-table-column>
         <el-table-column label="已归还" width="100" align="right"><template #default="{row}">{{ fmt4(row.returned) }}</template></el-table-column>
         <el-table-column label="剩余未归还" width="120" align="right"><template #default="{row}">{{ fmt4(remaining(row)) }}</template></el-table-column>

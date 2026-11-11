@@ -1060,6 +1060,162 @@ async function runSmoke() {
     return '下拉 id+姓名 · 提交 workerId · 姓名兼容';
   });
 
+  /* ---------- P1 出库可选关联（计划 / 作业日 / 工序 / 来源领料单） ---------- */
+  let p1MatId = '', p1ReqId = '', p1PlanId = '', p1OutId = '', p1ReqNo = '', p1PlanBId = '';
+  await step('materials', 'P1-A 带来源领料单 + 计划出库 → 成功；GET/反查/material-usage 全部可见', async () => {
+    const m = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P1A 关联出库主料', qtyRequired: 10, unit: '根', code: 'ZT-P1A' }
+    }), 'materials POST P1A');
+    p1MatId = m.id;
+    p1ReqId = await arriveVia(m.id, 6); // 已到 6
+    const reqs = await listOk('/api/materialRequisitions', token);
+    p1ReqNo = (reqs.find(x => x.id === p1ReqId) || {}).reqNo || '';
+    p1PlanId = needOk(await api('POST', '/api/workPlans', {
+      token,
+      body: { name: 'ZT测试-P1A 关联计划', planType: '周计划', project: MP_C, startDate: '2026-11-01 08:00:00', endDate: '2026-11-30 18:00:00', status: '未执行' }
+    }), 'workPlans POST P1A').id;
+    const ob = needOk(await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: {
+        project: MP_C, workerId: smokeWorker.id,
+        workPlanId: p1PlanId, workDate: '2026-11-15', processName: '立杆',
+        items: [{ materialId: m.id, qty: 3, requisitionId: p1ReqId }]
+      }
+    }), 'outbound create P1A');
+    p1OutId = ob.data.id;
+    need(ob.data.workPlanId === p1PlanId && ob.data.workDate === '2026-11-15' && ob.data.processName === '立杆',
+      '单头关联字段不符：' + brief({ p: ob.data.workPlanId, d: ob.data.workDate, n: ob.data.processName }));
+    need(ob.data.workPlanName === 'ZT测试-P1A 关联计划', '创建响应应带计划名称，实际 ' + ob.data.workPlanName);
+    need(ob.data.items[0].requisitionId === p1ReqId && ob.data.items[0].reqNo === p1ReqNo,
+      '明细应带来源领料单与单号：' + brief(ob.data.items[0]));
+    const orders = needOk(await api('GET', '/api/materialOutbound/orders?project=' + encodeURIComponent(MP_C), { token }), 'orders P1A');
+    const row = orders.find(o => o.id === p1OutId);
+    need(row && row.workPlanName === 'ZT测试-P1A 关联计划' && row.items[0].reqNo === p1ReqNo,
+      'GET 列表应带计划名称与领料单号：' + brief(row && { n: row.workPlanName, r: row.items[0] }));
+    const rev = needOk(await api('GET', '/api/materialRequisitions/' + p1ReqId + '/outbounds', { token }), 'req outbounds P1A');
+    need(rev.some(o => o.id === p1OutId && o.status === '有效'), '领料单反查应含该出库单');
+    const usage = needOk(await api('GET', '/api/workPlans/' + p1PlanId + '/material-usage', { token }), 'usage P1A');
+    const u = usage.find(x => x.code === 'ZT-P1A');
+    need(u && u.net === 3 && u.outCount === 1, 'material-usage 净额应 3，实际 ' + brief(u));
+    return '出库 3 · 单号 ' + p1ReqNo + ' · 计划可见 · usage 净额 3';
+  });
+
+  await step('materials', 'P1-C 来源领料单不属本项目 / 已作废 → 400', async () => {
+    const mB = needOk(await api('POST', '/api/materials', {
+      token,
+      body: { project: '冒烟测试项目B', source: '甲供材料', description: 'ZT测试-P1C 他项目料', qtyRequired: 5, unit: '根', code: 'ZT-P1C' }
+    }), 'materials POST P1C');
+    const reqB = await arriveVia(mB.id, 2);
+    const r1 = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p1MatId, qty: 1, requisitionId: reqB }] }
+    });
+    need(r1.status === 400, '他项目领料单应 400，实际 ' + r1.status + ' ' + brief(r1.data));
+    need(/不属于所选工程/.test(r1.data.error), '文案不符：' + r1.data.error);
+    const r2 = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p1MatId, qty: 1, requisitionId: p02ReqId }] }
+    });
+    need(r2.status === 400, '已作废领料单应 400，实际 ' + r2.status + ' ' + brief(r2.data));
+    need(/已作废/.test(r2.data.error), '文案不符：' + r2.data.error);
+    return '他项目 400 · 已作废 400';
+  });
+
+  await step('materials', 'P1-D 超出该单剩余可出 → 400 且提示剩余数（总可用更大也不挪用）', async () => {
+    await arriveVia(p1MatId, 4); // 已到 10，总可用 7（该单剩余仍 3）
+    const r = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p1MatId, qty: 5, requisitionId: p1ReqId }] }
+    });
+    need(r.status === 400, '超剩余可出应 400，实际 ' + r.status + ' ' + brief(r.data));
+    need(/超过该领料单剩余可出 3/.test(r.data.error), '文案应含剩余 3：' + r.data.error);
+    const ok2 = needOk(await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p1MatId, qty: 3, requisitionId: p1ReqId }] }
+    }), 'outbound create P1D 恰好用完');
+    need(ok2.data.items[0].requisitionId === p1ReqId, '恰好等于剩余可出应成功');
+    const r3 = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p1MatId, qty: 0.5, requisitionId: p1ReqId }] }
+    });
+    need(r3.status === 400 && /剩余可出 0/.test(r3.data.error), '用尽后再出应 400 剩余 0：' + brief(r3.data));
+    return '总可用 7 · 该单剩余 3 → 5 拒 / 3 成功 / 再用尽拒';
+  });
+
+  await step('materials', 'P1-E 计划属他项目 / 作业日超范围 → 400', async () => {
+    const planB = needOk(await api('POST', '/api/workPlans', {
+      token,
+      body: { name: 'ZT测试-P1E 他项目计划', planType: '周计划', project: '冒烟测试项目B', startDate: '2026-11-01 08:00:00', endDate: '2026-11-30 18:00:00', status: '未执行' }
+    }), 'workPlans POST P1E').id;
+    p1PlanBId = planB;
+    const r1 = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, workPlanId: planB, items: [{ materialId: p1MatId, qty: 1 }] }
+    });
+    need(r1.status === 400, '他项目计划应 400，实际 ' + r1.status + ' ' + brief(r1.data));
+    need(/不属于所选工程/.test(r1.data.error), '文案不符：' + r1.data.error);
+    const r2 = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, workPlanId: p1PlanId, workDate: '2026-12-15', items: [{ materialId: p1MatId, qty: 1 }] }
+    });
+    need(r2.status === 400 && /晚于计划结束日期/.test(r2.data.error), '作业日晚于结束应 400：' + brief(r2.data));
+    const r3 = await api('POST', '/api/materialOutbound/create', {
+      token,
+      body: { project: MP_C, workerId: smokeWorker.id, workPlanId: p1PlanId, workDate: '2026-10-15', items: [{ materialId: p1MatId, qty: 1 }] }
+    });
+    need(r3.status === 400 && /早于计划开始日期/.test(r3.data.error), '作业日早于开始应 400：' + brief(r3.data));
+    return '他项目计划 400 · 越界前/后各 400';
+  });
+
+  await step('materials', 'P1-F 归还 1 → usage 回落 2；作废 → 0，反查仍含作废单', async () => {
+    needOk(await api('PUT', '/api/materialOutbound/' + p1OutId + '/return', {
+      token, body: { rows: [{ materialId: p1MatId, qty: 1 }] }
+    }), 'outbound return P1F');
+    let usage = needOk(await api('GET', '/api/workPlans/' + p1PlanId + '/material-usage', { token }), 'usage P1F 1');
+    let u = usage.find(x => x.code === 'ZT-P1A');
+    need(u && u.net === 2, '归还 1 后净额应 2，实际 ' + brief(u));
+    needOk(await api('PUT', '/api/materialOutbound/' + p1OutId + '/void', { token, body: { reason: 'ZT测试-P1F 作废' } }), 'outbound void P1F');
+    usage = needOk(await api('GET', '/api/workPlans/' + p1PlanId + '/material-usage', { token }), 'usage P1F 2');
+    u = usage.find(x => x.code === 'ZT-P1A');
+    need(!u || u.net === 0, '作废后净额应 0，实际 ' + brief(u));
+    const rev = needOk(await api('GET', '/api/materialRequisitions/' + p1ReqId + '/outbounds', { token }), 'req outbounds P1F');
+    need(rev.some(o => o.id === p1OutId && o.status === '已作废'), '反查应含已作废单并带状态');
+    return '归还 → 净 2 · 作废 → 净 0 · 反查含作废';
+  });
+
+  await step('materials', 'P1 可选性回归：不带任何关联字段出库 → 照旧成功且字段为空', async () => {
+    const ob = needOk(await api('POST', '/api/materialOutbound/create', {
+      token, body: { project: MP_C, workerId: smokeWorker.id, items: [{ materialId: p1MatId, qty: 1 }] }
+    }), 'outbound create P1 plain');
+    need(!ob.data.workPlanId && !ob.data.workDate && !ob.data.processName, '未传时单头关联应为空：' + brief(ob.data));
+    need(ob.data.items[0].requisitionId === '' && ob.data.items[0].reqNo === '', '未传来源领料单时应为空：' + brief(ob.data.items[0]));
+    return '空关联成功 · 字段为空';
+  });
+
+  // P1 用例自建的计划用完即软删：这些计划的日期带时分，回灌判重键（planType+project+name+startDate）
+  // 与导出的日期列往返不一致，会污染后面的「周计划导出 → 回灌判重」用例（既有行为，本批不改）
+  await step('materials', 'P1 收尾：软删本段自建计划，避免污染计划导出回灌判重', async () => {
+    for (const id of [p1PlanId, p1PlanBId]) {
+      if (!id) continue;
+      needOk(await api('DELETE', '/api/workPlans/' + id, { token }), 'plan delete ' + id);
+    }
+    const list = await listOk('/api/workPlans', token);
+    need(!list.some(p => p.id === p1PlanId) && !list.some(p => p.id === p1PlanBId), '软删后计划不应再出现在列表');
+    return '2 条测试计划已软删';
+  });
+
+  await step('materials', 'P1.1 前端：出库弹窗三个可选输入 + 明细行来源领料单 + 详情只读展示', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(/v-model="dlg\.workPlanId"[\s\S]{0,200}planOptions/.test(src), '弹窗应有计划下拉并绑定候选');
+    need(/v-model="dlg\.workDate"[\s\S]{0,120}value-format="YYYY-MM-DD"/.test(src), '弹窗应有作业日（YYYY-MM-DD）');
+    need(/v-model="dlg\.processName"/.test(src), '弹窗应有工序输入');
+    need(/v-model="row\.requisitionId"[\s\S]{0,200}reqOptionsOf\(row\.id\)/.test(src), '明细行应可按材料选来源领料单');
+    need(/requisitionId: r\.requisitionId \|\| ''/.test(src), '提交应带 requisitionId');
+    need(/关联计划：\{\{ od\.rec\.workPlanName/.test(src) && /作业日：\{\{ od\.rec\.workDate/.test(src), '出库单详情应只读展示关联字段');
+    return '计划/作业日/工序 + 行级来源领料单 + 详情只读';
+  });
+
   /* ---------- P0-4 存量不一致只读检测（接口与权限） ---------- */
   await step('materials', 'P0-4 权限：非超管 GET 检测 → 403（与删除导入批次同口径）', async () => {
     const lg = needOk(await api('POST', '/api/login', { body: { username: 'smoke_cly', password: 'Smoke@2026' } }), 'login cly');

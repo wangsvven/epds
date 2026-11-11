@@ -55,11 +55,92 @@ app.get('/api/materialOutbound/stock', (req, res) => {
   });
   res.json(rows);
 });
+// P1 出库可选关联：项目名口径与材料/计划一致（同名，或同属一个父工程 —— 父工程名与其子项目名互认）
+function projectFamilyOf(name) {
+  const n = String(name || '').trim();
+  if (!n) return '';
+  const hit = DB.projects.find(p => !p.deleted && (String(p.name || '').trim() === n
+    || (p.subProjects || []).some(s => String((s || {}).name || '').trim() === n)));
+  return hit ? String(hit.name || '').trim() : '';
+}
+function sameProjectScope(a, b) {
+  const na = String(a || '').trim();
+  const nb = String(b || '').trim();
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const fa = projectFamilyOf(na);
+  const fb = projectFamilyOf(nb);
+  return !!fa && fa === fb;
+}
+// 该领料单对某材料的已确认入库量（confirmRows 累计）
+function reqConfirmedQty(req, materialId) {
+  const cr = (req.confirmRows || []).find(c => c && c.materialId === materialId);
+  return roundQty(cr ? (Number(cr.thisQty) || 0) : 0);
+}
+// 已按此领料单净出库量（仅未删除、状态=有效的出库单：领取 − 归还）
+function reqUsedQty(reqId, materialId) {
+  let used = 0;
+  DB.materialOutbound.forEach(o => {
+    if (o.deleted || o.status !== '有效') return;
+    (o.items || []).forEach(it => {
+      if (!it || it.requisitionId !== reqId || it.materialId !== materialId) return;
+      used = roundQty(used + roundQty((Number(it.qty) || 0) - (Number(it.returned) || 0)));
+    });
+  });
+  return roundQty(used);
+}
+// 出库单读侧补关联：明细行补来源领料单号、单头补计划名称（按当前数据解析，不落库快照）
+function withOutboundLinks(list) {
+  const reqNoMap = {};
+  DB.materialRequisitions.forEach(r => { if (r && r.id) reqNoMap[r.id] = r.reqNo || ''; });
+  const planNameMap = {};
+  DB.workPlans.forEach(p => { if (p && p.id) planNameMap[p.id] = p.name || ''; });
+  return list.map(o => Object.assign({}, o, {
+    workPlanName: o.workPlanId ? (planNameMap[o.workPlanId] || '') : '',
+    items: (o.items || []).map(it => Object.assign({}, it, {
+      reqNo: it.requisitionId ? (reqNoMap[it.requisitionId] || '') : ''
+    }))
+  }));
+}
 app.get('/api/materialOutbound/orders', (req, res) => {
   const project = String(req.query.project || '');
   const list = DB.materialOutbound.filter(o => !o.deleted && (!project || o.project === project))
     .slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  res.json(list);
+  res.json(withOutboundLinks(list));
+});
+// P1：以该领料单为来源的出库单（含已作废，带状态标记）
+app.get('/api/materialRequisitions/:id/outbounds', (req, res) => {
+  const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
+  if (!rec) return res.status(404).json({ error: '未找到领料单' });
+  const list = DB.materialOutbound
+    .filter(o => !o.deleted && (o.items || []).some(it => it && it.requisitionId === rec.id))
+    .slice()
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  res.json(withOutboundLinks(list));
+});
+// P1：按计划汇总已关联出库的净出库（材料编码 + 描述维度；有效单领取 − 归还，作废单计 0）
+app.get('/api/workPlans/:id/material-usage', (req, res) => {
+  const plan = DB.workPlans.find(x => x.id === req.params.id && !x.deleted);
+  if (!plan) return res.status(404).json({ error: '未找到计划' });
+  const agg = {};
+  DB.materialOutbound.forEach(o => {
+    if (o.deleted || o.workPlanId !== plan.id) return;
+    const valid = o.status === '有效';
+    (o.items || []).forEach(it => {
+      if (!it) return;
+      const key = [it.code || '', it.description || ''].join('\u0001');
+      const row = agg[key] || (agg[key] = {
+        materialId: it.materialId || '', code: it.code || '', description: it.description || '',
+        unit: it.unit || '', taken: 0, returned: 0, net: 0, outCount: 0, voidedCount: 0
+      });
+      if (!valid) { row.voidedCount++; return; }
+      row.taken = roundQty(row.taken + (Number(it.qty) || 0));
+      row.returned = roundQty(row.returned + (Number(it.returned) || 0));
+      row.net = roundQty(row.taken - row.returned);
+      row.outCount++;
+    });
+  });
+  res.json(Object.keys(agg).map(k => agg[k]));
 });
 app.post('/api/materialOutbound/create', (req, res) => {
   const b = req.body || {};
@@ -85,6 +166,27 @@ app.post('/api/materialOutbound/create', (req, res) => {
     if (same.length > 1) return res.status(400).json({ error: '工人名单中有 ' + same.length + ' 名同名的已准入人员，请改用名单选择' });
     receiver = String(same[0].name || '').trim();
   }
+  // P1：关联计划 / 作业日 / 工序（全部可选，仅在传了才校验）
+  const workPlanId = String(b.workPlanId || '').trim();
+  const workDate = String(b.workDate || '').trim();
+  const processName = String(b.processName || '').trim();
+  if (workDate && !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+    return res.status(400).json({ error: '作业日格式应为 YYYY-MM-DD' });
+  }
+  let workPlan = null;
+  if (workPlanId) {
+    workPlan = DB.workPlans.find(x => x.id === workPlanId && !x.deleted);
+    if (!workPlan) return res.status(400).json({ error: '关联计划不存在' });
+    if (!sameProjectScope(workPlan.project, project)) {
+      return res.status(400).json({ error: '关联计划「' + (workPlan.name || '') + '」不属于所选工程' });
+    }
+    if (workDate) {
+      const ps = String(workPlan.startDate || '').slice(0, 10);
+      const pe = String(workPlan.endDate || '').slice(0, 10);
+      if (ps && workDate < ps) return res.status(400).json({ error: '作业日 ' + workDate + ' 早于计划开始日期 ' + ps });
+      if (pe && workDate > pe) return res.status(400).json({ error: '作业日 ' + workDate + ' 晚于计划结束日期 ' + pe });
+    }
+  }
   const items = Array.isArray(b.items) ? b.items : [];
   if (!items.length) return res.status(400).json({ error: '请勾选需要出库的材料' });
   const stats = outboundStats(project);
@@ -97,7 +199,28 @@ app.post('/api/materialOutbound/create', (req, res) => {
     const st = stats[m.id] || { taken: 0, returned: 0 };
     const avail = roundQty(Math.max(0, roundQty(m.qtyArrived) - roundQty(st.taken - st.returned)));
     if (qty > avail + 1e-9) return res.status(400).json({ error: '物料「' + m.description + '」本次出库 ' + qty + ' 超过可用库存 ' + avail });
-    finalItems.push({ materialId: m.id, code: m.code || '', description: m.description || '', unit: m.unit || '', qty, returned: 0 });
+    // P1：来源领料单（可选）—— 须存在/未删除/未作废/属于本项目/含此材料，且不超过该单剩余可出
+    let reqId = '';
+    const reqInput = String(e.requisitionId || '').trim();
+    if (reqInput) {
+      const reqRec = DB.materialRequisitions.find(x => x.id === reqInput && !x.deleted);
+      if (!reqRec) return res.status(400).json({ error: '来源领料单不存在' });
+      if (reqRec.status === '已作废') return res.status(400).json({ error: '来源领料单 ' + (reqRec.reqNo || '') + ' 已作废，不能作为出库来源' });
+      const reqProjects = (Array.isArray(reqRec.projects) && reqRec.projects.length)
+        ? reqRec.projects : (reqRec.items || []).map(i => i.project);
+      if (!reqProjects.some(p => sameProjectScope(p, project))) {
+        return res.status(400).json({ error: '来源领料单 ' + (reqRec.reqNo || '') + ' 不属于所选工程' });
+      }
+      if (!(reqRec.items || []).some(i => i.materialId === m.id)) {
+        return res.status(400).json({ error: '来源领料单 ' + (reqRec.reqNo || '') + ' 不含物料「' + m.description + '」' });
+      }
+      const remain = roundQty(reqConfirmedQty(reqRec, m.id) - reqUsedQty(reqInput, m.id));
+      if (qty > remain + 1e-9) {
+        return res.status(400).json({ error: '物料「' + m.description + '」本次出库 ' + qty + ' 超过该领料单剩余可出 ' + remain });
+      }
+      reqId = reqInput;
+    }
+    finalItems.push({ materialId: m.id, code: m.code || '', description: m.description || '', unit: m.unit || '', qty, returned: 0, requisitionId: reqId });
   }
   // 单号：OUT-YYYYMMDD-NNNN（当日 4 位流水，从 0001 起；取已存在的最大流水 +1，含已删除记录，单号不回收）
   const dateTag = fmtNow().slice(0, 10).replace(/-/g, '');
@@ -112,12 +235,13 @@ app.post('/api/materialOutbound/create', (req, res) => {
   const rec = {
     id: genId('ob'), outNo: prefix + String(seq + 1).padStart(4, '0'),
     project, receiver, status: '有效', createdAt: fmtNow(),
+    workPlanId, workDate, processName,
     items: finalItems, returns: [], compensated: 0,
     deleted: false
   };
   DB.materialOutbound.unshift(rec);
   saveDB();
-  res.json({ ok: true, data: rec });
+  res.json({ ok: true, data: withOutboundLinks([rec])[0] });
 });
 app.put('/api/materialOutbound/:id/return', (req, res) => {
   const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
