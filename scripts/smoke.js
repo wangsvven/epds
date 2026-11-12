@@ -1273,15 +1273,15 @@ async function runSmoke() {
     return '2 条测试计划已软删';
   });
 
-  await step('materials', 'P1.1 前端：出库弹窗三个可选输入 + 明细行来源领料单 + 详情只读展示', async () => {
+  await step('materials', 'P1.1 前端：出库弹窗三个可选输入 + 明细行无来源领料单 + 详情只读展示', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
     need(/v-model="dlg\.workPlanId"[\s\S]{0,200}planOptions/.test(src), '弹窗应有计划下拉并绑定候选');
     need(/v-model="dlg\.workDate"[\s\S]{0,120}value-format="YYYY-MM-DD"/.test(src), '弹窗应有作业日（YYYY-MM-DD）');
     need(/v-model="dlg\.processName"/.test(src), '弹窗应有工序输入');
-    need(/v-model="row\.requisitionId"[\s\S]{0,200}reqOptionsOf\(row\.id\)/.test(src), '明细行应可按材料选来源领料单');
-    need(/requisitionId: r\.requisitionId \|\| ''/.test(src), '提交应带 requisitionId');
+    need(!/v-model="row\.requisitionId"/.test(src) && !/reqOptionsOf/.test(src), '明细行不应再有来源领料单下拉');
+    need(!/requisitionId: r\.requisitionId \|\| ''/.test(src), '提交不应再组装行级 requisitionId');
     need(/关联计划：\{\{ od\.rec\.workPlanName/.test(src) && /作业日：\{\{ od\.rec\.workDate/.test(src), '出库单详情应只读展示关联字段');
-    return '计划/作业日/工序 + 行级来源领料单 + 详情只读';
+    return '计划/作业日/工序 + 行级来源领料单已撤 + 详情只读';
   });
 
   /* ---------- P3 小项组 ---------- */
@@ -1301,12 +1301,13 @@ async function runSmoke() {
     return '缺省 false · 显式 true · 编辑保留';
   });
 
-  await step('materials', 'P3-2/P3-3 前端：勾选不自动填数量、未填拦截提示；暂存框精度 4', async () => {
+  await step('materials', 'P3-2/P3-3 前端：勾选自动填可用库存、取消清空、未填拦截；暂存框精度 4', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
-    need(!/outQty\[r\.id\] = Number\(r\.available\)/.test(src), '勾选不应再自动填可用量');
+    need(/outQty\[r\.id\] = Number\(r\.available\) \|\| 0/.test(src), '勾选应自动填该行可用库存');
+    need(/prev\.forEach\(id => \{ if \(!now\[id\]\) delete outQty\[id\]/.test(src), '取消勾选应清空该行数量');
     need(/请填写出库数量/.test(src), '未填数量应提示「请填写出库数量」');
     need(/stagingQty\[row\.id\][\s\S]{0,120}:precision="4"/.test(src), '暂存数量框应支持 4 位小数');
-    return '不自动填量 · 未填拦截 · 暂存 precision=4';
+    return '自动填量 · 取消清空 · 未填拦截 · 暂存 precision=4';
   });
 
   await step('materials', 'P3-3 暂存小数：0.5 生成领料单成功并落库 0.5', async () => {
@@ -3898,7 +3899,11 @@ async function runSmoke() {
     const r4 = await p4Req(m.id, 2, srvToday, { correctedFrom: r1.id });
     const old2 = (needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs2') || []).find(x => x.id === r1.id);
     need(old2.correctedBy === r4.id && old2.correctedByNo === r4.reqNo, '重开单已作废后允许再重开，关联更新为最新：' + brief({ a: old2.correctedByNo }));
-    return r1.reqNo + ' → ' + r2.reqNo + ' → ' + r4.reqNo;
+    // 本批：后端能力保留，前端入口已撤销（反向断言）
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(!/openReopen\(|reopenOut\(|>重 开<|>重开</.test(src), '前端不应再有重开按钮/入口');
+    need(!/重开领料单|重开出库单/.test(src), '前端不应再有重开弹窗');
+    return r1.reqNo + ' → ' + r2.reqNo + ' → ' + r4.reqNo + '；前端入口已撤';
   });
 
   await step('materials', 'P4-4-B/C 回放：补录压垮中间日拒绝、每天不为负放行', async () => {
