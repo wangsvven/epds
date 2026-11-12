@@ -68,6 +68,26 @@ function nextDocNo(list, field, prefix) {
 const dateTagOf = d => String(d || '').replace(/-/g, '');
 function reqNoOf(reqDate) { return nextDocNo(DB.materialRequisitions, 'reqNo', 'LL-' + dateTagOf(reqDate) + '-'); }
 function outNoOf(outDate) { return nextDocNo(DB.materialOutbound, 'outNo', 'OUT-' + dateTagOf(outDate) + '-'); }
+/* 作废重开：correctedFrom 必须指向「存在、未删除、已作废」的同类原单（领料对领料、出库对出库）。
+ * 同一原单同时只允许一张仍有效的重开单：原单 correctedBy 指向的单仍有效时拒绝并提示单号；
+ * 那张重开单也已作废（或已删除）时允许再次重开，反向关联在创建成功后更新为最新一张。
+ * 编号骨架与 nextDocNo 算法不在本函数内改动。 */
+function resolveReopenSource(kind, input) {
+  const key = String(input || '').trim();
+  if (!key) return { orig: null };
+  const list = kind === 'req' ? DB.materialRequisitions : DB.materialOutbound;
+  const noField = kind === 'req' ? 'reqNo' : 'outNo';
+  const orig = list.find(x => x && !x.deleted && (x.id === key || x[noField] === key)) || null;
+  if (!orig) return { error: '要重开的原单不存在（' + key + '）' };
+  if (orig.status !== '已作废') return { error: '原单尚未作废，不能重开' };
+  if (orig.correctedBy) {
+    const prev = list.find(x => x && x.id === orig.correctedBy && !x.deleted);
+    if (prev && prev.status !== '已作废') {
+      return { error: '已有重开单 ' + (prev[noField] || '') + '，请先作废那张再重开' };
+    }
+  }
+  return { orig };
+}
 // 该材料「已确认入库且领料单未作废」的最早到货日（P4-1 临时门槛用；第二批回放上线后删除调用方）
 
 
@@ -263,6 +283,10 @@ app.post('/api/materialOutbound/create', (req, res) => {
   const outDateReason = String(b.outDateReason || '').trim();
   const outDateErr = bizDateError('出库日期', outDate, outDateReason);
   if (outDateErr) return res.status(400).json({ error: outDateErr });
+  // 作废重开：correctedFrom 必须指向已存在、未删除、已作废的原出库单；不满足就 400，绝不建单
+  const reopen = resolveReopenSource('out', b.correctedFrom);
+  if (reopen.error) return res.status(400).json({ error: reopen.error });
+  const reopenOrig = reopen.orig;
   const items = Array.isArray(b.items) ? b.items : [];
   if (!items.length) return res.status(400).json({ error: '请勾选需要出库的材料' });
   const stats = outboundStats(project);
@@ -316,10 +340,13 @@ app.post('/api/materialOutbound/create', (req, res) => {
     outDate, outDateReason,
     workPlanId, workDate, processName,
     items: finalItems, returns: [], compensated: 0,
+    correctedFrom: reopenOrig ? reopenOrig.id : '', correctedFromNo: reopenOrig ? (reopenOrig.outNo || '') : '',
     legacy: false,
     deleted: false
   };
   DB.materialOutbound.unshift(rec);
+  // 原单回写反向关联（同一次 saveDB 落盘，保证双向一致）
+  if (reopenOrig) { reopenOrig.correctedBy = rec.id; reopenOrig.correctedByNo = rec.outNo; }
   saveDB();
   res.json({
     ok: true, data: withOutboundLinks([rec])[0],
@@ -850,7 +877,7 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
 // 历史单已由 scripts/migrate-no4-20261031.js 全量重编为本格式，推导天然连续。
 // 从暂存的物料生成领料单；领料数量可任意填写（默认=可继续领料），但不能大于可继续领料
 // 请求体：{ items: [{ id, qty }], reqDate?, reqDateReason?, correctedFrom? }（兼容旧 { ids: [...] } = 按可继续领料全量生成）
-// P4-3：correctedFrom 为被更正的原领料单（id 或单号），新单写 correctedFrom/FromNo，原单回写 correctedBy/ByNo。
+// 作废重开：correctedFrom 为被重开的原领料单（id 或单号，须已作废），新单写 correctedFrom/FromNo，原单回写 correctedBy/ByNo。
 app.post('/api/requisitions/create', (req, res) => {
   const body = req.body || {};
   const list = Array.isArray(body.items) && body.items.length
@@ -862,13 +889,10 @@ app.post('/api/requisitions/create', (req, res) => {
   const reqDateReason = String(body.reqDateReason || '').trim();
   const reqDateErr = bizDateError('领料日期', reqDate, reqDateReason);
   if (reqDateErr) return res.status(400).json({ error: reqDateErr });
-  // P4-3：更正来源先校验，找不到就 400，绝不建单
-  const correctedFromInput = String(body.correctedFrom || '').trim();
-  let orig = null;
-  if (correctedFromInput) {
-    orig = DB.materialRequisitions.find(x => !x.deleted && (x.id === correctedFromInput || x.reqNo === correctedFromInput)) || null;
-    if (!orig) return res.status(400).json({ error: '要更正的原领料单不存在（' + correctedFromInput + '）' });
-  }
+  // 作废重开：correctedFrom 必须指向已存在、未删除、已作废的原领料单；不满足就 400，绝不建单
+  const reopen = resolveReopenSource('req', body.correctedFrom);
+  if (reopen.error) return res.status(400).json({ error: reopen.error });
+  const orig = reopen.orig;
   const items = [];
   const skipped = [];
   const touched = [];
@@ -935,7 +959,7 @@ app.get('/api/materialRequisitions/:id/download', (req, res) => {
   aoa.push([(docUnit ? docUnit + '过渡仓代保管物资领料单' : '物资领料单'), '', '', '', '', '', '']);
   aoa.push(['项目部门：', '', '', '', '', '', '']);
   // P4-6：补领料日期与单号（单号日期即开单日，两者都应能在打印表上看到）
-  aoa.push(['领料日期：' + (rec.reqDate || '') + '　　领料单号：' + (rec.reqNo || '') + (rec.correctedFromNo ? '　　更正自：' + rec.correctedFromNo : ''), '', '', '', '', '', '']);
+  aoa.push(['领料日期：' + (rec.reqDate || '') + '　　领料单号：' + (rec.reqNo || '') + (rec.correctedFromNo ? '　　重开自：' + rec.correctedFromNo : ''), '', '', '', '', '', '']);
   aoa.push(['序号', '物料编码', '物料描述', '计量单位', '数量', '项目名称', '备注']);
   rec.items.forEach((it, i) => {
     aoa.push([String(i + 1), it.code, it.description, it.unit, it.qty, it.project, it.orderNo === '-' ? '' : it.orderNo]);

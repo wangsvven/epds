@@ -3874,10 +3874,10 @@ async function runSmoke() {
     const m = await p4Mat('H', 100);
     const r1 = await p4Req(m.id, 5, srvToday);
     needOk(await p4Confirm(r1.id, m.id, 5, srvToday), 'P4-3 confirm');
-    needOk(await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-3 更正' } }), 'P4-3 作废');
+    needOk(await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT P4-3 重开' } }), 'P4-3 作废');
     const r2 = await p4Req(m.id, 3, srvToday, { correctedFrom: r1.id });
     need(r2.correctedFrom === r1.id && r2.correctedFromNo === r1.reqNo, '新单应带 correctedFrom：' + brief({ a: r2.correctedFrom, b: r2.correctedFromNo }));
-    need(r2.legacy === false, '更正新单仍应是新单');
+    need(r2.legacy === false, '重开新单仍应是新单');
     const list = needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs');
     const old = (list || []).find(x => x.id === r1.id);
     need(old.correctedBy === r2.id && old.correctedByNo === r2.reqNo, '原单应回写 correctedBy：' + brief({ a: old.correctedBy }));
@@ -3885,8 +3885,20 @@ async function runSmoke() {
     const cnt = (list || []).length;
     const bad = await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], correctedFrom: 'rq_not_exist_zz' } });
     need(bad.status === 400 && /不存在/.test(String(bad.data.error)), 'correctedFrom 不存在应 400：' + brief(bad.data));
-    need((await api('GET', '/api/materialRequisitions', { token })).data.length === cnt, '不存在的更正来源不应建单');
-    return r1.reqNo + ' → ' + r2.reqNo;
+    need((await api('GET', '/api/materialRequisitions', { token })).data.length === cnt, '不存在的重开来源不应建单');
+    // 原单未作废不能重开
+    const r3 = await p4Req(m.id, 1, srvToday);
+    const notVoid = await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], correctedFrom: r3.id } });
+    need(notVoid.status === 400 && /尚未作废/.test(String(notVoid.data.error)), '原单未作废不能重开：' + brief(notVoid.data));
+    // 同一原单已有仍有效的重开单时拒绝
+    const dup = await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], correctedFrom: r1.id } });
+    need(dup.status === 400 && /已有重开单/.test(String(dup.data.error)), '已有有效重开单时再次重开应 400：' + brief(dup.data));
+    // 把重开单也作废后允许再次重开，反向关联更新为最新一张
+    needOk(await api('PUT', '/api/materialRequisitions/' + r2.id + '/void', { token, body: { reason: 'ZT P4-3 作废重开单' } }), 'P4-3 作废重开单');
+    const r4 = await p4Req(m.id, 2, srvToday, { correctedFrom: r1.id });
+    const old2 = (needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs2') || []).find(x => x.id === r1.id);
+    need(old2.correctedBy === r4.id && old2.correctedByNo === r4.reqNo, '重开单已作废后允许再重开，关联更新为最新：' + brief({ a: old2.correctedByNo }));
+    return r1.reqNo + ' → ' + r2.reqNo + ' → ' + r4.reqNo;
   });
 
   await step('materials', 'P4-4-B/C 回放：补录压垮中间日拒绝、每天不为负放行', async () => {

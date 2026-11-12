@@ -332,7 +332,7 @@ const MaterialsView = {
         tab.value = 'requisition';
         window.dispatchEvent(new CustomEvent('requisitions-refresh'));
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
-    } 
+    }
     // ---------- 关联领料单弹窗（点击状态标签跳转） ----------
     const relDlg = reactive({ visible: false, material: null, recs: [], page: 1, pageSize: 30 });
     async function openRelated(row) {
@@ -1035,6 +1035,53 @@ const Requisitions = {
       } catch (e) { if (e !== 'cancel') ElementPlus.ElMessage.error(e.message || '已取消'); }
     }
 
+    // 作废重开：在已作废、未删除的领料单上开新单。日期默认原开单日（可改），按所选日期取该日下一号；
+    // 材料行与数量按原单预填（可改），提交带 correctedFrom，原单保持已作废。
+    const rdlg2 = reactive({ visible: false, rec: null, date: '', reason: '', items: [], no: '', saving: false });
+    async function openReopen(r) {
+      if (!r || r.status !== '已作废' || r.deleted) return;
+      rdlg2.rec = r;
+      rdlg2.items = (r.items || []).filter(it => it && it.materialId)
+        .map(it => ({ id: it.materialId, qty: Number(it.qty) || 0, description: it.description || '', unit: it.unit || '' }));
+      if (!rdlg2.items.length) { ElementPlus.ElMessage.error('原单没有可重开的材料行'); return; }
+      rdlg2.date = String(r.reqDate || '').slice(0, 10) || todayStr();
+      rdlg2.reason = String(r.reqDateReason || '');
+      rdlg2.no = ''; rdlg2.saving = false;
+      rdlg2.visible = true;
+      refreshReopenNo();
+    }
+    async function refreshReopenNo() {
+      try {
+        const rows = await api.get('/api/materialRequisitions');
+        const list0 = Array.isArray(rows) ? rows : (rows.data || []);
+        const pre = 'LL-' + String(rdlg2.date || '').replace(/-/g, '') + '-';
+        let max = 0;
+        list0.forEach(x => {
+          const no = String((x && x.reqNo) || '');
+          if (no.indexOf(pre) !== 0) return;
+          const sfx = no.slice(pre.length);
+          if (/^\d+$/.test(sfx)) max = Math.max(max, parseInt(sfx, 10));
+        });
+        rdlg2.no = pre + String(max + 1).padStart(4, '0');
+      } catch (e) { rdlg2.no = ''; }
+    }
+    async function submitReopen() {
+      if (!rdlg2.rec) return;
+      if (!rdlg2.items.some(it => Number(it.qty) > 0)) { ElementPlus.ElMessage.error('请填写重开数量'); return; }
+      rdlg2.saving = true;
+      try {
+        const res = await api.post('/api/requisitions/create', {
+          items: rdlg2.items.map(it => ({ id: it.id, qty: Number(it.qty) })),
+          reqDate: rdlg2.date || '', reqDateReason: rdlg2.reason || '',
+          correctedFrom: rdlg2.rec.id
+        });
+        ElementPlus.ElMessage.success('已重开领料单 ' + res.data.reqNo + '（开单日 ' + (res.data.reqDate || '') + '）');
+        rdlg2.visible = false;
+        load();
+        window.dispatchEvent(new CustomEvent('materials-changed'));
+      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      finally { rdlg2.saving = false; }
+    }
     function stockInfo(rec, it) {
       if (rec.status === '待入库') return { text: '待入库', type: 'primary' };
       if (rec.status === '已作废') return { text: '已作废', type: 'info' };
@@ -1060,7 +1107,7 @@ const Requisitions = {
     function arrivedSum(rec, materialId) {
       return itemHistory(rec, materialId).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
+    return { list, loading, filters, projectOptions, dlg, vdlg, rdlg2, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, openReopen, refreshReopenNo, submitReopen, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
   },
   template: `
   <div>
@@ -1088,8 +1135,8 @@ const Requisitions = {
               <span class="rq-exp-title">领料明细</span>
               <span class="rq-exp-count">{{ row.items.length }} 项 · 合计 {{ sumQty(row) }}</span>
               <span class="rq-exp-count">开单日 {{ row.reqDate || '—' }} · 录入 {{ fmtTime(row.createdAt) }}</span>
-              <span v-if="row.correctedFromNo" class="rq-exp-chip">更正自 {{ row.correctedFromNo }}</span>
-              <span v-if="row.correctedByNo" class="rq-exp-chip">已由 {{ row.correctedByNo }} 更正</span>
+              <span v-if="row.correctedFromNo" class="rq-exp-chip">重开自 {{ row.correctedFromNo }}</span>
+              <span v-if="row.correctedByNo" class="rq-exp-chip">已由 {{ row.correctedByNo }} 重开</span>
               <span v-if="row.status==='已作废'" class="rq-exp-chip">已作废 · 数量已冲销</span>
             </div>
             <div v-for="(it, idx) in row.items" :key="it.materialId" class="rq-mat">
@@ -1142,12 +1189,13 @@ const Requisitions = {
       <el-table-column label="状态" width="90">
         <template #default="{row}"><el-tag size="small" :type="statusType(row.status)">{{ row.status }}</el-tag></template>
       </el-table-column>
-      <el-table-column label="操作" width="190">
+      <el-table-column label="操作" width="235">
         <template #default="{row}">
           <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
           <el-button v-if="row.status==='待入库' && canWrite('materials')" link type="primary" size="small" @click="openConfirm(row)">确认入库</el-button>
           <el-button v-if="row.status==='部分到库' && canWrite('materials')" link type="primary" size="small" @click="openSupplement(row)">补入库</el-button>
           <el-button v-if="row.status!=='已作废' && canWrite('materials')" link type="danger" size="small" @click="voidReq(row)">作 废</el-button>
+          <el-button v-if="row.status==='已作废' && canWrite('materials')" link type="primary" size="small" @click="openReopen(row)">重 开</el-button>
           <el-button v-if="row.status==='已作废' && canWrite('materials')" link type="danger" size="small" @click="deleteReq(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -1225,6 +1273,42 @@ const Requisitions = {
       <template #footer>
         <el-button @click="vdlg.visible=false">取 消</el-button>
         <el-button type="danger" @click="confirmVoid">确认作废</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="rdlg2.visible" :title="'重开领料单'" width="620px" top="12vh">
+      <div v-if="rdlg2.rec" style="margin-bottom:12px;background:var(--surface-3);border-radius:6px;padding:8px 12px;font-size:13px;color:var(--text-2)">
+        重开自原单 <b>{{ rdlg2.rec.reqNo }}</b>：取新单号、原单保持已作废；日期与数量可改后再提交。
+      </div>
+      <el-form label-position="top">
+        <el-row :gutter="12">
+          <el-col :span="12" :xs="24">
+            <el-form-item label="领料日期（开单日，决定单号日期）" required>
+              <el-date-picker v-model="rdlg2.date" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" @change="refreshReopenNo" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" :xs="24">
+            <el-form-item label="即将生成的单号">
+              <el-input :model-value="rdlg2.no" readonly />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item v-if="rdlg2.date && rdlg2.date < oldLimit30()" label="领料日期早于 30 天，补录原因" required>
+          <el-input v-model="rdlg2.reason" placeholder="请说明补录原因" />
+        </el-form-item>
+      </el-form>
+      <el-table :data="rdlg2.items" size="small" border style="width:100%">
+        <el-table-column prop="description" label="材料" min-width="220" />
+        <el-table-column label="数量" width="130">
+          <template #default="{row}">
+            <el-input-number v-model="row.qty" :min="0" :precision="4" :controls="false" size="small" style="width:110px" />
+          </template>
+        </el-table-column>
+        <el-table-column prop="unit" label="单位" width="70" />
+      </el-table>
+      <template #footer>
+        <el-button @click="rdlg2.visible=false">取 消</el-button>
+        <el-button type="primary" :loading="rdlg2.saving" @click="submitReopen">确认重开</el-button>
       </template>
     </el-dialog>
   </div>`
@@ -1373,7 +1457,7 @@ const Outbounds = {
     const opage = ref(1); const opageSize = ref(30);
     // 登记出库 / 出库单详情 / 归还 / 打印预览
     // P1：出库可选关联 —— 计划（workPlanId）、作业日（workDate）、工序（processName），明细行来源领料单（requisitionId）
-    const dlg = reactive({ visible: false, workerId: '', workPlanId: '', workDate: '', outDate: '', outDateReason: '', processName: '', rows: [] });
+    const dlg = reactive({ visible: false, workerId: '', workPlanId: '', workDate: '', outDate: '', outDateReason: '', processName: '', rows: [], correctedFrom: '', correctedFromNo: '' });
     const reqList = ref([]);   // 来源领料单候选（未作废即可，按材料行过滤）
     const planList = ref([]);  // 关联计划候选（按工程同口径过滤）
     const od = reactive({ visible: false, rec: null });
@@ -1499,6 +1583,25 @@ const Outbounds = {
       dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: q0(outQty[r.id]), requisitionId: '' }));
       dlg.workerId = ''; dlg.workPlanId = ''; dlg.workDate = ''; dlg.processName = '';
       dlg.outDate = bizToday(); dlg.outDateReason = '';
+      dlg.correctedFrom = ''; dlg.correctedFromNo = '';
+      dlg.visible = true;
+    }
+    // 作废重开：在已作废、未删除的出库单上开新单。出库日默认原单那天（可改），按所选日期取下一个流水；
+    // 领取人按原单姓名匹配已准入工人，材料行与数量按原单预填（来源领料单不预填，原单已作废）。
+    function reopenOut(row) {
+      if (!row || row.status !== '已作废' || row.deleted) return;
+      const list0 = list.value || [];
+      dlg.rows = (row.items || []).filter(it => it && it.materialId).map(it => {
+        const cur = list0.find(x => x.id === it.materialId);
+        return { id: it.materialId, description: it.description, unit: it.unit, available: cur ? Number(cur.available) : 0, qty: Number(it.qty) || 0, requisitionId: '' };
+      });
+      if (!dlg.rows.length) { ElementPlus.ElMessage.error('原单没有可重开的材料行'); return; }
+      const w0 = (workers.value || []).find(x => String(x.name || '').trim() === String(row.receiver || '').trim());
+      dlg.workerId = w0 ? w0.id : '';
+      dlg.workPlanId = ''; dlg.workDate = ''; dlg.processName = '';
+      dlg.outDate = String(row.outDate || '').slice(0, 10) || bizToday();
+      dlg.outDateReason = String(row.outDateReason || '');
+      dlg.correctedFrom = row.id; dlg.correctedFromNo = row.outNo || '';
       dlg.visible = true;
     }
     // P4-6：出库日默认等于已填作业日（作业日晚于今天则回落今天）
@@ -1534,19 +1637,25 @@ const Outbounds = {
         if (Number(r.qty) > Number(r.available) + 1e-9) { ElementPlus.ElMessage.error('「' + r.description + '」本次出库 ' + r.qty + ' 超过可用库存 ' + r.available); return; }
       }
       try {
-        const res = await api.post('/api/materialOutbound/create', {
+        const wasReopen = !!dlg.correctedFrom;
+        const body = {
           project: project.value, workerId: w.id, receiver: w.name,
           workPlanId: dlg.workPlanId || '', workDate: dlg.workDate || '', processName: (dlg.processName || '').trim(),
           outDate: dlg.outDate || '', outDateReason: dlg.outDateReason || '',
           items: dlg.rows.map(r => ({ materialId: r.id, qty: Number(r.qty), requisitionId: r.requisitionId || '' }))
-        });
-        ElementPlus.ElMessage.success('出库单 ' + res.data.outNo + ' 已登记' + (res.outDateFallback ? '（作业日晚于今天，出库日已按今天）' : ''));
+        };
+        if (wasReopen) body.correctedFrom = dlg.correctedFrom;
+        const res = await api.post('/api/materialOutbound/create', body);
+        ElementPlus.ElMessage.success((wasReopen ? '已重开出库单 ' : '出库单 ') + res.data.outNo + (wasReopen ? '' : ' 已登记') + (res.outDateFallback ? '（作业日晚于今天，出库日已按今天）' : ''));
         dlg.visible = false;
-        selection.value = [];
-        if (mainTable.value && mainTable.value.clearSelection) mainTable.value.clearSelection();
-        Object.keys(outQty).forEach(k => delete outQty[k]);
+        dlg.correctedFrom = ''; dlg.correctedFromNo = '';
+        if (!wasReopen) {
+          selection.value = [];
+          if (mainTable.value && mainTable.value.clearSelection) mainTable.value.clearSelection();
+          Object.keys(outQty).forEach(k => delete outQty[k]);
+        }
         await load();
-        od.rec = res.data; od.visible = true;
+        if (!wasReopen) { od.rec = res.data; od.visible = true; }
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     function openOrder(o) { od.rec = o; od.visible = true; }
@@ -1703,7 +1812,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, outNoPreview, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, reopenOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, outNoPreview, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf };
   },
   template: `
   <div>
@@ -1796,11 +1905,12 @@ const Outbounds = {
             </el-table-column>
             <el-table-column label="出库日期" width="112"><template #default="{row}">{{ row.outDate || '—' }}</template></el-table-column>
             <el-table-column label="登记时间" width="160"><template #default="{row}">{{ fmtTime(row.createdAt) }}</template></el-table-column>
-            <el-table-column label="操作" width="230">
+            <el-table-column label="操作" width="285">
               <template #default="{row}">
                 <el-button link type="primary" size="small" @click="openOrder(row)">查看</el-button>
                 <el-button v-if="row.status === '有效' && canWrite('materials')" link type="primary" size="small" @click="openReturn(row)">登记归还</el-button>
                 <el-button v-if="row.status === '有效' && canWrite('materials')" link type="danger" size="small" @click="openVoid(row)">作废</el-button>
+                <el-button v-if="row.status === '已作废' && canWrite('materials')" link type="primary" size="small" @click="reopenOut(row)">重开</el-button>
                 <el-button v-if="row.status === '已作废' && canWrite('materials')" link type="danger" size="small" @click="deleteOrder(row)">删除</el-button>
                 <el-button link type="primary" size="small" @click="printRow(row)">打印</el-button>
               </template>
@@ -1815,7 +1925,10 @@ const Outbounds = {
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog title="登记出库" v-model="dlg.visible" width="680px" top="8vh">
+    <el-dialog :title="dlg.correctedFrom ? '重开出库单' : '登记出库'" v-model="dlg.visible" width="680px" top="8vh">
+      <div v-if="dlg.correctedFrom" style="margin-bottom:12px;background:var(--surface-3);border-radius:6px;padding:8px 12px;font-size:13px;color:var(--text-2)">
+        重开自原单 <b>{{ dlg.correctedFromNo }}</b>：取新单号、原单保持已作废；日期、领取人、数量可改后再提交。
+      </div>
       <el-form label-position="top">
         <el-form-item label="工程">
           <el-select v-model="project" disabled style="width:100%" placeholder="请选择工程" />
@@ -1897,6 +2010,8 @@ const Outbounds = {
         <div>关联计划：{{ od.rec.workPlanName || '—' }}</div>
         <div>作业日：{{ od.rec.workDate || '—' }}</div>
         <div>工序 / 工作内容：{{ od.rec.processName || '—' }}</div>
+        <div v-if="od.rec.correctedFromNo">重开自：{{ od.rec.correctedFromNo }}</div>
+        <div v-if="od.rec.correctedByNo">已由 {{ od.rec.correctedByNo }} 重开</div>
       </div>
       <el-table :data="od.rec.items" size="small" border style="width:100%">
         <el-table-column prop="description" label="材料" min-width="180" />
@@ -1986,6 +2101,10 @@ const Outbounds = {
             <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ pdlg.rec.receiver }}</td>
           </tr>
         </table>
+        <div v-if="pdlg.rec.correctedFromNo || pdlg.rec.correctedByNo" style="font-size:13px;color:var(--text-2);margin:-6px 0 12px">
+          <span v-if="pdlg.rec.correctedFromNo">重开自：{{ pdlg.rec.correctedFromNo }}</span>
+          <span v-if="pdlg.rec.correctedByNo" style="margin-left:16px">已由 {{ pdlg.rec.correctedByNo }} 重开</span>
+        </div>
         <table style="width:100%;border-collapse:collapse">
           <thead>
             <tr>
