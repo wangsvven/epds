@@ -65,11 +65,13 @@ function replayFail(res, m, rp, what) {
   } else if (rp.refNo) {
     refs = [{ reqNo: rp.refNo }];
   }
+  const canBundle = refs.some(x => x.outboundId && x.entryId);
+  // 第五批修正：被出库占用时，文案明确给出「可一并更正」的同一出路（接口文案，不只靠 canBundle 字段）
+  const finalMsg = msg + (canBundle ? '；可一并更正该出库记录后再提交' : '');
   return res.status(400).json({
-    error: msg, date: rp.firstNegativeDate,
+    error: finalMsg, date: rp.firstNegativeDate,
     materialId: m ? m.id : '', code: (m && m.code) || '', description: desc,
-    available: rp.available, qty: rp.qty, refs,
-    canBundle: refs.some(x => x.outboundId && x.entryId)
+    available: rp.available, qty: rp.qty, refs, canBundle
   });
 }
 // 取号：按前缀扫已落库的最大流水 +1（含已作废 / 已删除，不回收、不复用），超 9999 位数自然增长
@@ -1431,6 +1433,10 @@ function validateReceiptPlan(rec, entry, parsed) {
     const B = materialById(p.newMaterialId);
     if (!B) return { error: '新型号不在材料台账（materialId=' + p.newMaterialId + '），禁止借更正新建材料' };
     if (p.newMaterialId !== p.oldMaterialId) {
+      // 第五批修正 F2：不得借更正改项目，新型号必须与原物料同一工程
+      if (!sameProjectScope(A.project, B.project)) {
+        return { error: '不能把型号改到其他工程的材料（原物料「' + (A.description || A.code) + '」与「' + (B.description || B.code) + '」不属于同一工程）' };
+      }
       const obA = openingBlockedMsg(A, entry);
       if (obA) return { error: '该次入库属于存量期初（' + obA + '），不能改型号；只可改数量或到货日' };
       const obB = openingBlockedMsg(B, entry);
@@ -1478,6 +1484,10 @@ function validateOutboundPlan(o, entry, parsed) {
     const B = materialById(p.newMaterialId);
     if (!B) return { error: '新型号不在材料台账（materialId=' + p.newMaterialId + '），禁止借更正新建材料' };
     if (p.newMaterialId !== p.oldMaterialId) {
+      // 第五批修正 F2：新型号与原物料、出库单必须属于同一工程
+      if (!sameProjectScope(A.project, B.project) || !sameProjectScope(o.project, B.project)) {
+        return { error: '不能把型号改到其他工程的材料（原物料「' + (A.description || A.code) + '」与「' + (B.description || B.code) + '」不属于同一工程）' };
+      }
       const obA = openingBlockedMsg(A, entry);
       if (obA) return { error: '该次出库属于存量期初（' + obA + '），不能改型号；只可改数量或出库日' };
       const obB = openingBlockedMsg(B, entry);
@@ -1485,6 +1495,57 @@ function validateOutboundPlan(o, entry, parsed) {
     }
   }
   return {};
+}
+/* 第五批修正 F1：出库更正换型号时，目标材料必须与「登记出库 / 可出库列表」同一口径
+ * 可用 = 已到 − 净出库；已到为 0 或扣完为负即拒绝。不改写任何期初字段。
+ * 计算时点先计入本次出库冲销（本单净额由「冲销 + 更正」替代）与同请求连带入库更正的已到增量
+ *（等同重新入库），再判断目标材料够不够扣。只改数量 / 只改日期的更正不走本函数。
+ * outPlans     : [{ o, parsed }]            本次请求里全部出库更正（主更正或附带）
+ * receiptPlans : [{ validated:{dArr} }]     本次请求里全部入库更正（主更正或附带）
+ * hintReceipt  : 单独改正出库时，文案提示可一并更正对应入库
+ */
+function correctionSwitchGate(outPlans, receiptPlans, hintReceipt) {
+  const targets = new Set();
+  (outPlans || []).forEach(x => (x.parsed.plan || []).forEach(p => {
+    if (p.newMaterialId !== p.oldMaterialId && p.newQty > 0) targets.add(p.newMaterialId);
+  }));
+  if (!targets.size) return '';
+  const override = {};
+  (outPlans || []).forEach(x => {
+    const m = {};
+    (x.parsed.plan || []).forEach(p => {
+      if (p.newQty) m[p.newMaterialId] = roundQty((m[p.newMaterialId] || 0) + p.newQty);
+    });
+    override[x.o.id] = m;
+  });
+  const arrivedDelta = {};
+  (receiptPlans || []).forEach(x => {
+    Object.keys((x.validated && x.validated.dArr) || {}).forEach(mid => {
+      arrivedDelta[mid] = roundQty((arrivedDelta[mid] || 0) + (x.validated.dArr[mid] || 0));
+    });
+  });
+  for (const mid of targets) {
+    const m = materialById(mid);
+    if (!m) continue; // 存在性由 validate*Plan 负责
+    const arrived = roundQty(Number(m.qtyArrived || 0) + (arrivedDelta[mid] || 0));
+    let taken = 0, returned = 0;
+    DB.materialOutbound.forEach(o => {
+      if (o.deleted || o.status !== '有效' || !sameProjectScope(o.project, m.project)) return;
+      const ov = override[o.id];
+      const net = ov ? roundQty(ov[mid] || 0) : outboundNetOf(o, mid);
+      if (!net) return;
+      taken = roundQty(taken + net);
+      const ret = ov ? 0 : outboundReturnedOf(o, mid); // 更正接口已拒绝有归还的单
+      if (ret) returned = roundQty(returned + ret);
+    });
+    const available = roundQty(arrived - roundQty(taken - returned));
+    if (arrived <= 0 || available < -1e-9) {
+      return '物料「' + (m.description || m.code) + '」未到库或可用不足（更正后已到 ' + arrived
+        + '，可用 ' + available + '），不能把出库改到该型号'
+        + (hintReceipt ? '；可在本次提交里一并更正对应入库记录（等同重新入库）后再出库' : '；请先确认入库数量与到货日');
+    }
+  }
+  return '';
 }
 function receiptExtraByMaterial(parsed, entry) {
   const map = {};
@@ -1667,6 +1728,8 @@ app.post('/api/materialRequisitions/:id/receipts/:entryId/correct', (req, res) =
   const bundleIn = Array.isArray(body.outboundCorrections) ? body.outboundCorrections : [];
   for (const b of bundleIn) {
     if (!b || !b.outboundId || !b.entryId) return res.status(400).json({ error: '附带的出库更正缺少 outboundId / entryId' });
+    // 第五批修正 F3：附带每一条都必须单独填原因，不得沿用主更正原因
+    if (!String(b.reason || '').trim()) return res.status(400).json({ error: '附带的出库更正必须填写更正原因（不得沿用主更正原因）' });
     const o = DB.materialOutbound.find(x => x.id === b.outboundId && !x.deleted);
     if (!o) return res.status(400).json({ error: '附带的出库单不存在' });
     if (o.status !== '有效') return res.status(400).json({ error: '附带的出库单已作废，不能更正' });
@@ -1686,13 +1749,17 @@ app.post('/api/materialRequisitions/:id/receipts/:entryId/correct', (req, res) =
     if (!hit || (oeDay && oeDay < entryBizDay(entry))) {
       return res.status(400).json({ error: '附带的出库更正 ' + (o.outNo || o.id) + ' 与本次入库更正无关' });
     }
-    const bb = Object.assign({}, b, { reason: String(b.reason || parsed.reason).trim() });
+    const bb = Object.assign({}, b, { reason: String(b.reason || '').trim() });
     const op = parseOutboundCorrection(o, oe, bb);
     if (op.error) return res.status(400).json({ error: '附带出库更正：' + op.error });
     const ov = validateOutboundPlan(o, oe, op);
     if (ov.error) return res.status(400).json({ error: '附带出库更正：' + ov.error });
     bundles.push({ o, entry: oe, parsed: op });
   }
+
+  // 第五批修正 F1：换型号目标材料按「已到 − 净出库」判定，含本次冲销补回与连带入库增量
+  const gateErr = correctionSwitchGate(bundles.map(b => ({ o: b.o, parsed: b.parsed })), [{ validated: v }], false);
+  if (gateErr) return res.status(400).json({ error: gateErr });
 
   const extra = {};
   mergeExtra(extra, receiptExtraByMaterial(parsed, entry));
@@ -1767,6 +1834,8 @@ app.post('/api/materialOutbound/:id/entries/:entryId/correct', (req, res) => {
   const receiptIn = Array.isArray(body.receiptCorrections) ? body.receiptCorrections : [];
   for (const b of receiptIn) {
     if (!b || !b.requisitionId || !b.entryId) return res.status(400).json({ error: '附带的入库更正缺少 requisitionId / entryId' });
+    // 第五批修正 F3：附带每一条都必须单独填原因，不得沿用主更正原因
+    if (!String(b.reason || '').trim()) return res.status(400).json({ error: '附带的入库更正必须填写更正原因（不得沿用主更正原因）' });
     const rec = DB.materialRequisitions.find(x => x.id === b.requisitionId && !x.deleted);
     if (!rec) return res.status(400).json({ error: '附带的领料单不存在' });
     if (rec.status === '已作废') return res.status(400).json({ error: '附带的领料单已作废，不能更正' });
@@ -1785,13 +1854,17 @@ app.post('/api/materialOutbound/:id/entries/:entryId/correct', (req, res) => {
     if (!hasMat || (heDay && heDay > maxOut)) {
       return res.status(400).json({ error: '附带的入库更正 ' + (rec.reqNo || rec.id) + ' 与本次出库更正无关' });
     }
-    const bb = Object.assign({}, b, { reason: String(b.reason || parsed.reason).trim() });
+    const bb = Object.assign({}, b, { reason: String(b.reason || '').trim() });
     const rp = parseReceiptCorrection(rec, he, bb);
     if (rp.error) return res.status(400).json({ error: '附带入库更正：' + rp.error });
     const rv = validateReceiptPlan(rec, he, rp);
     if (rv.error) return res.status(400).json({ error: '附带入库更正：' + rv.error });
     bundles.push({ rec, entry: he, parsed: rp, validated: rv });
   }
+
+  // 第五批修正 F1：换型号目标材料按「已到 − 净出库」判定，含本次冲销补回与连带入库增量
+  const gateErr = correctionSwitchGate([{ o, parsed }], bundles.map(b => ({ validated: b.validated })), bundles.length === 0);
+  if (gateErr) return res.status(400).json({ error: gateErr });
 
   const extra = {};
   mergeExtra(extra, outboundExtraByMaterial(parsed, entry));

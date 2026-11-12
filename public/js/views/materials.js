@@ -1062,7 +1062,14 @@ const Requisitions = {
       const hit = all.filter(m => !ps.length || ps.includes(m.project));
       return hit.length ? hit : all;
     });
-    const matLabel = m => (m ? ((m.code ? m.code + ' ' : '') + (m.description || '')) : '');
+    const matLabel = m => {
+      if (!m) return '';
+      const ps = (cdlg.rec && cdlg.rec.projects) || [];
+      const tags = [];
+      if (ps.length && m.project && !ps.includes(m.project)) tags.push('其他工程');
+      if (!(Number(m.qtyArrived) > 0)) tags.push('未到库');
+      return (m.code ? m.code + ' ' : '') + (m.description || '') + (tags.length ? '（' + tags.join('；') + '）' : '');
+    };
     async function openCorrect(rec, h) {
       await loadMatOptions();
       const raw = (rec.history || []).find(x => x && x.id === h.id);
@@ -1082,6 +1089,7 @@ const Requisitions = {
     async function submitCorrect() {
       if (!cdlg.rec || !cdlg.entry) return;
       if (!String(cdlg.reason || '').trim()) { ElementPlus.ElMessage.error('请填写更正原因'); return; }
+      if (cdlg.bundle && cdlg.bundle.enabled && !String(cdlg.bundle.reason || '').trim()) { ElementPlus.ElMessage.error('请填写附带出库更正的原因（不得沿用主更正原因）'); return; }
       if (cdlg.arrivalDate && cdlg.arrivalDate < oldLimit30() && !String(cdlg.arrivalReason || '').trim()) {
         ElementPlus.ElMessage.error('到货日期早于 30 天，请填写补录原因'); return;
       }
@@ -1099,7 +1107,7 @@ const Requisitions = {
             entryId: cdlg.bundle.entryId,
             qty: Number(cdlg.bundle.qty),
             outDate: cdlg.bundle.outDate,
-            reason: String(cdlg.bundle.reason || '').trim() || body.reason,
+            reason: String(cdlg.bundle.reason || '').trim(),
             materialId: cdlg.bundle.materialId || (cdlg.rows[0] && cdlg.rows[0].newMaterialId) || ''
           }];
         }
@@ -1116,7 +1124,7 @@ const Requisitions = {
             cdlg.bundle = {
               enabled: true, outboundId: r0.outboundId, entryId: r0.entryId,
               qty: Number(r0.net || r0.qty) || 0, outDate: r0.outDate || cdlg.arrivalDate,
-              materialId: (cdlg.rows[0] && cdlg.rows[0].newMaterialId) || '', reason: String(cdlg.reason || '').trim()
+              materialId: (cdlg.rows[0] && cdlg.rows[0].newMaterialId) || '', reason: ''
             };
           }
         } else {
@@ -1354,6 +1362,8 @@ const Requisitions = {
                   <el-date-picker v-model="cdlg.bundle.outDate" type="date" value-format="YYYY-MM-DD" style="width:100%" />
                 </el-col>
               </el-row>
+              <div style="margin-top:6px;font-size:13px;color:var(--text-2)">附带出库更正原因（必填，不得沿用主更正原因）</div>
+              <el-input v-model="cdlg.bundle.reason" placeholder="请单独填写该次出库更正原因" style="margin-top:4px" />
             </template>
           </div>
         </div>
@@ -1716,7 +1726,14 @@ const Outbounds = {
       const hit = all.filter(m => !pj || m.project === pj);
       return hit.length ? hit : all;
     });
-    const outMatLabel = m => (m ? ((m.code ? m.code + ' ' : '') + (m.description || '')) : '');
+    const outMatLabel = m => {
+      if (!m) return '';
+      const pj = (ocdlg.rec && ocdlg.rec.project) || '';
+      const tags = [];
+      if (pj && m.project && m.project !== pj) tags.push('其他工程');
+      if (!(Number(m.qtyArrived) > 0)) tags.push('未到库，需一并更正入库');
+      return (m.code ? m.code + ' ' : '') + (m.description || '') + (tags.length ? '（' + tags.join('；') + '）' : '');
+    };
     function entryTag(e) {
       if (!e) return '';
       if (e.reverses || e.direction === 'in') return '冲销';
@@ -1774,6 +1791,7 @@ const Outbounds = {
     async function submitOutCorrect() {
       if (!ocdlg.rec || !ocdlg.entry) return;
       if (!String(ocdlg.reason || '').trim()) { ElementPlus.ElMessage.error('请填写更正原因'); return; }
+      if (ocdlg.bundle && ocdlg.bundle.enabled && !String(ocdlg.bundle.reason || '').trim()) { ElementPlus.ElMessage.error('请填写附带入库更正的原因（不得沿用主更正原因）'); return; }
       if (ocdlg.outDate && ocdlg.outDate < oldLimit30() && !String(ocdlg.outDateReason || '').trim()) {
         ElementPlus.ElMessage.error('出库日期早于 30 天，请填写补录原因'); return;
       }
@@ -1791,7 +1809,7 @@ const Outbounds = {
             entryId: ocdlg.bundle.entryId,
             qty: Number(ocdlg.bundle.qty),
             arrivalDate: ocdlg.bundle.arrivalDate,
-            reason: String(ocdlg.bundle.reason || '').trim() || body.reason,
+            reason: String(ocdlg.bundle.reason || '').trim(),
             materialId: ocdlg.bundle.materialId || (ocdlg.rows[0] && ocdlg.rows[0].newMaterialId) || ''
           }];
         }
@@ -1801,14 +1819,14 @@ const Outbounds = {
         await load();
         if (od.visible && od.rec && od.rec.id === ocdlg.rec.id) od.rec = orders.value.find(o => o.id === ocdlg.rec.id) || od.rec;
       } catch (e) {
-        if (ocdlg.receiptCandidates.length && /可用库存|为负/.test(String(e.message || ''))) {
+        if (ocdlg.receiptCandidates.length && /可用库存|可用不足|未到库|为负|可一并更正/.test(String(e.message || ''))) {
           ocdlg.showBundle = true;
           if (!ocdlg.bundle) {
             const c = ocdlg.receiptCandidates[0];
             ocdlg.bundle = {
               enabled: true, requisitionId: c.requisitionId, reqNo: c.reqNo, entryId: c.entryId,
               qty: c.qty, arrivalDate: c.arrivalDate,
-              materialId: (ocdlg.rows[0] && ocdlg.rows[0].newMaterialId) || '', reason: String(ocdlg.reason || '').trim()
+              materialId: (ocdlg.rows[0] && ocdlg.rows[0].newMaterialId) || '', reason: ''
             };
           }
         }
@@ -1836,9 +1854,22 @@ const Outbounds = {
     }
     window.addEventListener('outbounds-focus-material', focusMaterial);
     onUnmounted(() => window.removeEventListener('outbounds-focus-material', focusMaterial));
+    // 第五批修正 F4：有效出库物料以 entries 净额为准，原 items 原文不动（列表/筛选/详情/打印共用）
+    function netRowsOf(rec) {
+      const raw = (rec && rec.netItems && rec.netItems.length)
+        ? rec.netItems
+        : ((rec && rec.items) || []).map(it => Object.assign({}, it, { qty: it.netQty !== undefined ? it.netQty : it.qty }));
+      // 来源领料单号仍取自原 items（netItems 只有 requisitionId）
+      const itemByMid = {};
+      ((rec && rec.items) || []).forEach(it => { if (it && it.materialId && !itemByMid[it.materialId]) itemByMid[it.materialId] = it; });
+      return raw.filter(it => it && it.materialId && Number(it.qty) > 0).map(it => Object.assign({}, it, {
+        qty: Number(it.qty) || 0, netQty: Number(it.qty) || 0, returned: 0,
+        reqNo: it.reqNo || (itemByMid[it.materialId] && itemByMid[it.materialId].reqNo) || ''
+      }));
+    }
     const ofiltered = computed(() => {
       let arr = orders.value;
-      if (matFilter.value) arr = arr.filter(o => (o.items || []).some(it => it.materialId === matFilter.value.id));
+      if (matFilter.value) arr = arr.filter(o => netRowsOf(o).some(it => it.materialId === matFilter.value.id));
       const k = oKeyword.value.trim();
       if (k) arr = arr.filter(o => String(o.outNo || '').includes(k) || String(o.project || '').includes(k) || String(o.receiver || '').includes(k));
       return arr;
@@ -1847,7 +1878,7 @@ const Outbounds = {
     // 出库单行汇总：累计领取/累计归还/补回数量/净出库（作废单已补回，净出库为 0）
     // P4-9：累计领取/净出库按 netItems（entries 净额）汇总；归还仍按 items.returned
     function oTakeList(o) {
-      const arr = (o.netItems && o.netItems.length) ? o.netItems : (o.items || []);
+      const arr = netRowsOf(o);
       return matFilter.value ? arr.filter(i => i.materialId === matFilter.value.id) : arr;
     }
     function oTake(o) { return oTakeList(o).reduce((s, i) => s + (Number(i.qty) || 0), 0); }
@@ -1985,7 +2016,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, outNoPreview, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf, ocdlg, openOutCorrect, submitOutCorrect, entryTag, entryTagType, entryMatText, canCorrectEntry, outMatOptions, outMatLabel, obRemain, returnedOfMaterial };
+    return { netRowsOf, tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, outNoPreview, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf, ocdlg, openOutCorrect, submitOutCorrect, entryTag, entryTagType, entryMatText, canCorrectEntry, outMatOptions, outMatLabel, obRemain, returnedOfMaterial };
   },
   template: `
   <div>
@@ -2180,7 +2211,7 @@ const Outbounds = {
         <div>作业日：{{ od.rec.workDate || '—' }}</div>
         <div>工序 / 工作内容：{{ od.rec.processName || '—' }}</div>
       </div>
-      <el-table :data="od.rec.items" size="small" border style="width:100%">
+      <el-table :data="netRowsOf(od.rec)" size="small" border style="width:100%">
         <el-table-column prop="description" label="材料" min-width="180" />
         <el-table-column prop="code" label="编码" width="130" />
         <el-table-column prop="unit" label="单位" width="70" />
@@ -2245,7 +2276,7 @@ const Outbounds = {
           </el-table-column>
         </el-table>
         <div v-if="ocdlg.showBundle && ocdlg.receiptCandidates.length" style="margin-top:12px;background:#FDF6EC;border:1px solid #FAECD8;border-radius:6px;padding:10px 12px">
-          <div style="color:#E6A23C;font-size:13px;margin-bottom:6px">新型号库存不足，可一并更正来源入库：</div>
+          <div style="color:#E6A23C;font-size:13px;margin-bottom:6px">新型号未到库或可用不足，可一并更正来源入库（等同重新入库）：</div>
           <el-checkbox v-if="ocdlg.bundle" v-model="ocdlg.bundle.enabled">一并更正当次入库</el-checkbox>
           <template v-if="ocdlg.bundle && ocdlg.bundle.enabled">
             <div style="font-size:13px;line-height:1.8">{{ ocdlg.bundle.reqNo }}　入库日 {{ ocdlg.bundle.arrivalDate }}　数量 {{ ocdlg.bundle.qty }}</div>
@@ -2262,6 +2293,8 @@ const Outbounds = {
                 <el-date-picker v-model="ocdlg.bundle.arrivalDate" type="date" value-format="YYYY-MM-DD" style="width:100%" />
               </el-col>
             </el-row>
+            <div style="margin-top:6px;font-size:13px;color:var(--text-2)">附带入库更正原因（必填，不得沿用主更正原因）</div>
+            <el-input v-model="ocdlg.bundle.reason" placeholder="请单独填写该次入库更正原因" style="margin-top:4px" />
           </template>
         </div>
       </el-form>
@@ -2352,7 +2385,7 @@ const Outbounds = {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(it, i) in pdlg.rec.items" :key="i">
+            <tr v-for="(it, i) in netRowsOf(pdlg.rec)" :key="i">
               <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px;text-align:center">{{ i + 1 }}</td>
               <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ it.description }}</td>
               <td style="border:1px solid var(--line-strong);padding:8px 10px;font-size:13px">{{ it.code }}</td>
