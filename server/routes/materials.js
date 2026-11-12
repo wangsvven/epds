@@ -151,18 +151,26 @@ function voidCreditEventsOf(o) {
   });
   const out = [];
   Object.keys(byMat).forEach(mid => {
-    const dates = Object.keys(byMat[mid]);
+    const dates = Object.keys(byMat[mid]).sort();
     if (!hasCorr) {
       // 未更正：原出库一条，补回数量 = 原数量 − 已归还（归还已在归还日补过）
       const gross = dates.reduce((s, d) => roundQty(s + byMat[mid][d]), 0);
       const net = roundQty(gross - outboundReturnedOf(o, mid));
-      if (net > 0) out.push({ materialId: mid, date: dates.sort()[0], qty: -net });
+      if (net > 0) out.push({ materialId: mid, date: dates[0], qty: -net });
       return;
     }
-    dates.forEach(d => {
-      const net = byMat[mid][d];
-      if (net > 0) out.push({ materialId: mid, date: d, qty: -net });
-    });
+    // 已更正：按日期净额取反；若之后又发生归还，先从最晚的出库日扣掉归还，避免重复补回
+    let returned = outboundReturnedOf(o, mid);
+    for (let i = dates.length - 1; i >= 0; i--) {
+      let net = byMat[mid][dates[i]];
+      if (net <= 0) continue;
+      if (returned > 0) {
+        const cut = Math.min(net, returned);
+        net = roundQty(net - cut);
+        returned = roundQty(returned - cut);
+      }
+      if (net > 0) out.push({ materialId: mid, date: dates[i], qty: -net });
+    }
   });
   return out;
 }
