@@ -4055,9 +4055,9 @@ async function runSmoke() {
     need(idx > 0, '应有入库记录块');
     const hist = aoa.slice(idx).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(String(x[0])));
     need(hist.length === 2, '应有两条按次入库记录：' + brief(hist));
-    need(hist[0][0] === p4D4 && hist[0][1] === '入库' && Number(hist[0][3]) === 6, '第一次到货日/标签/数量不符：' + brief(hist[0]));
-    need(hist[1][0] === dayOff(p4D4, 2) && Number(hist[1][3]) === 4, '第二次到货日/数量不符：' + brief(hist[1]));
-    need(String(hist[0][4]).indexOf(srvToday) === 0, '入库记录应带录入时间：' + brief(hist[0]));
+    need(hist[0][0] === p4D4 && Number(hist[0][2]) === 6, '第一次到货日/数量不符：' + brief(hist[0]));
+    need(hist[1][0] === dayOff(p4D4, 2) && Number(hist[1][2]) === 4, '第二次到货日/数量不符：' + brief(hist[1]));
+    need(String(hist[0][3]).indexOf(srvToday) === 0, '入库记录应带录入时间：' + brief(hist[0]));
     return '领料日期 + 两行到货历史（' + hist.map(x => x[0]).join(' / ') + '）';
   });
 
@@ -4076,49 +4076,20 @@ async function runSmoke() {
     return 'outDate 倒序 · 今天在前、补录在后';
   });
 
-  await step('materials', 'P4-7-A 入库更正：原记录打标不改数，追加冲销+更正，单号不变', async () => {
-    const m = await p4Mat('P', 100);
-    const r = await p4Req(m.id, 10, p4D4);
-    const c = needOk(await api('PUT', '/api/materialRequisitions/' + r.id + '/confirm', { token, body: { rows: [{ materialId: m.id, thisQty: 10 }], arrivalDate: p4D4 } }), 'P4-7-A confirm');
-    const entry = c.data.history[0];
-    need(entry.id, '确认入库的 history 条目应自带 id');
-    const res = await api('POST', '/api/materialRequisitions/' + r.id + '/receipts/' + entry.id + '/correct', {
-      token, body: { qty: 8, arrivalDate: p4D4, reason: 'ZT数量应为 8' }
-    });
-    needOk(res, 'P4-7-A correct');
-    const rec = res.data.data;
-    need(rec.reqNo === r.reqNo && rec.reqDate === r.reqDate && rec.createdAt === c.data.createdAt, '单号/开单日/创建时间不应变');
-    need(rec.history.length === 3, '应为三条 history：' + rec.history.length);
-    const orig = rec.history.find(x => x.id === entry.id);
-    need(orig.reversed === true && orig.reversedBy, '原条目应打 reversed');
-    need(JSON.stringify(orig.rows) === JSON.stringify(entry.rows) && orig.arrivalDate === entry.arrivalDate, '原条目数量与到货日原文不得改');
-    const rev = rec.history.filter(x => x.reverses)[0], cor = rec.history.filter(x => x.correctsEntry)[0];
-    need(rev && Number(rev.rows[0].thisQty) === -10 && rev.arrivalDate === p4D4, '冲销应为 -10 且落在原到货日');
-    need(cor && Number(cor.rows[0].thisQty) === 8, '更正入库应为 8');
-    const mm = (await api('GET', '/api/materials', { token })).data.find(x => x.id === m.id);
-    need(Number(mm.qtyArrived) === 8, '已到应为 8：' + mm.qtyArrived);
-    return r.reqNo + ' 10→8 · 三条 history';
-  });
-
-  await step('materials', 'P4-7-K 导出：入库记录按 原记录/冲销/更正 三行带标签与原因', async () => {
-    const m = await p4Mat('Q', 100);
-    const r = await p4Req(m.id, 10, p4D4);
-    const c = needOk(await api('PUT', '/api/materialRequisitions/' + r.id + '/confirm', { token, body: { rows: [{ materialId: m.id, thisQty: 10 }], arrivalDate: p4D4 } }), 'P4-7-K confirm');
-    needOk(await api('POST', '/api/materialRequisitions/' + r.id + '/receipts/' + c.data.history[0].id + '/correct', {
-      token, body: { qty: 8, arrivalDate: p4D4, reason: 'ZT导出更正' }
-    }), 'P4-7-K correct');
-    const res = await fetch(base + '/api/materialRequisitions/' + r.id + '/download', { headers: { Authorization: 'Bearer ' + token } });
-    need(res.status === 200, '导出应 200');
-    const wb = xlsx.read(Buffer.from(await res.arrayBuffer()), { type: 'buffer' });
-    const aoa = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, blankrows: false, defval: '' });
-    const idx = aoa.findIndex(x => String(x[0]).indexOf('入库记录') === 0);
-    need(idx > 0, '应有入库记录块');
-    const rows = aoa.slice(idx).filter(x => String(x[0]).indexOf('20') === 0);
-    const tags = rows.map(x => String(x[1]));
-    need(rows.length === 3 && tags[0] === '原记录(已冲销)' && tags[1] === '冲销' && tags[2] === '更正', '三行标签不符：' + brief(tags));
-    need(Number(rows[1][3]) === -10 && Number(rows[2][3]) === 8, '冲销负数 / 更正新数量不符：' + brief([rows[1][3], rows[2][3]]));
-    need(rows.some(x => String(x[5]).indexOf('ZT导出更正') > -1), '应含更正原因');
-    return tags.join(' / ');
+  // 退回更正后：原来与「入库/出库更正」绑定的冒烟用例随业务代码一并退出，
+  // 改为断言「更正入口不存在」（静态源码 + 动态路由），防止旧能力被带回。
+  await step('materials', 'R-更正入口已关闭（路由/按钮/连带更正均不存在）', async () => {
+    const srv = fs.readFileSync(path.join(TMP, 'server', 'routes', 'materials.js'), 'utf8');
+    const view = fs.readFileSync(path.join(TMP, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    need(!/\/receipts\/:entryId\/correct/.test(srv), '服务端不应注册入库更正路由');
+    need(!/\/entries\/:entryId\/correct/.test(srv), '服务端不应注册出库更正路由');
+    need(!/outboundCorrections|receiptCorrections/.test(srv), '服务端不应保留连带更正');
+    need(!/openOutCorrect|submitOutCorrect|openCorrect|submitCorrect/.test(view), '前端不应有更正弹窗入口');
+    const r1 = await api('POST', '/api/materialRequisitions/rq-none/receipts/none/correct', { body: { reason: 'ZT测试' }, token });
+    need(r1.status >= 400 && r1.status < 500, 'POST 入库更正应 4xx，实际 ' + r1.status);
+    const r2 = await api('POST', '/api/materialOutbound/none/entries/none/correct', { body: { reason: 'ZT测试' }, token });
+    need(r2.status >= 400 && r2.status < 500, 'POST 出库更正应 4xx，实际 ' + r2.status);
+    return '更正路由/按钮/连带更正均不存在，POST 均 4xx';
   });
 
   /* ---------- 汇总 ---------- */

@@ -73,9 +73,8 @@ function eventsOf(materialId) {
     if (!(r.items || []).some(it => it && it.materialId === materialId)) return;
     (r.history || []).forEach(h => {
       const row = (h && h.rows || []).find(x => x && x.materialId === materialId);
-      // P4-7：冲销行是负数，必须按代数和计入（不能因为 thisQty <= 0 就跳过）；0 无影响可跳
       const qty = Number(row && row.thisQty) || 0;
-      if (!qty) return;
+      if (qty <= 0) return;
       const d = dayPart(h.arrivalDate) || dayPart(h.at) || dayPart(r.confirmedAt) || dayPart(r.reqDate);
       if (!d) return; // 没有可用日期的事件不参与回放（迁移已保证新库都有）
       out.push({ date: d, kind: 'in', qty, refNo: r.reqNo || '', self: false, at: timePart(h.at) || timePart(r.confirmedAt) });
@@ -83,42 +82,16 @@ function eventsOf(materialId) {
   });
   (DB.materialOutbound || []).forEach(o => {
     if (!o || o.deleted || o.status !== '有效') return;
-    // P4-9：出库以 entries 为准（原出库 / 冲销 / 更正）。冲销对库存是正方向（kind:'in'），
-    // 更正仍是出库（kind:'out'）；这样改型号时 A 的原出库与冲销同日代数和为 0，不会误判 A 为负。
-    const entries = Array.isArray(o.entries) && o.entries.length ? o.entries : null;
-    if (entries) {
-      entries.forEach(e => {
-        const row = ((e && e.rows) || []).find(x => x && x.materialId === materialId);
-        const qty = Number(row && row.qty) || 0;
-        if (!qty) return;
-        const d = dayPart(e.outDate) || dayPart(o.outDate);
-        if (!d) return;
-        const at = e.kind === 'orig'
-          ? (timePart(o.createdAt) || timePart(e.at))
-          : (timePart(e.at) || timePart(o.createdAt));
-        out.push({
-          date: d,
-          kind: e.direction === 'in' ? 'in' : 'out',
-          qty: Math.abs(qty),
-          refNo: o.outNo || '',
-          self: false,
-          at
-        });
-      });
-    } else {
-      // 迁移前的兜底（正常库在 20261112-outbound-entry-ids 后不会走到）
-      const it = (o.items || []).find(x => x && x.materialId === materialId);
-      if (it) {
-        const d = dayPart(o.outDate);
-        const qty = Number(it.qty) || 0;
-        if (d && qty > 0) out.push({ date: d, kind: 'out', qty, refNo: o.outNo || '', self: false, at: timePart(o.createdAt) });
-      }
-    }
+    const it = (o.items || []).find(x => x && x.materialId === materialId);
+    if (!it) return;
+    const d = dayPart(o.outDate);
+    const qty = Number(it.qty) || 0;
+    if (d && qty > 0) out.push({ date: d, kind: 'out', qty, refNo: o.outNo || '', self: false, at: timePart(o.createdAt) });
     (o.returns || []).forEach(x => {
       const row = (x && x.rows || []).find(y => y && y.materialId === materialId);
       const rq = Number(row && row.qty) || 0;
       if (rq <= 0) return;
-      const rd = dayPart(x.returnDate) || dayPart(o.outDate);
+      const rd = dayPart(x.returnDate) || d;
       if (!rd) return;
       out.push({ date: rd, kind: 'in', qty: rq, refNo: o.outNo || '', self: false, at: timePart(x.at) });
     });
@@ -161,18 +134,14 @@ function replayAvailability(materialId, extraEvents) {
   while (i < events.length) {
     const date = events[i].date;
     // 当日先入（含归还、作废冲销负数）
-    // P4-7：同一天的「冲销 + 更正」必须整组入账后再判负——否则 −10 与 +10 会中途判负，
-    // 把「只改到货日、净额不变」这种正常更正误杀。取该组里第一个致负的事件做报错依据。
-    let neg = null;
     while (i < events.length && events[i].date === date && events[i].kind === 'in') {
       const e = events[i];
       const before = avail;
       avail = roundQty(avail + e.qty);
-      if (avail < -1e-9 && !neg) neg = { before, qty: Math.abs(e.qty), refNo: e.refNo, self: e.self, label: e.label };
+      if (avail < -1e-9) {
+        return { ok: false, firstNegativeDate: date, available: before, qty: Math.abs(e.qty), refNo: e.refNo, self: e.self, label: e.label, kind: 'in' };
+      }
       i++;
-    }
-    if (avail < -1e-9 && neg) {
-      return { ok: false, firstNegativeDate: date, available: neg.before, qty: neg.qty, refNo: neg.refNo, self: neg.self, label: neg.label, kind: 'in' };
     }
     // 当日再出
     while (i < events.length && events[i].date === date && events[i].kind === 'out') {
