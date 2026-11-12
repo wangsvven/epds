@@ -267,6 +267,62 @@ const MIGRATIONS = [
       return true;
     }
   }
+  ,
+  /* ---------- 迁移 6：出库单补 entries（原出库一条）与稳定 id（P4-9-M） ----------
+   * 出库更正按条目 id 定位。存量出库没有 entries，这里为每张出库单补一条「原出库」记录，
+   * rows 复制 items 的物料快照，id 用 oe 前缀。有效与已作废出库都补（作废单不参与回放，但保留原文）。
+   * 只补缺：已有 entries 的只补缺失 id/rows；单号、items、数量、状态、legacy、期初一律不动。 */
+  {
+    id: '20261112-outbound-entry-ids',
+    desc: '出库单补 entries（原出库一条）与稳定 id（oe 前缀），供出库更正按条目 id 定位',
+    needs(DB) {
+      const ob = Array.isArray(DB.materialOutbound) ? DB.materialOutbound : [];
+      return ob.some(o => {
+        if (!o) return false;
+        if (!Array.isArray(o.entries) || !o.entries.length) return true;
+        return o.entries.some(e => !e || !e.id || !Array.isArray(e.rows));
+      });
+    },
+    run(DB) {
+      const ob = Array.isArray(DB.materialOutbound) ? DB.materialOutbound : [];
+      const used = new Set();
+      ob.forEach(o => (o.entries || []).forEach(e => { if (e && e.id) used.add(e.id); }));
+      const gen = () => {
+        let id;
+        do { id = 'oe' + Math.random().toString(36).slice(2, 9); } while (used.has(id));
+        used.add(id);
+        return id;
+      };
+      const snapRow = it => ({
+        materialId: it.materialId || '',
+        code: it.code || '',
+        description: it.description || '',
+        unit: it.unit || '',
+        qty: Number(it.qty) || 0,
+        requisitionId: it.requisitionId || ''
+      });
+      let add = 0, fill = 0;
+      ob.forEach(o => {
+        if (!o) return;
+        if (!Array.isArray(o.entries) || !o.entries.length) {
+          o.entries = [{
+            id: gen(), at: o.createdAt || '', outDate: o.outDate || '',
+            kind: 'orig', direction: 'out', reason: '',
+            rows: (o.items || []).map(snapRow)
+          }];
+          add++;
+          return;
+        }
+        o.entries.forEach(e => {
+          if (!e || e.id) return;
+          e.id = gen();
+          fill++;
+        });
+      });
+      console.log('[migrate] 出库 entries 已补：新增原出库 ' + add + ' 张，补条目 id ' + fill + ' 条');
+      return true;
+    }
+  }
   // ↓ 以后新增数据迁移：在此追加 { id, desc, needs?, run } 即可，随版本升级自动执行。
 ];
 

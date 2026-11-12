@@ -47,11 +47,29 @@ function replayFail(res, m, rp, what) {
   const tail = rp.self ? (who + ' ' + rp.qty) : (who + ' ' + verb + ' ' + rp.qty);
   const msg = '补录后 ' + rp.firstNegativeDate + ' 物料「' + desc + '」可用库存将为负（当时可用 '
     + rp.available + '，' + tail + '）';
-  const refs = rp.refNo ? [rp.refNo.indexOf('OUT-') === 0 ? { outNo: rp.refNo } : { reqNo: rp.refNo }] : [];
+  let refs = [];
+  if (rp.refNo && String(rp.refNo).indexOf('OUT-') === 0) {
+    const o = DB.materialOutbound.find(x => x && !x.deleted && x.status === '有效' && x.outNo === rp.refNo);
+    if (o) {
+      const ent = outboundCorrectableEntryOf(o, m && m.id);
+      const row = ent ? (ent.rows || []).find(r => r && r.materialId === (m && m.id)) : null;
+      refs = [{
+        outNo: o.outNo || '', outboundId: o.id, entryId: ent ? ent.id : '',
+        outDate: (ent && ent.outDate) || o.outDate || '', materialId: m ? m.id : '',
+        code: (m && m.code) || '', description: desc,
+        qty: row ? roundQty(row.qty) : rp.qty, net: outboundNetOf(o, m && m.id),
+        returned: outboundReturnedOf(o, m && m.id),
+        receiver: o.receiver || ''
+      }];
+    }
+  } else if (rp.refNo) {
+    refs = [{ reqNo: rp.refNo }];
+  }
   return res.status(400).json({
     error: msg, date: rp.firstNegativeDate,
     materialId: m ? m.id : '', code: (m && m.code) || '', description: desc,
-    available: rp.available, qty: rp.qty, refs
+    available: rp.available, qty: rp.qty, refs,
+    canBundle: refs.some(x => x.outboundId && x.entryId)
   });
 }
 // 取号：按前缀扫已落库的最大流水 +1（含已作废 / 已删除，不回收、不复用），超 9999 位数自然增长
@@ -84,15 +102,109 @@ app.delete('/api/materialRequisitions/:id', (req, res) => {
 
 // ---------- 出库管理（按工程出库 / 归还 / 作废补回） ----------
 // 库存口径：可用库存 = 累计入库 − 净出库（净出库 = 有效单累计领取 − 累计归还；作废单自动补回）
+/* P4-9：出库条目。迁移 20261112-outbound-entry-ids 后每张出库单都有 entries：
+ *   { id, at, outDate, kind:'orig'|'rev'|'corr', direction:'out'|'in', reason, rows:[{materialId,code,description,unit,qty,requisitionId}] }
+ * 原出库与更正出库 direction='out'（扣库存），冲销 direction='in'（补回库存）。
+ * 没有 entries 的历史数据按 items 视作一条原出库，保证读侧兼容。 */
+function outboundEntriesOf(o) {
+  if (Array.isArray(o && o.entries) && o.entries.length) return o.entries;
+  return [{
+    id: '', at: (o && o.createdAt) || '', outDate: (o && o.outDate) || '',
+    kind: 'orig', direction: 'out', reason: '',
+    rows: ((o && o.items) || []).map(it => ({
+      materialId: it.materialId || '', code: it.code || '', description: it.description || '',
+      unit: it.unit || '', qty: Number(it.qty) || 0, requisitionId: it.requisitionId || ''
+    }))
+  }];
+}
+function outboundNetMap(o) {
+  const map = {};
+  outboundEntriesOf(o).forEach(e => {
+    const sign = e.direction === 'in' ? -1 : 1;
+    (e.rows || []).forEach(r => {
+      if (!r || !r.materialId) return;
+      const q = roundQty(Number(r.qty) || 0);
+      if (!q) return;
+      map[r.materialId] = roundQty((map[r.materialId] || 0) + sign * q);
+    });
+  });
+  return map;
+}
+function outboundNetOf(o, materialId) { return roundQty(outboundNetMap(o)[materialId] || 0); }
+// 作废出库时要补回的库存事件：按 entries 的实际日期净额取反；未更正的单扣掉已归还。
+// 返回 [{ materialId, date, qty }]（qty 为负的出库事件 = 补回）。
+function voidCreditEventsOf(o) {
+  const entries = outboundEntriesOf(o);
+  const hasCorr = entries.some(e => e && (e.reverses || e.correctsEntry));
+  const byMat = {};
+  entries.forEach(e => {
+    const sign = e.direction === 'in' ? -1 : 1;
+    (e.rows || []).forEach(r => {
+      if (!r || !r.materialId) return;
+      const q = roundQty(Number(r.qty) || 0);
+      if (!q) return;
+      const d = String(e.outDate || o.outDate || '').slice(0, 10);
+      if (!d) return;
+      const m = byMat[r.materialId] || (byMat[r.materialId] = {});
+      m[d] = roundQty((m[d] || 0) + sign * q);
+    });
+  });
+  const out = [];
+  Object.keys(byMat).forEach(mid => {
+    const dates = Object.keys(byMat[mid]);
+    if (!hasCorr) {
+      // 未更正：原出库一条，补回数量 = 原数量 − 已归还（归还已在归还日补过）
+      const gross = dates.reduce((s, d) => roundQty(s + byMat[mid][d]), 0);
+      const net = roundQty(gross - outboundReturnedOf(o, mid));
+      if (net > 0) out.push({ materialId: mid, date: dates.sort()[0], qty: -net });
+      return;
+    }
+    dates.forEach(d => {
+      const net = byMat[mid][d];
+      if (net > 0) out.push({ materialId: mid, date: d, qty: -net });
+    });
+  });
+  return out;
+}
+// 某物料在该出库单上的累计归还（P4-9 起以 returns 明细为准；旧数据没有 returns 时回退 items.returned）
+function outboundReturnedOf(o, materialId) {
+  let sum = 0;
+  (o.returns || []).forEach(x => {
+    ((x && x.rows) || []).forEach(r => {
+      if (r && r.materialId === materialId) sum = roundQty(sum + (Number(r.qty) || 0));
+    });
+  });
+  if (sum) return sum;
+  return roundQty((o.items || []).reduce((s, it) => s + (it && it.materialId === materialId ? (Number(it.returned) || 0) : 0), 0));
+}
+function outboundReqNetOf(o, reqId, materialId) {
+  let net = 0;
+  outboundEntriesOf(o).forEach(e => {
+    const sign = e.direction === 'in' ? -1 : 1;
+    (e.rows || []).forEach(r => {
+      if (!r || r.materialId !== materialId || r.requisitionId !== reqId) return;
+      net = roundQty(net + sign * (Number(r.qty) || 0));
+    });
+  });
+  return net;
+}
+// 该出库单某物料上「还可被更正」的最新出库条目（原出库或更正，非冲销、未被冲销）
+function outboundCorrectableEntryOf(o, materialId) {
+  const list = outboundEntriesOf(o).filter(e => e && e.id && e.direction !== 'in' && !e.reversed
+    && (e.rows || []).some(r => r && r.materialId === materialId));
+  return list.length ? list[list.length - 1] : null;
+}
 function outboundStats(project) {
   const stats = {};
   DB.materialOutbound.forEach(o => {
     if (o.deleted || o.project !== project || o.status !== '有效') return;
-    (o.items || []).forEach(it => {
-      if (!it.materialId) return;
-      const s = stats[it.materialId] || (stats[it.materialId] = { taken: 0, returned: 0 });
-      s.taken = roundQty(s.taken + (Number(it.qty) || 0));
-      s.returned = roundQty(s.returned + (Number(it.returned) || 0));
+    const netMap = outboundNetMap(o);
+    Object.keys(netMap).forEach(mid => {
+      if (!mid) return;
+      const s = stats[mid] || (stats[mid] = { taken: 0, returned: 0 });
+      s.taken = roundQty(s.taken + netMap[mid]);
+      const ret = outboundReturnedOf(o, mid);
+      if (ret) s.returned = roundQty(s.returned + ret);
     });
   });
   return stats;
@@ -137,15 +249,12 @@ function reqConfirmedQty(req, materialId) {
   const cr = (req.confirmRows || []).find(c => c && c.materialId === materialId);
   return roundQty(cr ? (Number(cr.thisQty) || 0) : 0);
 }
-// 已按此领料单净出库量（仅未删除、状态=有效的出库单：领取 − 归还）
+// 已按此领料单净出库量（仅未删除、状态=有效的出库单：领取 − 归还；P4-9 起按 entries 净额）
 function reqUsedQty(reqId, materialId) {
   let used = 0;
   DB.materialOutbound.forEach(o => {
     if (o.deleted || o.status !== '有效') return;
-    (o.items || []).forEach(it => {
-      if (!it || it.requisitionId !== reqId || it.materialId !== materialId) return;
-      used = roundQty(used + roundQty((Number(it.qty) || 0) - (Number(it.returned) || 0)));
-    });
+    used = roundQty(used + outboundReqNetOf(o, reqId, materialId));
   });
   return roundQty(used);
 }
@@ -157,17 +266,43 @@ function byOutDateDesc(a, b) {
   return String((b && b.outNo) || '').localeCompare(String((a && a.outNo) || ''));
 }
 // 出库单读侧补关联：明细行补来源领料单号、单头补计划名称（按当前数据解析，不落库快照）
+// P4-9：同时下发 entries（含来源领料单号）与 netItems（按 entries 净额汇总），供列表/详情/导出使用。
 function withOutboundLinks(list) {
   const reqNoMap = {};
   DB.materialRequisitions.forEach(r => { if (r && r.id) reqNoMap[r.id] = r.reqNo || ''; });
   const planNameMap = {};
   DB.workPlans.forEach(p => { if (p && p.id) planNameMap[p.id] = p.name || ''; });
-  return list.map(o => Object.assign({}, o, {
-    workPlanName: o.workPlanId ? (planNameMap[o.workPlanId] || '') : '',
-    items: (o.items || []).map(it => Object.assign({}, it, {
-      reqNo: it.requisitionId ? (reqNoMap[it.requisitionId] || '') : ''
-    }))
-  }));
+  return list.map(o => {
+    const netMap = outboundNetMap(o);
+    const entries = outboundEntriesOf(o).map(e => Object.assign({}, e, {
+      rows: (e.rows || []).map(r => Object.assign({}, r, {
+        reqNo: r.requisitionId ? (reqNoMap[r.requisitionId] || '') : ''
+      }))
+    }));
+    const netItems = [];
+    Object.keys(netMap).forEach(mid => {
+      if (!mid || !netMap[mid]) return;
+      let snap = null;
+      entries.some(e => (e.rows || []).some(r => {
+        if (r && r.materialId === mid) { snap = r; return true; }
+        return false;
+      }));
+      netItems.push({
+        materialId: mid, qty: netMap[mid],
+        code: (snap && snap.code) || '', description: (snap && snap.description) || '',
+        unit: (snap && snap.unit) || '', requisitionId: (snap && snap.requisitionId) || ''
+      });
+    });
+    return Object.assign({}, o, {
+      workPlanName: o.workPlanId ? (planNameMap[o.workPlanId] || '') : '',
+      items: (o.items || []).map(it => Object.assign({}, it, {
+        reqNo: it.requisitionId ? (reqNoMap[it.requisitionId] || '') : '',
+        netQty: roundQty(netMap[it.materialId] || 0)
+      })),
+      entries,
+      netItems
+    });
+  });
 }
 app.get('/api/materialOutbound/orders', (req, res) => {
   const project = String(req.query.project || '');
@@ -310,12 +445,20 @@ app.post('/api/materialOutbound/create', (req, res) => {
   }
   if (availErr) return res.status(400).json({ error: availErr });
   // 单号：OUT-YYYYMMDD-NNNN，日期取出库业务日（不是录入日）；流水按该日已落库最大号 +1，不回收
+  const now = fmtNow();
   const rec = {
     id: genId('ob'), outNo: outNoOf(outDate),
-    project, receiver, status: '有效', createdAt: fmtNow(),
+    project, receiver, status: '有效', createdAt: now,
     outDate, outDateReason,
     workPlanId, workDate, processName,
     items: finalItems, returns: [], compensated: 0,
+    entries: [{
+      id: genId('oe'), at: now, outDate, kind: 'orig', direction: 'out', reason: '',
+      rows: finalItems.map(it => ({
+        materialId: it.materialId, code: it.code || '', description: it.description || '',
+        unit: it.unit || '', qty: it.qty, requisitionId: it.requisitionId || ''
+      }))
+    }],
     legacy: false,
     deleted: false
   };
@@ -341,30 +484,38 @@ app.put('/api/materialOutbound/:id/return', (req, res) => {
     return res.status(400).json({ error: '归还日期不能早于出库日期（' + outDateOfRec + '）' });
   }
   const rows = Array.isArray((req.body || {}).rows) ? req.body.rows : [];
+  const netMap = outboundNetMap(rec);
   const plan = [];
   for (const r of rows) {
-    const it = (rec.items || []).find(i => i.materialId === r.materialId);
-    if (!it) continue;
+    const mid = String((r && r.materialId) || '');
+    if (!mid) continue;
+    const net = roundQty(netMap[mid] || 0);
+    if (net <= 0) continue;
     const qty = roundQty(Number(r.qty));
-    const remaining = roundQty(it.qty - it.returned);
     if (!(qty > 0)) continue;
-    if (qty > remaining + 1e-9) return res.status(400).json({ error: '物料「' + it.description + '」本次归还 ' + qty + ' 超过剩余未归还 ' + remaining });
-    plan.push({ it, qty });
+    const returned = outboundReturnedOf(rec, mid);
+    const remaining = roundQty(net - returned);
+    if (qty > remaining + 1e-9) {
+      const snap = (rec.items || []).find(i => i.materialId === mid) || {};
+      return res.status(400).json({ error: '物料「' + (snap.description || mid) + '」本次归还 ' + qty + ' 超过剩余未归还 ' + remaining });
+    }
+    plan.push({ materialId: mid, qty });
   }
   if (!plan.length) return res.status(400).json({ error: '请填写有效的归还数量' });
   // P4-4：新单归还走回放（存量单不跑，避免被历史账锁死）；归还只会增加当日可用
   if (rec.legacy !== true) {
     for (const p of plan) {
-      const m = DB.materials.find(x => x.id === p.it.materialId && !x.deleted);
+      const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
       if (!m) continue;
-      const rp = replayAvailability(p.it.materialId, [{ date: returnDate, kind: 'in', qty: p.qty, self: true }]);
+      const rp = replayAvailability(p.materialId, [{ date: returnDate, kind: 'in', qty: p.qty, self: true }]);
       if (!rp.ok) return replayFail(res, m, rp, '本单归还');
     }
   }
   const applied = [];
   for (const p of plan) {
-    p.it.returned = roundQty(p.it.returned + p.qty);
-    applied.push({ materialId: p.it.materialId, qty: p.qty });
+    const it = (rec.items || []).find(i => i.materialId === p.materialId);
+    if (it) it.returned = roundQty((Number(it.returned) || 0) + p.qty); // 兼容旧读侧；实际以 returns 明细为准
+    applied.push({ materialId: p.materialId, qty: p.qty });
   }
   if (!Array.isArray(rec.returns)) rec.returns = [];
   rec.returns.push({ at: fmtNow(), returnDate, returnDateReason, rows: applied });
@@ -378,13 +529,13 @@ app.put('/api/materialOutbound/:id/void', (req, res) => {
   const reason = String((req.body || {}).reason || '').trim();
   if (!reason) return res.status(400).json({ error: '作废原因不能为空' });
   // P4-4：新单作废走回放（作废=本单出库与其归还一起撤销，按净额在该出库日一次性回加；存量单不跑）
+  // P4-9：净额按 entries 代数和（已冲销的原记录 + 冲销 + 更正），再扣掉已归还，不能按原 items 重复补回。
   if (rec.legacy !== true) {
-    for (const it of (rec.items || [])) {
-      const m = DB.materials.find(x => x.id === it.materialId && !x.deleted);
+    const events = voidCreditEventsOf(rec);
+    for (const e of events) {
+      const m = DB.materials.find(x => x.id === e.materialId && !x.deleted);
       if (!m) continue;
-      const net = roundQty((Number(it.qty) || 0) - (Number(it.returned) || 0));
-      if (net <= 0) continue;
-      const rp = replayAvailability(it.materialId, [{ date: rec.outDate, kind: 'out', qty: -net, self: true }]);
+      const rp = replayAvailability(e.materialId, [{ date: e.date, kind: 'out', qty: e.qty, self: true }]);
       if (!rp.ok) return replayFail(res, m, rp, '本单作废');
     }
   }
@@ -1147,10 +1298,299 @@ app.put('/api/materialRequisitions/:id/void', (req, res) => {
   res.json({ ok: true, data: rec });
 });
 
-/* ---------- 入库更正（P4-7） ----------
- * 只改「某一次确认入库」的数量 / 到货日：原条目只打 reversed 标记，数量与到货日原文不动；
- * 同一次 saveDB 追加「冲销（负数，落在原到货日）+ 更正入库（新数量，落在新到货日）」两条 history。
- * 单号、reqDate、createdAt 不变；改项目 / 物料 / 领料行仍走作废重开。
+/* ---------- 入库更正（P4-7 / P4-8）与出库更正（P4-9）、连带更正（P4-10） ----------
+ * 统一口径：原条目只打 reversed/reversedBy，业务字段原文不动；同一次 saveDB 追加
+ * 「冲销 + 更正」两条记录。P4-8 起更正可同时改型号，并把应到从原物料结转到新型号；
+ * P4-9 起出库用同一套 entries 机制；P4-10 允许在一条请求里附带对方的更正，一次回放、一次落库。
+ */
+function materialById(id) { return DB.materials.find(x => x && x.id === id && !x.deleted) || null; }
+function entryBizDay(entry) {
+  return String((entry && (entry.arrivalDate || entry.outDate || entry.at)) || '').slice(0, 10);
+}
+// 期初冻结：业务日 ≤ openingDate，或录入时刻 ≤ openingAt，视为期初内记录；返回说明文案
+function openingBlockedMsg(m, entry) {
+  if (!m) return '';
+  const d = entryBizDay(entry);
+  const at = String((entry && entry.at) || '').trim().slice(0, 16);
+  const od = String(m.openingDate || '').slice(0, 10);
+  const oat = String(m.openingAt || '').trim().slice(0, 16);
+  if (od && d && d <= od) return '物料「' + (m.description || m.code) + '」的期初日为 ' + od;
+  if (oat && at && at <= oat) return '物料「' + (m.description || m.code) + '」的期初截止时间为 ' + oat;
+  return '';
+}
+function mergeExtra(map, src) {
+  Object.keys(src || {}).forEach(mid => {
+    map[mid] = (map[mid] || []).concat(src[mid]);
+  });
+}
+function parseReceiptCorrection(rec, entry, body) {
+  const reason = String((body && body.reason) || '').trim();
+  if (!reason) return { error: '请填写更正原因' };
+  const arrivalDate = String((body && body.arrivalDate) || '').trim() || entryBizDay(entry);
+  const arrivalReason = String((body && body.arrivalReason) || '').trim();
+  const dErr = bizDateError('到货日期', arrivalDate, arrivalReason);
+  if (dErr) return { error: dErr };
+  const reqDate = String(rec.reqDate || '').slice(0, 10);
+  if (reqDate && arrivalDate < reqDate) return { error: '到货日期不能早于领料日期（' + reqDate + '）' };
+  const entryRows = (entry.rows || []).filter(r => r && r.materialId);
+  if (!entryRows.length) return { error: '该次入库没有可更正的物料行' };
+  const rowsIn = Array.isArray(body && body.rows) ? body.rows : null;
+  const hasQty = body && body.qty !== undefined && body.qty !== null && body.qty !== '';
+  const bodyMat = String((body && body.materialId) || '').trim();
+  if (entryRows.length > 1 && (hasQty || bodyMat) && !rowsIn) {
+    return { error: '该次入库含 ' + entryRows.length + ' 行物料，请按 rows 逐行提交更正后数量' };
+  }
+  if (rowsIn) {
+    const ids = new Set(entryRows.map(r => r.materialId));
+    const bad = rowsIn.find(x => x && x.materialId && !ids.has(x.materialId));
+    if (bad) return { error: '更正行物料「' + bad.materialId + '」不在该次入库记录中' };
+  }
+  const plan = [];
+  for (const r of entryRows) {
+    const oldQty = roundQty(r.thisQty);
+    let newQty = oldQty;
+    let newMaterialId = r.materialId;
+    if (rowsIn) {
+      const hit = rowsIn.find(x => x && x.materialId === r.materialId);
+      if (hit) {
+        if (hit.qty !== undefined && hit.qty !== null && hit.qty !== '') newQty = Number(hit.qty);
+        if (hit.newMaterialId) newMaterialId = String(hit.newMaterialId).trim();
+      }
+    } else {
+      if (hasQty) newQty = Number(body.qty);
+      if (bodyMat) newMaterialId = bodyMat;
+    }
+    if (!isFinite(newQty)) return { error: '更正后数量必须是数字' };
+    newQty = roundQty(newQty);
+    if (newQty < 0) return { error: '更正后数量不能为负数' };
+    plan.push({ oldMaterialId: r.materialId, oldQty, newMaterialId, newQty });
+  }
+  return { plan, arrivalDate, arrivalReason, reason };
+}
+function parseOutboundCorrection(o, entry, body) {
+  const reason = String((body && body.reason) || '').trim();
+  if (!reason) return { error: '请填写更正原因' };
+  const outDate = String((body && body.outDate) || '').trim() || entryBizDay(entry);
+  const outDateReason = String((body && body.outDateReason) || '').trim();
+  const dErr = bizDateError('出库日期', outDate, outDateReason);
+  if (dErr) return { error: dErr };
+  const entryRows = (entry.rows || []).filter(r => r && r.materialId);
+  if (!entryRows.length) return { error: '该次出库没有可更正的物料行' };
+  const rowsIn = Array.isArray(body && body.rows) ? body.rows : null;
+  const hasQty = body && body.qty !== undefined && body.qty !== null && body.qty !== '';
+  const bodyMat = String((body && body.materialId) || '').trim();
+  if (entryRows.length > 1 && (hasQty || bodyMat) && !rowsIn) {
+    return { error: '该次出库含 ' + entryRows.length + ' 行物料，请按 rows 逐行提交更正后数量' };
+  }
+  if (rowsIn) {
+    const ids = new Set(entryRows.map(r => r.materialId));
+    const bad = rowsIn.find(x => x && x.materialId && !ids.has(x.materialId));
+    if (bad) return { error: '更正行物料「' + bad.materialId + '」不在该次出库记录中' };
+  }
+  const plan = [];
+  for (const r of entryRows) {
+    const oldQty = roundQty(r.qty);
+    let newQty = oldQty;
+    let newMaterialId = r.materialId;
+    if (rowsIn) {
+      const hit = rowsIn.find(x => x && x.materialId === r.materialId);
+      if (hit) {
+        if (hit.qty !== undefined && hit.qty !== null && hit.qty !== '') newQty = Number(hit.qty);
+        if (hit.newMaterialId) newMaterialId = String(hit.newMaterialId).trim();
+      }
+    } else {
+      if (hasQty) newQty = Number(body.qty);
+      if (bodyMat) newMaterialId = bodyMat;
+    }
+    if (!isFinite(newQty)) return { error: '更正后数量必须是数字' };
+    newQty = roundQty(newQty);
+    if (newQty < 0) return { error: '更正后数量不能为负数' };
+    plan.push({ oldMaterialId: r.materialId, oldQty, newMaterialId, newQty });
+  }
+  return { plan, outDate, outDateReason, reason };
+}
+function validateReceiptPlan(rec, entry, parsed) {
+  const net = netByMaterial(rec);
+  const itemsAfter = {};
+  (rec.items || []).forEach(it => {
+    itemsAfter[it.materialId] = roundQty((itemsAfter[it.materialId] || 0) + (Number(it.qty) || 0));
+  });
+  const netAfter = Object.assign({}, net);
+  const dArr = {}, dReq = {};
+  for (const p of parsed.plan) {
+    const A = materialById(p.oldMaterialId);
+    if (!A) return { error: '原物料不存在（materialId=' + p.oldMaterialId + '）' };
+    const B = materialById(p.newMaterialId);
+    if (!B) return { error: '新型号不在材料台账（materialId=' + p.newMaterialId + '），禁止借更正新建材料' };
+    if (p.newMaterialId !== p.oldMaterialId) {
+      const obA = openingBlockedMsg(A, entry);
+      if (obA) return { error: '该次入库属于存量期初（' + obA + '），不能改型号；只可改数量或到货日' };
+      const obB = openingBlockedMsg(B, entry);
+      if (obB) return { error: '新型号属于存量期初（' + obB + '），不能改型号；只可改数量或到货日' };
+      itemsAfter[p.oldMaterialId] = roundQty((itemsAfter[p.oldMaterialId] || 0) - p.newQty);
+      if (p.newQty > 0) itemsAfter[p.newMaterialId] = roundQty((itemsAfter[p.newMaterialId] || 0) + p.newQty);
+      netAfter[p.oldMaterialId] = roundQty((netAfter[p.oldMaterialId] || 0) - p.oldQty);
+      netAfter[p.newMaterialId] = roundQty((netAfter[p.newMaterialId] || 0) + p.newQty);
+      dArr[p.oldMaterialId] = roundQty((dArr[p.oldMaterialId] || 0) - p.oldQty);
+      dReq[p.oldMaterialId] = roundQty((dReq[p.oldMaterialId] || 0) - p.newQty);
+      dArr[p.newMaterialId] = roundQty((dArr[p.newMaterialId] || 0) + p.newQty);
+      dReq[p.newMaterialId] = roundQty((dReq[p.newMaterialId] || 0) + p.newQty);
+    } else {
+      netAfter[p.oldMaterialId] = roundQty((netAfter[p.oldMaterialId] || 0) - p.oldQty + p.newQty);
+      dArr[p.oldMaterialId] = roundQty((dArr[p.oldMaterialId] || 0) + p.newQty - p.oldQty);
+    }
+  }
+  const touched = new Set();
+  parsed.plan.forEach(p => { touched.add(p.oldMaterialId); touched.add(p.newMaterialId); });
+  for (const mid of touched) {
+    const m = materialById(mid);
+    if (!m) return { error: '物料不存在（materialId=' + mid + '）' };
+    if (itemsAfter[mid] < -1e-9) {
+      return { error: '物料「' + (m.description || m.code) + '」的应到不足以结转（剩余 ' + roundQty(itemsAfter[mid]) + '）' };
+    }
+    if (roundQty(netAfter[mid] || 0) > roundQty(itemsAfter[mid] || 0) + 1e-9) {
+      return { error: '物料「' + (m.description || m.code) + '」结转后净入库 ' + roundQty(netAfter[mid] || 0) + ' 将超过应到 ' + roundQty(itemsAfter[mid] || 0) };
+    }
+  }
+  for (const mid of new Set([...Object.keys(dArr), ...Object.keys(dReq)])) {
+    const m = materialById(mid);
+    if (!m) return { error: '物料不存在（materialId=' + mid + '）' };
+    const arr = roundQty(Number(m.qtyArrived) + (dArr[mid] || 0));
+    const req = roundQty(Number(m.qtyRequired) + (dReq[mid] || 0));
+    if (arr < -1e-9) return { error: '物料「' + (m.description || m.code) + '」结转后已到将为负（' + arr + '）' };
+    if (req < -1e-9) return { error: '物料「' + (m.description || m.code) + '」结转后应到将为负（' + req + '）' };
+    if (arr > req + 1e-9) return { error: '物料「' + (m.description || m.code) + '」结转后已到 ' + arr + ' 将超过应到 ' + req };
+  }
+  return { dArr, dReq, itemsAfter, netAfter };
+}
+function validateOutboundPlan(o, entry, parsed) {
+  for (const p of parsed.plan) {
+    const A = materialById(p.oldMaterialId);
+    if (!A) return { error: '原物料不存在（materialId=' + p.oldMaterialId + '）' };
+    const B = materialById(p.newMaterialId);
+    if (!B) return { error: '新型号不在材料台账（materialId=' + p.newMaterialId + '），禁止借更正新建材料' };
+    if (p.newMaterialId !== p.oldMaterialId) {
+      const obA = openingBlockedMsg(A, entry);
+      if (obA) return { error: '该次出库属于存量期初（' + obA + '），不能改型号；只可改数量或出库日' };
+      const obB = openingBlockedMsg(B, entry);
+      if (obB) return { error: '新型号属于存量期初（' + obB + '），不能改型号；只可改数量或出库日' };
+    }
+  }
+  return {};
+}
+function receiptExtraByMaterial(parsed, entry) {
+  const map = {};
+  const oldDate = entryBizDay(entry);
+  const push = (mid, ev) => { if (!map[mid]) map[mid] = []; map[mid].push(ev); };
+  parsed.plan.forEach(p => {
+    if (p.oldQty) push(p.oldMaterialId, { date: oldDate, kind: 'in', qty: -p.oldQty, self: true, refNo: '本单更正' });
+    if (p.newQty) push(p.newMaterialId, { date: parsed.arrivalDate, kind: 'in', qty: p.newQty, self: true, refNo: '本单更正' });
+  });
+  return map;
+}
+function outboundExtraByMaterial(parsed, entry) {
+  const map = {};
+  const oldDate = entryBizDay(entry);
+  const push = (mid, ev) => { if (!map[mid]) map[mid] = []; map[mid].push(ev); };
+  parsed.plan.forEach(p => {
+    if (p.oldQty) push(p.oldMaterialId, { date: oldDate, kind: 'in', qty: p.oldQty, self: true, refNo: '本单更正' });
+    if (p.newQty) push(p.newMaterialId, { date: parsed.outDate, kind: 'out', qty: p.newQty, self: true, refNo: '本单更正' });
+  });
+  return map;
+}
+function applyReceiptPlan(rec, entry, parsed, v, now) {
+  const byId = new Map();
+  const order = [];
+  (rec.items || []).forEach(it => {
+    if (!byId.has(it.materialId)) { byId.set(it.materialId, Object.assign({}, it)); order.push(it.materialId); }
+    else byId.get(it.materialId).qty = roundQty((Number(byId.get(it.materialId).qty) || 0) + (Number(it.qty) || 0));
+  });
+  parsed.plan.forEach(p => {
+    if (p.newMaterialId === p.oldMaterialId) return;
+    const oldIt = byId.get(p.oldMaterialId);
+    if (!oldIt) return;
+    oldIt.qty = roundQty((Number(oldIt.qty) || 0) - p.newQty);
+    if (p.newQty <= 0) return;
+    if (byId.has(p.newMaterialId)) {
+      byId.get(p.newMaterialId).qty = roundQty((Number(byId.get(p.newMaterialId).qty) || 0) + p.newQty);
+    } else {
+      const m = materialById(p.newMaterialId);
+      byId.set(p.newMaterialId, {
+        materialId: m.id, code: m.code || '', description: m.description || '', unit: m.unit || '',
+        qty: p.newQty, arrivedBefore: 0, orderNo: m.orderNo || oldIt.orderNo || '-',
+        project: oldIt.project || (rec.projects || [])[0] || '',
+        inWeeklyPlan: oldIt.inWeeklyPlan === true
+      });
+      order.push(p.newMaterialId);
+    }
+  });
+  rec.items = order.map(id => byId.get(id));
+  const revRows = parsed.plan.map(p => ({ materialId: p.oldMaterialId, thisQty: roundQty(-p.oldQty), abnormal: false, reason: '' }));
+  const corRows = parsed.plan.map(p => ({ materialId: p.newMaterialId, thisQty: p.newQty, abnormal: false, reason: '' }));
+  const revEntry = {
+    id: genId('he'), at: now, arrivalDate: entryBizDay(entry), arrivalReason: parsed.arrivalReason || '', reason: parsed.reason,
+    reverses: entry.id, rows: revRows
+  };
+  const corEntry = {
+    id: genId('he'), at: now, arrivalDate: parsed.arrivalDate, arrivalReason: parsed.arrivalReason || '', reason: parsed.reason,
+    correctsEntry: entry.id, rows: corRows
+  };
+  if (!Array.isArray(rec.history)) rec.history = [];
+  rec.history.push(revEntry, corEntry);
+  entry.reversed = true;
+  entry.reversedBy = revEntry.id;
+  Object.keys(v.dArr).forEach(mid => {
+    const m = materialById(mid);
+    if (!m) return;
+    m.qtyArrived = roundQty(Math.max(0, (Number(m.qtyArrived) || 0) + (v.dArr[mid] || 0)));
+    m.qtyRequired = roundQty(Math.max(0, (Number(m.qtyRequired) || 0) + (v.dReq[mid] || 0)));
+    m.qtyNotArrived = roundQty(Math.max(0, m.qtyRequired - m.qtyArrived));
+    m.status = materialStatus(m);
+  });
+  recomputeFromHistory(rec);
+  rec.confirmedAt = now;
+  return { revEntry, corEntry };
+}
+function applyOutboundPlan(o, entry, parsed, now) {
+  const revRows = [];
+  const corRows = [];
+  parsed.plan.forEach(p => {
+    const orig = (entry.rows || []).find(r => r && r.materialId === p.oldMaterialId) || {};
+    const a = materialById(p.oldMaterialId) || {};
+    const b = materialById(p.newMaterialId) || {};
+    revRows.push({
+      materialId: p.oldMaterialId, code: orig.code || a.code || '', description: orig.description || a.description || '',
+      unit: orig.unit || a.unit || '', qty: p.oldQty, requisitionId: orig.requisitionId || ''
+    });
+    corRows.push({
+      materialId: p.newMaterialId, code: b.code || orig.code || '', description: b.description || orig.description || '',
+      unit: b.unit || orig.unit || '', qty: p.newQty, requisitionId: orig.requisitionId || ''
+    });
+  });
+  const revEntry = {
+    id: genId('oe'), at: now, outDate: entryBizDay(entry), kind: 'rev', direction: 'in',
+    reverses: entry.id, reason: parsed.reason, rows: revRows
+  };
+  const corEntry = {
+    id: genId('oe'), at: now, outDate: parsed.outDate, kind: 'corr', direction: 'out',
+    correctsEntry: entry.id, reason: parsed.reason, rows: corRows
+  };
+  if (!Array.isArray(o.entries)) o.entries = [];
+  o.entries.push(revEntry, corEntry);
+  entry.reversed = true;
+  entry.reversedBy = revEntry.id;
+  return { revEntry, corEntry };
+}
+function outboundCorrectableCheck(o, entry) {
+  if (!entry) return '未找到该次出库记录';
+  if (entry.reverses || entry.direction === 'in') return '冲销记录不能作为更正目标';
+  if (entry.reversed) return '该次出库已被冲销，不能重复更正；如需再改请更正上一次的「更正出库」记录';
+  return '';
+}
+
+/* ---------- 入库更正（P4-7 基础口径） ----------
+ * P4-8 起可同时改型号；P4-9 起出库用同一套 entries；P4-10 支持连带更正。
+ * 下面两个函数按 history 代数和重算净入库与领料单状态。
  */
 
 // 按 history 代数和重算该单的净入库、confirmRows 与领料单状态（净额 = 原记录 − 冲销 + 更正）
@@ -1178,16 +1618,21 @@ function recomputeFromHistory(rec) {
   rec.status = allFull ? '已入库' : (allZero ? '待入库' : '部分到库');
   return net;
 }
-// 该材料当前被哪些有效出库单占用（用于「当前可用将为负」时列出单号）
+// 该材料当前被哪些有效出库单占用（用于「当前可用将为负」时列出单号；P4-9 按 entries 净额）
 function outboundRefsOf(materialId, project) {
   const refs = [];
   DB.materialOutbound.forEach(o => {
     if (!o || o.deleted || o.status !== '有效' || o.project !== project) return;
-    (o.items || []).forEach(it => {
-      if (!it || it.materialId !== materialId) return;
-      const net = roundQty((Number(it.qty) || 0) - (Number(it.returned) || 0));
-      if (net <= 0) return;
-      refs.push({ outNo: o.outNo || '', outboundId: o.id, qty: roundQty(it.qty), returned: roundQty(it.returned), net, receiver: o.receiver || '' });
+    const net = outboundNetOf(o, materialId);
+    if (net <= 0) return;
+    const ent = outboundCorrectableEntryOf(o, materialId);
+    const row = ent ? (ent.rows || []).find(r => r && r.materialId === materialId) : null;
+    const returned = outboundReturnedOf(o, materialId);
+    refs.push({
+      outNo: o.outNo || '', outboundId: o.id, entryId: ent ? ent.id : '',
+      outDate: (ent && ent.outDate) || o.outDate || '', qty: row ? roundQty(row.qty) : net,
+      returned, net, code: (row && row.code) || '', description: (row && row.description) || '',
+      receiver: o.receiver || ''
     });
   });
   return refs;
@@ -1203,124 +1648,195 @@ app.post('/api/materialRequisitions/:id/receipts/:entryId/correct', (req, res) =
   if (entry.reversed) return res.status(400).json({ error: '该次入库已被冲销，不能重复更正；如需再改请更正上一次的「更正入库」记录' });
 
   const body = req.body || {};
-  const reason = String(body.reason || '').trim();
-  if (!reason) return res.status(400).json({ error: '请填写更正原因' });
-  const arrivalDate = String(body.arrivalDate || '').trim() || String(entry.arrivalDate || '').slice(0, 10);
-  const arrivalReason = String(body.arrivalReason || '').trim();
-  const dErr = bizDateError('到货日期', arrivalDate, arrivalReason);
-  if (dErr) return res.status(400).json({ error: dErr });
-  const reqDateOfRec = String(rec.reqDate || '').slice(0, 10);
-  if (reqDateOfRec && arrivalDate < reqDateOfRec) {
-    return res.status(400).json({ error: '到货日期不能早于领料日期（' + reqDateOfRec + '）' });
+  const parsed = parseReceiptCorrection(rec, entry, body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const v = validateReceiptPlan(rec, entry, parsed);
+  if (v.error) return res.status(400).json({ error: v.error });
+
+  // P4-10：同一次请求可附带必要的出库更正（A→B 时先改一边会互相卡住）
+  const bundles = [];
+  const seen = new Set();
+  const bundleIn = Array.isArray(body.outboundCorrections) ? body.outboundCorrections : [];
+  for (const b of bundleIn) {
+    if (!b || !b.outboundId || !b.entryId) return res.status(400).json({ error: '附带的出库更正缺少 outboundId / entryId' });
+    const o = DB.materialOutbound.find(x => x.id === b.outboundId && !x.deleted);
+    if (!o) return res.status(400).json({ error: '附带的出库单不存在' });
+    if (o.status !== '有效') return res.status(400).json({ error: '附带的出库单已作废，不能更正' });
+    const oe = (o.entries || []).find(e => e && e.id === b.entryId);
+    if (!oe) return res.status(400).json({ error: '附带的出库条目不存在' });
+    const key = o.id + ':' + oe.id;
+    if (seen.has(key)) return res.status(400).json({ error: '同一出库条目在附带更正里重复出现' });
+    seen.add(key);
+    const oeErr = outboundCorrectableCheck(o, oe);
+    if (oeErr) return res.status(400).json({ error: oeErr });
+    if (Array.isArray(o.returns) && o.returns.some(x => x && (x.rows || []).length)) {
+      return res.status(400).json({ error: '附带的出库单存在未作废的归还记录，请先处理归还' });
+    }
+    const oldIds = new Set(parsed.plan.map(p => p.oldMaterialId));
+    const hit = [...oldIds].some(mid => outboundNetOf(o, mid) > 0);
+    const oeDay = String(oe.outDate || o.outDate || '').slice(0, 10);
+    if (!hit || (oeDay && oeDay < entryBizDay(entry))) {
+      return res.status(400).json({ error: '附带的出库更正 ' + (o.outNo || o.id) + ' 与本次入库更正无关' });
+    }
+    const bb = Object.assign({}, b, { reason: String(b.reason || parsed.reason).trim() });
+    const op = parseOutboundCorrection(o, oe, bb);
+    if (op.error) return res.status(400).json({ error: '附带出库更正：' + op.error });
+    const ov = validateOutboundPlan(o, oe, op);
+    if (ov.error) return res.status(400).json({ error: '附带出库更正：' + ov.error });
+    bundles.push({ o, entry: oe, parsed: op });
   }
 
-  const entryRows = (entry.rows || []).filter(r => r && r.materialId);
-  if (!entryRows.length) return res.status(400).json({ error: '该次入库没有可更正的物料行' });
-  const rowsIn = Array.isArray(body.rows) ? body.rows : null;
-  const hasQty = body.qty !== undefined && body.qty !== null && body.qty !== '';
-  if (entryRows.length > 1 && hasQty && !rowsIn) {
-    return res.status(400).json({ error: '该次入库含 ' + entryRows.length + ' 行物料，请按 rows 逐行提交更正后数量' });
-  }
-  const plan = [];
-  for (const r of entryRows) {
-    const oldQty = roundQty(r.thisQty);
-    let nq = oldQty;
-    if (rowsIn) {
-      const hit = rowsIn.find(x => x && x.materialId === r.materialId);
-      if (hit && hit.qty !== undefined && hit.qty !== null && hit.qty !== '') nq = Number(hit.qty);
-    } else if (hasQty) {
-      nq = Number(body.qty);
-    }
-    if (!isFinite(nq)) return res.status(400).json({ error: '更正后数量必须是数字' });
-    nq = roundQty(nq);
-    if (nq < 0) return res.status(400).json({ error: '更正后数量不能为负数' });
-    plan.push({ materialId: r.materialId, oldQty, newQty: nq });
-  }
-
-  // 数量上限 + 回放 + 当前可用（存量单同样要满足当前可用 ≥ 0）
-  const net = netByMaterial(rec);
-  const backups = [];
-  for (const p of plan) {
-    const it = (rec.items || []).find(x => x.materialId === p.materialId) || {};
-    const netAfter = roundQty((net[p.materialId] || 0) - p.oldQty + p.newQty);
-    if (it.qty !== undefined && netAfter > Number(it.qty) + 1e-9) {
-      return res.status(400).json({ error: '物料「' + (it.description || p.materialId) + '」更正后净入库 ' + netAfter + ' 将超过该行领料数量 ' + it.qty });
-    }
-    const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
+  const extra = {};
+  mergeExtra(extra, receiptExtraByMaterial(parsed, entry));
+  bundles.forEach(b => mergeExtra(extra, outboundExtraByMaterial(b.parsed, b.entry)));
+  for (const mid of Object.keys(extra)) {
+    const m = materialById(mid);
     if (!m) continue;
-    const delta = roundQty(p.newQty - p.oldQty);
-    const arrivedAfter = roundQty(m.qtyArrived + delta);
-    if (arrivedAfter > Number(m.qtyRequired) + 1e-9) {
-      return res.status(400).json({ error: '物料「' + (m.description || m.code) + '」更正后已到 ' + arrivedAfter + ' 将超过应到 ' + m.qtyRequired });
-    }
-    const rp = replayAvailability(p.materialId, [
-      { date: String(entry.arrivalDate || entry.at || '').slice(0, 10), kind: 'in', qty: -p.oldQty, self: true },
-      { date: arrivalDate, kind: 'in', qty: p.newQty, self: true }
-    ]);
-    if (!rp.ok) return replayFail(res, m, rp, '本单更正');
-    const stats = outboundStats(m.project);
-    const st = stats[m.id] || { taken: 0, returned: 0 };
-    const availAfter = roundQty(arrivedAfter - roundQty(st.taken - st.returned));
-    if (availAfter < -1e-9) {
-      const refs = outboundRefsOf(m.id, m.project);
-      return res.status(400).json({
-        error: '更正后当前可用库存将为负（可用 ' + availAfter + '），请先归还或作废相关出库单',
-        materialId: m.id, code: m.code || '', description: m.description || '', available: availAfter, refs
-      });
-    }
-    backups.push(JSON.parse(JSON.stringify(m)));
+    const rp = replayAvailability(mid, extra[mid]);
+    if (!rp.ok) return replayFail(res, m, rp, bundles.length ? '本单与附带更正' : '本单更正');
   }
 
-  const now = fmtNow();
-  const revEntry = {
-    id: genId('he'), at: now, arrivalDate: String(entry.arrivalDate || entry.at || '').slice(0, 10),
-    arrivalReason: arrivalReason || '', reason,
-    reverses: entry.id,
-    rows: plan.map(p => ({ materialId: p.materialId, thisQty: roundQty(-p.oldQty), abnormal: false, reason: '' }))
+  const snapRec = {
+    history: JSON.parse(JSON.stringify(rec.history || [])),
+    confirmRows: rec.confirmRows === null || rec.confirmRows === undefined ? rec.confirmRows : JSON.parse(JSON.stringify(rec.confirmRows)),
+    items: JSON.parse(JSON.stringify(rec.items || [])),
+    status: rec.status, confirmedAt: rec.confirmedAt
   };
-  const corEntry = {
-    id: genId('he'), at: now, arrivalDate, arrivalReason: arrivalReason || '', reason,
-    correctsEntry: entry.id,
-    rows: plan.map(p => ({ materialId: p.materialId, thisQty: p.newQty, abnormal: false, reason: '' }))
-  };
-
-  const snapHist = JSON.parse(JSON.stringify(rec.history || []));
-  const snapConfirm = JSON.parse(JSON.stringify(rec.confirmRows || null));
-  const snap = { status: rec.status, confirmedAt: rec.confirmedAt };
+  const matSnaps = {};
+  Object.keys(v.dArr).concat(Object.keys(v.dReq)).forEach(mid => {
+    const m = materialById(mid);
+    if (m && !matSnaps[mid]) matSnaps[mid] = JSON.parse(JSON.stringify(m));
+  });
+  const outSnaps = bundles.map(b => ({ o: b.o, entries: JSON.parse(JSON.stringify(b.o.entries || [])) }));
   try {
-    if (!Array.isArray(rec.history)) rec.history = [];
-    rec.history.push(revEntry, corEntry);
-    entry.reversed = true;
-    entry.reversedBy = revEntry.id;
-    // 材料已到按差额推进（qtyArrived 还含其它单与存量手工值，不能按单张 history 重算）
-    plan.forEach(p => {
-      const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
-      if (!m) return;
-      const delta = roundQty(p.newQty - p.oldQty);
-      m.qtyArrived = roundQty(Math.max(0, m.qtyArrived + delta));
-      m.qtyNotArrived = roundQty(Math.max(0, (Number(m.qtyRequired) || 0) - m.qtyArrived));
-      m.status = materialStatus(m);
-    });
-    recomputeFromHistory(rec);
-    rec.confirmedAt = now;
-    // 仅测试环境可用的故障注入：生产默认关闭，普通请求无法触发
+    const now = fmtNow();
+    applyReceiptPlan(rec, entry, parsed, v, now);
+    bundles.forEach(b => applyOutboundPlan(b.o, b.entry, b.parsed, now));
     if (process.env.NODE_ENV === 'test' && process.env.EPDS_TEST_FAIL_SAVE === '1') {
       throw new Error('测试注入：saveDB 前失败');
     }
     saveDB();
   } catch (e) {
-    // 原子回滚：内存里也恢复到操作前，文件未写入则对外读取与操作前一致
-    rec.history = JSON.parse(JSON.stringify(snapHist));
-    rec.confirmRows = snapConfirm === null ? null : JSON.parse(JSON.stringify(snapConfirm));
-    rec.status = snap.status;
-    rec.confirmedAt = snap.confirmedAt;
-    plan.forEach((p, i) => {
-      const m = DB.materials.find(x => x.id === p.materialId && !x.deleted);
-      if (m && backups[i]) Object.assign(m, backups[i]);
+    rec.history = snapRec.history;
+    rec.confirmRows = snapRec.confirmRows;
+    rec.items = snapRec.items;
+    rec.status = snapRec.status;
+    rec.confirmedAt = snapRec.confirmedAt;
+    Object.keys(matSnaps).forEach(mid => {
+      const m = DB.materials.find(x => x.id === mid);
+      if (m) Object.assign(m, matSnaps[mid]);
     });
+    outSnaps.forEach(s => { s.o.entries = s.entries; });
     return res.status(500).json({ error: '入库更正失败，未写入任何改动：' + e.message });
   }
-  res.json({ ok: true, data: rec });
+  res.json({
+    ok: true, data: rec,
+    bundled: bundles.map(b => ({ outboundId: b.o.id, outNo: b.o.outNo, entryId: b.entry.id }))
+  });
+});
+
+app.post('/api/materialOutbound/:id/entries/:entryId/correct', (req, res) => {
+  const o = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
+  if (!o) return res.status(404).json({ error: '未找到出库单' });
+  if (o.status !== '有效') return res.status(400).json({ error: '该出库单已作废，不能更正' });
+  const entry = (o.entries || []).find(e => e && e.id === req.params.entryId);
+  if (!entry) return res.status(400).json({ error: '未找到该次出库记录' });
+  const ce = outboundCorrectableCheck(o, entry);
+  if (ce) return res.status(400).json({ error: ce });
+  if (Array.isArray(o.returns) && o.returns.some(x => x && (x.rows || []).length)) {
+    return res.status(400).json({ error: '该出库单存在未作废的归还记录，请先处理归还后再更正' });
+  }
+
+  const body = req.body || {};
+  const parsed = parseOutboundCorrection(o, entry, body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const v = validateOutboundPlan(o, entry, parsed);
+  if (v.error) return res.status(400).json({ error: v.error });
+
+  // P4-10：同一次请求可附带必要的入库更正（B 尚未入账时先改出库会因库存不足被拒）
+  const bundles = [];
+  const seen = new Set();
+  const receiptIn = Array.isArray(body.receiptCorrections) ? body.receiptCorrections : [];
+  for (const b of receiptIn) {
+    if (!b || !b.requisitionId || !b.entryId) return res.status(400).json({ error: '附带的入库更正缺少 requisitionId / entryId' });
+    const rec = DB.materialRequisitions.find(x => x.id === b.requisitionId && !x.deleted);
+    if (!rec) return res.status(400).json({ error: '附带的领料单不存在' });
+    if (rec.status === '已作废') return res.status(400).json({ error: '附带的领料单已作废，不能更正' });
+    const he = (rec.history || []).find(h => h && h.id === b.entryId);
+    if (!he) return res.status(400).json({ error: '附带的入库条目不存在' });
+    const key = rec.id + ':' + he.id;
+    if (seen.has(key)) return res.status(400).json({ error: '同一入库条目在附带更正里重复出现' });
+    seen.add(key);
+    if (he.reverses) return res.status(400).json({ error: '附带的入库条目是冲销记录，不能作为更正目标' });
+    if (he.reversed) return res.status(400).json({ error: '附带的入库条目已被冲销，不能重复更正' });
+    const oldIds = new Set(parsed.plan.map(p => p.oldMaterialId));
+    const newIds = new Set(parsed.plan.map(p => p.newMaterialId));
+    const hasMat = (he.rows || []).some(r => r && (oldIds.has(r.materialId) || newIds.has(r.materialId)));
+    const heDay = entryBizDay(he);
+    const maxOut = parsed.outDate > entryBizDay(entry) ? parsed.outDate : entryBizDay(entry);
+    if (!hasMat || (heDay && heDay > maxOut)) {
+      return res.status(400).json({ error: '附带的入库更正 ' + (rec.reqNo || rec.id) + ' 与本次出库更正无关' });
+    }
+    const bb = Object.assign({}, b, { reason: String(b.reason || parsed.reason).trim() });
+    const rp = parseReceiptCorrection(rec, he, bb);
+    if (rp.error) return res.status(400).json({ error: '附带入库更正：' + rp.error });
+    const rv = validateReceiptPlan(rec, he, rp);
+    if (rv.error) return res.status(400).json({ error: '附带入库更正：' + rv.error });
+    bundles.push({ rec, entry: he, parsed: rp, validated: rv });
+  }
+
+  const extra = {};
+  mergeExtra(extra, outboundExtraByMaterial(parsed, entry));
+  bundles.forEach(b => mergeExtra(extra, receiptExtraByMaterial(b.parsed, b.entry)));
+  for (const mid of Object.keys(extra)) {
+    const m = materialById(mid);
+    if (!m) continue;
+    const rp = replayAvailability(mid, extra[mid]);
+    if (!rp.ok) return replayFail(res, m, rp, bundles.length ? '本单与附带更正' : '本单更正');
+  }
+
+  const snapO = { entries: JSON.parse(JSON.stringify(o.entries || [])) };
+  const snapRecs = bundles.map(b => ({
+    rec: b.rec,
+    history: JSON.parse(JSON.stringify(b.rec.history || [])),
+    confirmRows: b.rec.confirmRows === null || b.rec.confirmRows === undefined ? b.rec.confirmRows : JSON.parse(JSON.stringify(b.rec.confirmRows)),
+    items: JSON.parse(JSON.stringify(b.rec.items || [])),
+    status: b.rec.status, confirmedAt: b.rec.confirmedAt
+  }));
+  const matSnaps = {};
+  bundles.forEach(b => {
+    Object.keys(b.validated.dArr).concat(Object.keys(b.validated.dReq)).forEach(mid => {
+      const m = materialById(mid);
+      if (m && !matSnaps[mid]) matSnaps[mid] = JSON.parse(JSON.stringify(m));
+    });
+  });
+  try {
+    const now = fmtNow();
+    bundles.forEach(b => applyReceiptPlan(b.rec, b.entry, b.parsed, b.validated, now));
+    applyOutboundPlan(o, entry, parsed, now);
+    if (process.env.NODE_ENV === 'test' && process.env.EPDS_TEST_FAIL_SAVE === '1') {
+      throw new Error('测试注入：saveDB 前失败');
+    }
+    saveDB();
+  } catch (e) {
+    o.entries = snapO.entries;
+    snapRecs.forEach(s => {
+      s.rec.history = s.history;
+      s.rec.confirmRows = s.confirmRows;
+      s.rec.items = s.items;
+      s.rec.status = s.status;
+      s.rec.confirmedAt = s.confirmedAt;
+    });
+    Object.keys(matSnaps).forEach(mid => {
+      const m = DB.materials.find(x => x.id === mid);
+      if (m) Object.assign(m, matSnaps[mid]);
+    });
+    return res.status(500).json({ error: '出库更正失败，未写入任何改动：' + e.message });
+  }
+  res.json({
+    ok: true, data: withOutboundLinks([o])[0],
+    bundled: bundles.map(b => ({ requisitionId: b.rec.id, reqNo: b.rec.reqNo, entryId: b.entry.id }))
+  });
 });
 
 // 材料相关集合走通用 CRUD（逻辑删除；须晚于上面各具体的 /:id 删除路由注册）

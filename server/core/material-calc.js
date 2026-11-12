@@ -83,16 +83,42 @@ function eventsOf(materialId) {
   });
   (DB.materialOutbound || []).forEach(o => {
     if (!o || o.deleted || o.status !== '有效') return;
-    const it = (o.items || []).find(x => x && x.materialId === materialId);
-    if (!it) return;
-    const d = dayPart(o.outDate);
-    const qty = Number(it.qty) || 0;
-    if (d && qty > 0) out.push({ date: d, kind: 'out', qty, refNo: o.outNo || '', self: false, at: timePart(o.createdAt) });
+    // P4-9：出库以 entries 为准（原出库 / 冲销 / 更正）。冲销对库存是正方向（kind:'in'），
+    // 更正仍是出库（kind:'out'）；这样改型号时 A 的原出库与冲销同日代数和为 0，不会误判 A 为负。
+    const entries = Array.isArray(o.entries) && o.entries.length ? o.entries : null;
+    if (entries) {
+      entries.forEach(e => {
+        const row = ((e && e.rows) || []).find(x => x && x.materialId === materialId);
+        const qty = Number(row && row.qty) || 0;
+        if (!qty) return;
+        const d = dayPart(e.outDate) || dayPart(o.outDate);
+        if (!d) return;
+        const at = e.kind === 'orig'
+          ? (timePart(o.createdAt) || timePart(e.at))
+          : (timePart(e.at) || timePart(o.createdAt));
+        out.push({
+          date: d,
+          kind: e.direction === 'in' ? 'in' : 'out',
+          qty: Math.abs(qty),
+          refNo: o.outNo || '',
+          self: false,
+          at
+        });
+      });
+    } else {
+      // 迁移前的兜底（正常库在 20261112-outbound-entry-ids 后不会走到）
+      const it = (o.items || []).find(x => x && x.materialId === materialId);
+      if (it) {
+        const d = dayPart(o.outDate);
+        const qty = Number(it.qty) || 0;
+        if (d && qty > 0) out.push({ date: d, kind: 'out', qty, refNo: o.outNo || '', self: false, at: timePart(o.createdAt) });
+      }
+    }
     (o.returns || []).forEach(x => {
       const row = (x && x.rows || []).find(y => y && y.materialId === materialId);
       const rq = Number(row && row.qty) || 0;
       if (rq <= 0) return;
-      const rd = dayPart(x.returnDate) || d;
+      const rd = dayPart(x.returnDate) || dayPart(o.outDate);
       if (!rd) return;
       out.push({ date: rd, kind: 'in', qty: rq, refNo: o.outNo || '', self: false, at: timePart(x.at) });
     });
