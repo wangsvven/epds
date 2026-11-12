@@ -1720,11 +1720,28 @@ const Outbounds = {
     // P4-9 出库更正：原型号/数量/出库日只读；可改型号、数量、出库日；已有归还不显示入口
     const ocdlg = reactive({ visible: false, rec: null, entry: null, outDate: '', outDateReason: '', reason: '', saving: false, rows: [], receiptCandidates: [], bundle: null, showBundle: false });
     const outMatAll = ref([]);
+    const outStockRows = ref([]); // 本次打开弹窗时的可出库材料（已到 > 0 且 可用 > 0）
     async function loadOutMatOptions() {
       if (outMatAll.value.length) return;
       try { outMatAll.value = await api.get('/api/materials'); } catch (e) {}
     }
+    // 下拉候选实时拉取，避免缓存导致「已出完 / 已入库」状态不同步
+    async function loadOutStockOptions(project) {
+      try {
+        outStockRows.value = await api.get('/api/materialOutbound/stock?project=' + encodeURIComponent(project || ''));
+      } catch (e) { outStockRows.value = []; }
+    }
+    // 新型号（可改）：只列「已经入库 + 还有可用余量」的材料（stock 口径：已到 > 0 且 可用 > 0）。
+    // 未入库、已全部出库完成的不再出现在候选里；另外保留各当前行的原型号，保证「不改型号」时下拉能正常显示当前值。
+    // 提交仍以后端 F1 校验为准，前端只收窄候选，不代替校验。
     const outMatOptions = computed(() => {
+      const all = (outMatAll.value || []).filter(m => m && !m.deleted);
+      const allow = new Set((outStockRows.value || []).map(x => x.id));
+      const keep = new Set((ocdlg.rows || []).map(r => r.materialId));
+      return all.filter(m => allow.has(m.id) || keep.has(m.id));
+    });
+    // 连带更正块要选的是「需重新入库的目标型号」（可能尚未入库），保留全量候选，不套上面的过滤。
+    const outMatOptionsAll = computed(() => {
       const pj = (ocdlg.rec && ocdlg.rec.project) || '';
       const all = (outMatAll.value || []).filter(m => m && !m.deleted);
       const hit = all.filter(m => !pj || m.project === pj);
@@ -1736,6 +1753,8 @@ const Outbounds = {
       const tags = [];
       if (pj && m.project && m.project !== pj) tags.push('其他工程');
       if (!(Number(m.qtyArrived) > 0)) tags.push('未到库，需一并更正入库');
+      else if ((ocdlg.rows || []).some(r => r.materialId === m.id)
+        && !(outStockRows.value || []).some(x => x.id === m.id)) tags.push('当前型号，已无可用余量');
       return (m.code ? m.code + ' ' : '') + (m.description || '') + (tags.length ? '（' + tags.join('；') + '）' : '');
     };
     function entryTag(e) {
@@ -1762,6 +1781,7 @@ const Outbounds = {
     async function openOutCorrect(rec, e) {
       await loadOutMatOptions();
       ocdlg.rec = rec; ocdlg.entry = e;
+      await loadOutStockOptions(rec && rec.project);
       ocdlg.outDate = e.outDate || rec.outDate || '';
       ocdlg.outDateReason = ''; ocdlg.reason = ''; ocdlg.saving = false;
       ocdlg.receiptCandidates = []; ocdlg.bundle = null; ocdlg.showBundle = false;
@@ -2020,7 +2040,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { netRowsOf, tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, outNoPreview, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf, ocdlg, openOutCorrect, submitOutCorrect, entryTag, entryTagType, entryMatText, canCorrectEntry, outMatOptions, outMatLabel, obRemain, returnedOfMaterial };
+    return { netRowsOf, tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, outNoPreview, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, reqOptionsOf, ocdlg, openOutCorrect, submitOutCorrect, entryTag, entryTagType, entryMatText, canCorrectEntry, outMatOptions, outMatOptionsAll, outMatLabel, obRemain, returnedOfMaterial };
   },
   template: `
   <div>
@@ -2287,7 +2307,7 @@ const Outbounds = {
             <el-row :gutter="8" style="margin-top:6px">
               <el-col :span="10" :xs="24">
                 <el-select v-model="ocdlg.bundle.materialId" filterable style="width:100%">
-                  <el-option v-for="m in outMatOptions" :key="m.id" :label="outMatLabel(m)" :value="m.id" />
+                  <el-option v-for="m in outMatOptionsAll" :key="m.id" :label="outMatLabel(m)" :value="m.id" />
                 </el-select>
               </el-col>
               <el-col :span="5" :xs="24">
