@@ -232,7 +232,12 @@ app.get('/api/materialOutbound/stock', (req, res) => {
     const net = roundQty(st.taken - st.returned);
     const available = roundQty(Math.max(0, inQty - net));
     if (available <= 0) return; // 已全部出库的材料不再出现在可出库列表
-    const hasRecords = DB.materialOutbound.some(o => !o.deleted && o.project === project && (o.items || []).some(it => it.materialId === m.id));
+    // F5：可出库材料「有出库记录」按 entries 净额判断，不再看未改写的 items。
+    // 复用 outboundStats 的同工程聚合（只看未删除、状态有效的出库单）：
+    //   net = 累计领取(entries 净额) − 累计归还，等价于「存在有效出库单其净额 > 0」。
+    // 更正换型号后原型号净额归 0、已全部冲销、出完又全部归还、已作废/已删除的单都不再挂标记。
+    // 库存各列数字算法不变，原 items 原文不动。
+    const hasRecords = net > 0;
     rows.push({ id: m.id, description: m.description, code: m.code, unit: m.unit, inQty, taken: st.taken, returned: st.returned, net, available, hasRecords });
   });
   res.json(rows);

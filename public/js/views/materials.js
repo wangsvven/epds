@@ -32,13 +32,17 @@ const MaterialsView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
       finally { loading.value = false; }
     }
-    // 出库记录映射：materialId → 有效出库单数（已作废不计），用于材料明细「有出库记录」标识
+    // F5：出库记录映射按 entries 净额（netItems）判断，与可出库列表的 hasRecords 同口径；
+    // 不再看未改写的 items。已作废/已删除、净额为 0（全部冲销或更正后转走）的单都不计。
     const outOrders = ref([]);
     const outMap = computed(() => {
       const mp = {};
       outOrders.value.forEach(o => {
-        if (o.status === '已作废') return;
-        (o.items || []).forEach(it => { mp[it.materialId] = (mp[it.materialId] || 0) + 1; });
+        if (o.deleted || o.status !== '有效') return;
+        const rows = (o.netItems && o.netItems.length) ? o.netItems : (o.items || []);
+        rows.forEach(it => {
+          if (it && it.materialId && Number(it.qty) > 0) mp[it.materialId] = (mp[it.materialId] || 0) + 1;
+        });
       });
       return mp;
     });
