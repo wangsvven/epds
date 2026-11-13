@@ -54,16 +54,21 @@ function replayFail(res, m, rp, what) {
     available: rp.available, qty: rp.qty, refs
   });
 }
-// 取号：按前缀扫已落库的最大流水 +1（含已作废 / 已删除，不回收、不复用），超 9999 位数自然增长
+// 取号：该单据类型 + 该业务日期前缀下，只统计「未删除」单据，取最小未占用的正整数流水（删除补缺；作废不腾号）。
+// 例：0001 在、0002 已删除、0003 已作废、0004 在 → 下一张 0002；补上后再下一张 0005。无空缺时等价于最大号 +1。
+// 超过 9999 位数自然增长。
 function nextDocNo(list, field, prefix) {
-  let max = 0;
+  const used = new Set();
   for (const r of (list || [])) {
-    const no = r && r[field];
+    if (!r || r.deleted) continue; // 已删除记录不占号（其原单号字段保持原值不动）
+    const no = r[field];
     if (typeof no !== 'string' || no.indexOf(prefix) !== 0) continue;
     const suf = no.slice(prefix.length);
-    if (/^\d+$/.test(suf)) { const n = parseInt(suf, 10); if (n > max) max = n; }
+    if (/^\d+$/.test(suf)) used.add(parseInt(suf, 10));
   }
-  return prefix + String(max + 1).padStart(4, '0');
+  let n = 1;
+  while (used.has(n)) n++;
+  return prefix + String(n).padStart(4, '0');
 }
 const dateTagOf = d => String(d || '').replace(/-/g, '');
 function reqNoOf(reqDate) { return nextDocNo(DB.materialRequisitions, 'reqNo', 'LL-' + dateTagOf(reqDate) + '-'); }
@@ -333,7 +338,7 @@ app.post('/api/materialOutbound/create', (req, res) => {
     if (!rp.ok) return replayFail(res, m, rp, '本单出库');
   }
   if (availErr) return res.status(400).json({ error: availErr });
-  // 单号：OUT-YYYYMMDD-NNNN，日期取出库业务日（不是录入日）；流水按该日已落库最大号 +1，不回收
+  // 单号：OUT-YYYYMMDD-NNNN，日期取出库业务日（不是录入日）；流水取该日最小未占用号（删除补缺、作废不腾号）
   const rec = {
     id: genId('ob'), outNo: outNoOf(outDate),
     project, receiver, status: '有效', createdAt: fmtNow(),
@@ -871,9 +876,9 @@ app.post('/api/materials/import', upload.single('file'), (req, res) => {
 });
 
 // ---------- 领料单（暂存清单 → 生成领料单 → 下载 Excel → 确认入库 / 作废） ----------
-// 单号规则 LL-YYYYMMDD-NNNN：日期取领料业务日 reqDate（不是录入日），NNNN 为该日 4 位补零流水（从 0001 起，只增不减）。
+// 单号规则 LL-YYYYMMDD-NNNN：日期取领料业务日 reqDate（不是录入日），NNNN 为该日 4 位补零流水（删除补缺，作废不腾号）。
 // Node 单线程下 create 处理函数（算单号→入数组→saveDB）全程同步、无 await 让出，并发在 JS 层串行，
-// 后到者能看到前者记录并取 max+1，同一秒并发也不会撞号；扫描含已作废/已删除记录，单号不回收复用。
+// 后到者能看到前者记录并取「最小未占用号」，同一秒并发也不会撞号；已删除记录不占号，已作废仍占号。
 // 历史单已由 scripts/migrate-no4-20261031.js 全量重编为本格式，推导天然连续。
 // 从暂存的物料生成领料单；领料数量可任意填写（默认=可继续领料），但不能大于可继续领料
 // 请求体：{ items: [{ id, qty }], reqDate?, reqDateReason?, correctedFrom? }（兼容旧 { ids: [...] } = 按可继续领料全量生成）
