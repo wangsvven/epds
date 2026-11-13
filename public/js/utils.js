@@ -67,7 +67,23 @@ function cmpReqNo(a, b) {
   if (ka.seq !== kb.seq) return ka.seq - kb.seq;   // 数值比较：流水位数会变长
   return 0;
 }
-if (typeof window !== 'undefined') window.MaterialNo = { key: reqNoKey, cmp: cmpReqNo };
+/* 列表排序（2026-11-13 22:18 定版）：当天组置顶 → 日期升序 → 同日内流水升序。
+ * today 传「服务端业务日期」（ServerTime.ymd()，与后端 todayBizDate() 同源）。
+ * 与 server/core/doc-no.js 的 cmpDocNoTopToday 同口径——两处规则文字、行为必须一致。
+ * 例：today=13 日 → 13-0001…13-0004 置顶，其下 11-0001、11-0002、12-0001；到 14 日 13 组落回升序位置。 */
+function cmpReqNoTop(a, b, today) {
+  const ka = reqNoKey(a), kb = reqNoKey(b);
+  if (!ka && !kb) return 0;
+  if (!ka) return 1;   // 无法识别的单号排最后
+  if (!kb) return -1;
+  const t = String(today || '').replace(/-/g, '');   // 允许传 YYYY-MM-DD 或 YYYYMMDD
+  const ta = !!t && ka.date === t, tb = !!t && kb.date === t;
+  if (ta !== tb) return ta ? -1 : 1;          // 当天组整组置顶
+  if (ka.date !== kb.date) return ka.date < kb.date ? -1 : 1;
+  if (ka.grp !== kb.grp) return ka.grp - kb.grp;
+  return ka.seq - kb.seq;
+}
+if (typeof window !== 'undefined') window.MaterialNo = { key: reqNoKey, cmp: cmpReqNo, cmpTop: cmpReqNoTop };
 
 /* ---------------- 物料简称（领料单列表「物料描述」列用） ----------------
  * 目标：只保留物料名称主体，去掉后面的型号 / 规格 / 参数。

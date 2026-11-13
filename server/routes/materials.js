@@ -10,7 +10,7 @@ const { genId, nowISO, aliveFilter, fmtNow, bjStr } = require('../core/util');
 const { withGen, materialStatus, roundQty, replayAvailability } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 const { isWorkerAdmitted } = require('../core/worker-status');
-const { docNoKey, cmpDocNo, nextDocNo, alignPlan, refPatchPlan } = require('../core/doc-no');
+const { docNoKey, cmpDocNo, cmpDocNoTopToday, nextDocNo, alignPlan, refPatchPlan } = require('../core/doc-no');
 
 /* ---------- 业务日期（P4-1）与按业务日期取号（P4-2） ----------
  * 口径：业务日期一律 'YYYY-MM-DD'；「今天」取服务器北京时间（bjStr().slice(0,10)，含手动校时），
@@ -180,13 +180,16 @@ function reqUsedQty(reqId, materialId) {
   return roundQty(used);
 }
 // P4-6：出库单默认按「出库日」倒序，同一天按单号流水倒序（补录单不再因今天录入排最前）
-// 出库单列表排序（2026-11-13 晚定版）：整体升序——业务日期升序、同日流水升序，最早的单排最前。
-// 等价实现：按单号日期段 + 流水段升序（编号与业务日期一一对应）；单号无法识别时退回按 outDate 升序。
+// 出库单列表排序（2026-11-13 22:18 定版）：当天组置顶 → 日期升序 → 同日内流水升序。
+// 当天 = 服务端业务日期 todayBizDate()（与取号/业务日期同一口径）；单号无法识别时退回按 outDate 排。
 function byDocNoAsc(a, b) {
+  const today = todayBizDate();
   const ka = docNoKey(a && a.outNo), kb = docNoKey(b && b.outNo);
-  if (ka && kb) return cmpDocNo(a.outNo, b.outNo);
+  if (ka && kb) return cmpDocNoTopToday(a.outNo, b.outNo, today);
   const da = String((a && a.outDate) || '').slice(0, 10);
   const db = String((b && b.outDate) || '').slice(0, 10);
+  const ta = da === today, tb = db === today;
+  if (ta !== tb) return ta ? -1 : 1;
   if (da !== db) return da < db ? -1 : 1;
   return String((a && a.outNo) || '').localeCompare(String((b && b.outNo) || ''));
 }

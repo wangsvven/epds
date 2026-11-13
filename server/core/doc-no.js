@@ -53,6 +53,25 @@ function nextDocNo(list, field, prefix) {
   return prefix + String(n).padStart(4, '0');
 }
 
+/**
+ * 列表排序（2026-11-13 22:18 定版）：当天组置顶 → 日期升序 → 同日内流水升序。
+ * today 必须是「服务端业务日期」（routes 侧的 todayBizDate()，与前端 ServerTime.ymd() 同源）。
+ * 与 public/js/utils.js 的 cmpReqNoTop 同口径——两处规则文字、行为必须一致。
+ * 例：today=13 日 → 13-0001…13-0004 置顶，其下 11-0001、11-0002、12-0001；到 14 日 13 组落回升序位置。
+ */
+function cmpDocNoTopToday(a, b, today) {
+  const ka = docNoKey(a), kb = docNoKey(b);
+  if (!ka && !kb) return 0;
+  if (!ka) return 1;   // 无法识别的单号排最后
+  if (!kb) return -1;
+  const t = String(today || '').replace(/-/g, '');   // 允许传 YYYY-MM-DD 或 YYYYMMDD
+  const ta = !!t && ka.date === t, tb = !!t && kb.date === t;
+  if (ta !== tb) return ta ? -1 : 1;          // 当天组整组置顶
+  if (ka.date !== kb.date) return ka.date < kb.date ? -1 : 1;
+  if (ka.grp !== kb.grp) return ka.grp - kb.grp;
+  return ka.seq - kb.seq;
+}
+
 /** 删除后的对齐计划（不改数据，只算）：返回 { changes: [{ rec, field, from, to }], skipped }
  *  - 只处理「同类型 + 同单号日期 + 同位数」的活单，按当前流水升序重编为 1..n；
  *  - 位数保持该组原有格式（现行 4 位补零）；
@@ -99,4 +118,4 @@ function refPatchPlan(lists, changes) {
   return out;
 }
 
-module.exports = { DOC_NO_RE, DOC_NO_REF_FIELDS, docNoKey, cmpDocNo, nextDocNo, alignPlan, refPatchPlan };
+module.exports = { DOC_NO_RE, DOC_NO_REF_FIELDS, docNoKey, cmpDocNo, cmpDocNoTopToday, nextDocNo, alignPlan, refPatchPlan };

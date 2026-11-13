@@ -877,14 +877,19 @@ const Requisitions = {
       } catch (e) {}
       window.addEventListener('requisitions-refresh', load);
     });
-    const filtered = computed(() => list.value.filter(r => {
-      if (filters.project && !r.projects.includes(filters.project)) return false;
-      if (filters.status && r.status !== filters.status) return false;
-      if (filters.keyword && !r.reqNo.toLowerCase().includes(filters.keyword.toLowerCase())) return false;
-      return true;
-    }).slice().sort((a, b) => cmpReqNo(a.reqNo, b.reqNo)));
-    // 单号排序口径（js/utils.js 的 reqNoKey / cmpReqNo，冒烟脚本共用同一份纯函数）：
-    // 日期升序 → 同日内 流水组（3 位及以上数字后缀，含残留旧 4 位）按数值升序 → 6 位时间后缀组按值升序 → 无法识别的排最后
+    // 列表排序用的「今天」：服务端业务日期（ServerTime.ymd() 由 /api/server-time 校准，与后端 todayBizDate() 同源）
+    const sortToday = () => ((window.ServerTime && ServerTime.ymd) ? ServerTime.ymd() : new Date().toISOString().slice(0, 10));
+    const filtered = computed(() => {
+      const topDate = sortToday();
+      return list.value.filter(r => {
+        if (filters.project && !r.projects.includes(filters.project)) return false;
+        if (filters.status && r.status !== filters.status) return false;
+        if (filters.keyword && !r.reqNo.toLowerCase().includes(filters.keyword.toLowerCase())) return false;
+        return true;
+      }).slice().sort((a, b) => cmpReqNoTop(a.reqNo, b.reqNo, topDate));
+    });
+    // 单号排序口径（js/utils.js 的 reqNoKey / cmpReqNo / cmpReqNoTop，冒烟脚本共用同一份纯函数）：
+    // 当天组置顶（单号日期段 == 今天）→ 其余按日期升序 → 同日内 流水组（数字后缀）按数值升序 → 6 位时间后缀组按值升序 → 无法识别的排最后
     // 定版格式 LL-YYYYMMDD-NNN；解析同时接受无 LL- 前缀的历史测试期写法。
     function resetFilters() { filters.project = ''; filters.status = ''; filters.keyword = ''; }
     function sumQty(r) { return r.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); }

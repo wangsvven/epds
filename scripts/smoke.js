@@ -570,8 +570,9 @@ async function runSmoke() {
       '(d) 跨日删除不影响本日单号');
     return '删0002→0003前移0002 · 作废不改号 · 删末张不改号 · 跨日不串 · 删单留痕 · 再新建=末尾+1';
   });
-  await step('materials', '单号排序：日期升序 → 流水组（数值）→ 6 位时间组 → 无法识别', async () => {
+  await step('materials', '单号排序：日期升序 → 流水组（数值）→ 6 位时间组 → 无法识别；列表口径=当天置顶+其余升序', async () => {
     const D = TODAY;
+    const dOffCompact = (compact, off) => new Date(Date.parse(compact.slice(0, 4) + '-' + compact.slice(4, 6) + '-' + compact.slice(6, 8) + 'T00:00:00Z') + off * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
     // 流水组：0001(1) 0002(2) 003(3) 999(1000) 1000；时间组：222544；再加无前缀写法与脏号
     const mixed = ['LL-' + D + '-0002', D + '-1000', 'X-无法识别', 'LL-' + D + '-222544', D + '-999', 'LL-' + D + '-0001', D + '-003'];
     const want = ['LL-' + D + '-0001', 'LL-' + D + '-0002', D + '-003', D + '-999', D + '-1000', 'LL-' + D + '-222544', 'X-无法识别'];
@@ -580,6 +581,36 @@ async function runSmoke() {
     // 跨日：昨日单号整体排在今日之前
     const cross = ['LL-' + D + '-001', 'LL-' + YDAY + '-005'].sort((a, b) => MaterialNo.cmp(a, b));
     need(cross[0] === 'LL-' + YDAY + '-005', '跨日应昨日在前，实际 ' + cross.join(' , '));
+
+    /* ---- 列表排序口径（2026-11-13 22:18 定版）：当天组置顶 → 日期升序 → 流水升序 ---- */
+    const P0 = 'LL-20260101-0001', P1 = 'LL-20260101-0002';   // 更早的一天
+    const Y1 = 'LL-' + YDAY + '-0005';
+    const T1 = 'LL-' + D + '-0001', T2 = 'LL-' + D + '-0002';
+    const TMRW = dOffCompact(D, 1);                            // 明天（构造日期，不动系统时钟）
+    const M1 = 'LL-' + TMRW + '-0001';
+    // 今天有单：今天组置顶且组内升序，其下历史按日期升序
+    const top1 = [Y1, T2, P0, T1, P1].sort((a, b) => MaterialNo.cmpTop(a, b, D));
+    need(JSON.stringify(top1) === JSON.stringify([T1, T2, P0, P1, Y1]),
+      '当天置顶 + 组内升序 + 历史升序不符：' + top1.join(' , '));
+    // 今天无单：整表回到全升序（不额外置顶任何组）
+    const top2 = [Y1, P1, P0].sort((a, b) => MaterialNo.cmpTop(a, b, '20991231'));
+    need(JSON.stringify(top2) === JSON.stringify([P0, P1, Y1]), '无当天单时应全升序：' + top2.join(' , '));
+    // 明天成为「今天」后：明天组置顶，今天组落回升序位置
+    const top3 = [Y1, M1, T1, P0].sort((a, b) => MaterialNo.cmpTop(a, b, TMRW));
+    need(JSON.stringify(top3) === JSON.stringify([M1, P0, Y1, T1]), '次日应换成次日组置顶：' + top3.join(' , '));
+    // 前后端两套比较器必须同口径（防漂移）
+    const DOCNO = require(path.join(ROOT, 'server', 'core', 'doc-no.js'));
+    const pairs = [[Y1, T2], [T1, P0], [M1, T1], [P0, P1], ['X-无法识别', T1], [T1, '40261001-0001']];
+    const day = [D, TMRW, '20991231'];
+    let drift = '';
+    pairs.forEach(([x, y]) => day.forEach(t => {
+      const a = Math.sign(MaterialNo.cmpTop(x, y, t)), b = Math.sign(DOCNO.cmpDocNoTopToday(x, y, t));
+      if (a !== b) drift = x + ' vs ' + y + ' @' + t + '：前端 ' + a + ' / 后端 ' + b;
+    }));
+    need(!drift, '前后端置顶比较器口径不一致：' + drift);
+    // 后端对 YYYY-MM-DD 与 YYYYMMDD 两种 today 写法必须等价
+    need(DOCNO.cmpDocNoTopToday(Y1, T1, '2026-11-12') === DOCNO.cmpDocNoTopToday(Y1, T1, '20261112'),
+      '后端 today 的两种日期写法应等价');
     return got.join(' , ');
   });
   await step('materials', '历史重编脚本：同日 LL-四位 + LL-六位混合 → 按 createdAt 重编且二次运行不变', async () => {
@@ -3698,8 +3729,11 @@ async function runSmoke() {
       '未选工程时应取「全部工程」的出库单');
     need(body.indexOf('description="请先选择工程。"') === -1, '出库单页签不应再被「请先选择工程」挡住');
     // 两个列表整体升序（领料单前端排序、出库单后端排序，同一套单号语义）
-    need(/\.slice\(\)\.sort\(\(a, b\) => cmpReqNo\(a\.reqNo, b\.reqNo\)\)/.test(body), '领料单列表应按单号升序排序完整结果集');
-    need(/function byDocNoAsc\(a, b\)/.test(fs.readFileSync(path.join(ROOT, 'server', 'routes', 'materials.js'), 'utf8')), '出库单列表应按单号升序排序（后端 byDocNoAsc）');
+    const routesSrc = fs.readFileSync(path.join(ROOT, 'server', 'routes', 'materials.js'), 'utf8');
+    need(/\.slice\(\)\.sort\(\(a, b\) => cmpReqNoTop\(a\.reqNo, b\.reqNo, topDate\)\)/.test(body) && /const topDate = sortToday\(\)/.test(body),
+      '领料单列表应按「当天置顶 + 其余升序」排序完整结果集（前端 cmpReqNoTop）');
+    need(/function byDocNoAsc\(a, b\)[\s\S]{0,220}cmpDocNoTopToday\(a\.outNo, b\.outNo, today\)/.test(routesSrc),
+      '出库单列表应按「当天置顶 + 其余升序」排序（后端 byDocNoAsc → cmpDocNoTopToday）');
     return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列 + 导入状态常规色 + 出库单默认全部 + 两列表升序';
   });
 
@@ -4195,7 +4229,7 @@ async function runSmoke() {
     return '领料日期 + 两行到货历史（' + hist.map(x => x[0]).join(' / ') + '）';
   });
 
-  await step('materials', 'P4-6-C 出库列表按出库日升序（补录单在前、今天在后）', async () => {
+  await step('materials', 'P4-6-C 出库列表：当天组置顶 + 其余按日期升序', async () => {
     const m = await p4Mat('O', 100);
     const r = await p4Req(m.id, 20, p4D4);
     needOk(await p4Confirm(r.id, m.id, 20, p4D4), 'P4-6-C confirm');
@@ -4206,12 +4240,16 @@ async function runSmoke() {
     const list = needOk(await api('GET', '/api/materialOutbound/orders?project=' + encodeURIComponent(P4PJ), { token }), 'orders');
     const ids = (list || []).map(x => x.id);
     const iNew = ids.indexOf(oNew.data.data.id), iOld = ids.indexOf(oOld.data.data.id);
-    need(iNew >= 0 && iOld >= 0 && iOld < iNew, '补录单应排在今天的单之前（整体升序）：' + brief(ids.slice(0, 5)));
-    // 整列表按单号升序：日期段 + 流水段非降
+    need(iNew >= 0 && iOld >= 0 && iNew < iOld, '今天的单应置顶在补录单之前：' + brief(ids.slice(0, 5)));
+    // 整列表 = 当天组置顶 + 其余升序
     const nos = (list || []).map(x => x.outNo);
-    const sorted = nos.slice().sort((a, b) => MaterialNo.cmp(a, b));
-    need(JSON.stringify(nos) === JSON.stringify(sorted), '出库单列表整体应按单号升序：' + brief(nos.slice(0, 6)));
-    return 'outDate 升序 · 补录在前、今天在后 · 整表按单号升序';
+    const sorted = nos.slice().sort((a, b) => MaterialNo.cmpTop(a, b, srvToday));
+    need(JSON.stringify(nos) === JSON.stringify(sorted), '出库单列表应为「当天置顶 + 其余升序」：' + brief(nos.slice(0, 6)));
+    const tagT = srvToday.replace(/-/g, '');
+    const headCount = nos.filter(x => String(x).indexOf('OUT-' + tagT + '-') === 0).length;
+    need(nos.slice(0, headCount).every(x => String(x).indexOf('OUT-' + tagT + '-') === 0), '置顶组应整段连续：' + brief(nos.slice(0, 6)));
+    need(nos.slice(headCount).every(x => String(x).indexOf('OUT-' + tagT + '-') !== 0), '置顶组之后不应再出现今天的单');
+    return '当天组置顶 · 组内升序 · 历史升序';
   });
 
   // 退回更正后：原来与「入库/出库更正」绑定的冒烟用例随业务代码一并退出，
