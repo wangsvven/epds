@@ -2099,7 +2099,13 @@ async function runSmoke() {
     need(/staging\.value = \[\]; stagingPage\.value = 1;/.test(clearFn) && !/stagingVisible\.value = false/.test(clearFn),
       '暂存清单「清空」应只清内容、弹窗保持打开：' + brief(clearFn));
     need(/<el-button @click="stagingVisible=false">关 闭<\/el-button>/.test(src), '暂存清单仍由「关闭」按钮关闭');
-    return '总数 computed 联动 + Tab 循环跳转（移除退出 Tab 序）+ 5 组简称用例 + 去重 + 项目折行 + 物料描述列 + 清空不关窗';
+    // 确认入库弹窗：不再选到货日期，一律由服务端按确认当天记（服务端缺省见 P4-1-A）
+    const cDlg = (src.match(/<el-dialog v-model="dlg\.visible"[\s\S]*?<\/el-dialog>/) || [''])[0];
+    need(cDlg && cDlg.indexOf('dlg.arrivalDate') === -1 && cDlg.indexOf('到货日期（整单一个') === -1,
+      '确认入库弹窗不应再有「到货日期」字段块');
+    need(/api\.put\('\/api\/materialRequisitions\/' \+ dlg\.rec\.id \+ '\/confirm', \{ rows \}\)/.test(src),
+      '确认入库不应再传 arrivalDate / arrivalReason（交服务端缺省）');
+    return '总数 computed 联动 + Tab 循环跳转（移除退出 Tab 序）+ 5 组简称用例 + 去重 + 项目折行 + 物料描述列 + 清空不关窗 + 确认入库无到货日期';
   });
   await step('ui', '移动端：顶栏图标化、筛选栏两列网格、弹窗限高可滚动', async () => {
     const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');

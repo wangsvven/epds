@@ -854,7 +854,7 @@ const Requisitions = {
     const filters = reactive({ project: '', status: '', keyword: '' });
     const projectOptions = ref([]);
     // 确认入库 / 补入库弹窗（type: confirm=首次入库, supplement=部分到库后的补入库）
-    const dlg = reactive({ visible: false, rec: null, mode: '无异常', rows: [], type: 'confirm', arrivalDate: '', arrivalReason: '' });
+    const dlg = reactive({ visible: false, rec: null, mode: '无异常', rows: [], type: 'confirm' });
     const todayStr = () => ((window.ServerTime && ServerTime.ymd) ? ServerTime.ymd() : new Date().toISOString().slice(0, 10));
     function oldLimit30() { const t = new Date(todayStr() + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() - 30); return t.toISOString().slice(0, 10); }
     // 作废弹窗
@@ -907,13 +907,13 @@ const Requisitions = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     function openConfirm(r) {
-      dlg.rec = r; dlg.mode = '无异常'; dlg.type = 'confirm'; dlg.arrivalDate = todayStr(); dlg.arrivalReason = '';
+      dlg.rec = r; dlg.mode = '无异常'; dlg.type = 'confirm';
       dlg.rows = r.items.map(it => ({ materialId: it.materialId, qty: Number(it.qty) || 0, thisQty: '', abnormal: false, reason: '' }));
       dlg.visible = true;
     }
     // 补入库：与入库弹窗功能一致，「领料数量」按剩余未入库数量展示，无异常时本次入库=剩余量
     function openSupplement(r) {
-      dlg.rec = r; dlg.mode = '无异常'; dlg.type = 'supplement'; dlg.arrivalDate = todayStr(); dlg.arrivalReason = '';
+      dlg.rec = r; dlg.mode = '无异常'; dlg.type = 'supplement';
       dlg.rows = r.items.map(it => {
         const cr = (r.confirmRows || []).find(x => x.materialId === it.materialId);
         const done = cr ? (Number(cr.thisQty) || 0) : 0;
@@ -955,7 +955,8 @@ const Requisitions = {
           abnormal: r.abnormal,
           reason: r.reason
         }));
-        await api.put('/api/materialRequisitions/' + dlg.rec.id + '/confirm', { rows, arrivalDate: dlg.arrivalDate || '', arrivalReason: dlg.arrivalReason || '' });
+        // 到货日期不再由界面选择：不传 arrivalDate，由服务端按确认当天记录（routes/materials.js 的缺省口径）
+        await api.put('/api/materialRequisitions/' + dlg.rec.id + '/confirm', { rows });
         ElementPlus.ElMessage.success('领料单 ' + dlg.rec.reqNo + (dlg.type === 'supplement' ? ' 补入库成功' : ' 已确认入库'));
         dlg.visible = false; load();
         window.dispatchEvent(new CustomEvent('materials-changed')); // 材料明细实时刷新
@@ -1130,16 +1131,6 @@ const Requisitions = {
         <el-radio label="无异常">无异常</el-radio>
         <el-radio label="有异常">有异常</el-radio>
       </el-radio-group>
-      <el-row :gutter="12" style="margin-bottom:12px">
-        <el-col :span="10" :xs="24">
-          <div style="font-size:13px;color:var(--text-2);margin-bottom:4px">到货日期（整单一个，分多天到货请分多次入库）</div>
-          <el-date-picker v-model="dlg.arrivalDate" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" />
-        </el-col>
-        <el-col :span="14" :xs="24" v-if="dlg.arrivalDate && dlg.arrivalDate < oldLimit30()">
-          <div style="font-size:13px;color:var(--text-2);margin-bottom:4px">到货日期早于 30 天，补录原因</div>
-          <el-input v-model="dlg.arrivalReason" placeholder="请说明补录原因" />
-        </el-col>
-      </el-row>
       <el-table v-if="dlg.rec" :data="dlg.rec.items" border class="rq-confirm" :row-class-name="rowClass">
         <el-table-column prop="description" label="物料描述" min-width="180" />
         <el-table-column :label="dlg.type==='supplement' ? '未入库数量' : '领料数量'" width="110" align="right">
