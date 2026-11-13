@@ -285,7 +285,8 @@ const MaterialsView = {
     async function clearStaging() {
       try {
         await ElementPlus.ElMessageBox.confirm('确认清空暂存清单？', '提示', { type: 'warning' });
-        staging.value = []; stagingVisible.value = false;
+        // 清空只清内容，弹窗保持打开，便于继续从材料明细往暂存里加（关闭只走「关闭」按钮）
+        staging.value = []; stagingPage.value = 1;
         Object.keys(stagingQty).forEach(k => delete stagingQty[k]);
       } catch (e) {}
     }

@@ -2094,7 +2094,12 @@ async function runSmoke() {
       && /v-for="\(n, i\) in matNames\(row\)"/.test(src), '应在涉及项目旁新增物料描述列并调用简称函数');
     need(/\.rq-main \.rq-wrapcell \.cell \{ white-space:normal; overflow:visible/.test(css), '折行列应有 white-space:normal CSS');
     need(/\.stg-chips \{ display:flex; flex-wrap:wrap/.test(css), '暂存统计条应在窄屏换行');
-    return '总数 computed 联动 + Tab 循环跳转（移除退出 Tab 序）+ 5 组简称用例 + 去重 + 项目折行 + 物料描述列';
+    // 暂存清单「清空」只清内容、不关弹窗（2026-11-13 定版）；「关闭」按钮才关闭
+    const clearFn = (src.match(/async function clearStaging\(\) \{[\s\S]*?\n    \}/) || [''])[0];
+    need(/staging\.value = \[\]; stagingPage\.value = 1;/.test(clearFn) && !/stagingVisible\.value = false/.test(clearFn),
+      '暂存清单「清空」应只清内容、弹窗保持打开：' + brief(clearFn));
+    need(/<el-button @click="stagingVisible=false">关 闭<\/el-button>/.test(src), '暂存清单仍由「关闭」按钮关闭');
+    return '总数 computed 联动 + Tab 循环跳转（移除退出 Tab 序）+ 5 组简称用例 + 去重 + 项目折行 + 物料描述列 + 清空不关窗';
   });
   await step('ui', '移动端：顶栏图标化、筛选栏两列网格、弹窗限高可滚动', async () => {
     const css = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
