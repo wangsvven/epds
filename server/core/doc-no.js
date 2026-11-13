@@ -4,8 +4,11 @@
  * 定版格式：前缀 + YYYYMMDD + '-' + 4 位当日流水（不足补零），业务日期即单号日期段。
  * 历史写法（只在解析/排序时兼容，不再产生）：无前缀 `20261028-001`、6 位时间后缀 `LL-20261024-123004`。
  *
- * 取号 nextDocNo：同类型 + 同日前缀下，只统计「未删除」单据，取最小未占用流水。
- * 排序 cmpDocNo：日期升序 → 流水组（4 位在前、6 位时间组在后）→ 流水数值升序，与前端 utils.js 的 cmpReqNo 同口径。
+ * 三条规则（2026-11-13 晚定版，覆盖此前「作废不回收」与「删除补缺」两版）：
+ *  1) 取号 nextDocNo：同类型 + 同日前缀下，只统计「未删除」单据，取最小未占用流水（删除后对齐前仍有空缺时补缺；无空缺即末尾 +1）。
+ *  2) 删除对齐 alignPlan：删除一张后，同类型 + 同单号日期 + 同位数格式的活单按现有流水顺序重编为 1..n，
+ *     被改号的单据单号前移；已删除记录单号保持原值（审计留痕，允许与活单同号，靠 id 区分）。
+ *  3) 引用同步 refPatchPlan：单号是「显示缓存」的字段（correctedFromNo / correctedByNo）同步改写为新号，保持指向同一单据。
  */
 
 // 单号解析：前缀可选、日期 8 位、流水为纯数字（位数不限）
@@ -20,7 +23,8 @@ function docNoKey(no) {
   return { prefix: m[1] || '', date: m[2], width: suf.length, grp: suf.length === 6 ? 1 : 0, seq: parseInt(suf, 10) };
 }
 
-/** 单号升序比较：日期 → 流水组（4 位在前、6 位时间组在后）→ 流水数值；无法识别的排最后。 */
+/** 单号升序比较：日期 → 流水组（4 位在前、6 位时间组在后）→ 流水数值；无法识别的排最后。
+ *  与 public/js/utils.js 的 cmpReqNo 同口径（同一份语义，前端列表与后端排序不会打架）。 */
 function cmpDocNo(a, b) {
   const ka = docNoKey(a), kb = docNoKey(b);
   if (!ka && !kb) return 0;
@@ -49,4 +53,50 @@ function nextDocNo(list, field, prefix) {
   return prefix + String(n).padStart(4, '0');
 }
 
-module.exports = { DOC_NO_RE, docNoKey, cmpDocNo, nextDocNo };
+/** 删除后的对齐计划（不改数据，只算）：返回 { changes: [{ rec, field, from, to }], skipped }
+ *  - 只处理「同类型 + 同单号日期 + 同位数」的活单，按当前流水升序重编为 1..n；
+ *  - 位数保持该组原有格式（现行 4 位补零）；
+ *  - 6 位时间后缀（历史 legacy 写法，其后缀是时间而非流水）整组跳过，不参与重编（skipped='legacy-6'）。 */
+function alignPlan(list, field, deletedRec) {
+  const dk = docNoKey(deletedRec && deletedRec[field]);
+  if (!dk) return { changes: [], skipped: 'unparsable' };
+  if (dk.width === 6) return { changes: [], skipped: 'legacy-6' };
+  const rows = (list || []).filter(r => {
+    if (!r || r.deleted || r === deletedRec) return false;
+    const k = docNoKey(r[field]);
+    return !!k && k.date === dk.date && k.width === dk.width;
+  }).sort((a, b) => {
+    const ka = docNoKey(a[field]), kb = docNoKey(b[field]);
+    if (ka.seq !== kb.seq) return ka.seq - kb.seq;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+  const changes = [];
+  rows.forEach((r, i) => {
+    const cur = String(r[field]);
+    const target = String(i + 1).padStart(dk.width, '0');
+    if (cur.slice(cur.length - dk.width) === target) return;
+    changes.push({ rec: r, field, from: cur, to: cur.slice(0, cur.length - dk.width) + target });
+  });
+  return { changes, skipped: '' };
+}
+
+/** 引用同步计划：把 correctedFromNo / correctedByNo 里等于「旧号」的值改成「新号」。
+ *  这些字段是单号的显示缓存（*No 后缀），真实关联走 id（correctedFrom / correctedBy），改号后必须同步，否则详情会指错单。 */
+const DOC_NO_REF_FIELDS = ['correctedFromNo', 'correctedByNo'];
+function refPatchPlan(lists, changes) {
+  const map = {};
+  (changes || []).forEach(c => { map[c.from] = c.to; });
+  const out = [];
+  (lists || []).forEach(list => (list || []).forEach(rec => {
+    if (!rec) return;
+    DOC_NO_REF_FIELDS.forEach(f => {
+      const v = rec[f];
+      if (typeof v !== 'string' || !v) return;
+      if (!map[v]) return;
+      out.push({ rec, field: f, from: v, to: map[v] });
+    });
+  }));
+  return out;
+}
+
+module.exports = { DOC_NO_RE, DOC_NO_REF_FIELDS, docNoKey, cmpDocNo, nextDocNo, alignPlan, refPatchPlan };

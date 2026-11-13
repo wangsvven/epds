@@ -517,42 +517,58 @@ async function runSmoke() {
     reqNoNew = n2;
     return n1 + ' → ' + n2 + '（已插入 ' + TODAY + '-005 与 LL-' + YDAY + '-005 作干扰）';
   });
-  await step('materials', '领料单号删除补缺：作废不腾号、删号回收、大号不干扰（V4 a/b/c）', async () => {
-    const mkRec = async () => {
-      const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: materialId, qty: 1 }] } }), 'requisition create');
-      return d.data;
+  await step('materials', '删除后同日编号对齐：0001/0002/0003 删中间 → 原 0003 前移为 0002（作废不改号 · 末张不改号 · 跨日不串 · 删单留痕）', async () => {
+    // TODAY 是紧凑写法 YYYYMMDD，先还原成 YYYY-MM-DD 再做日期偏移
+    const hy = t => t.slice(0, 4) + '-' + t.slice(4, 6) + '-' + t.slice(6, 8);
+    const dOff = (dstr, off) => new Date(Date.parse(dstr + 'T00:00:00Z') + off * 86400000).toISOString().slice(0, 10);
+    const listAll = async () => { const r = needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs'); return Array.isArray(r) ? r : (r.data || []); };
+    const byId = async (id) => (await listAll()).find(x => x.id === id);
+    const mkRec = async (day) => {
+      const d = await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: materialId, qty: 1 }], reqDate: day } });
+      return needOk(d, 'create ' + day).data; // 响应体为 { ok, data: 单据 }
     };
-    const listAll = async () => {
-      const r = needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs');
-      return (Array.isArray(r) ? r : (r.data || []));
-    };
-    const byNo = async (no) => (await listAll()).find(x => x.reqNo === no && !x.deleted);
-    const doVoid = async (id) => needOk(await api('PUT', '/api/materialRequisitions/' + id + '/void', { token, body: { reason: 'ZT 编号补缺' } }), 'void');
+    const doVoid = async (id) => needOk(await api('PUT', '/api/materialRequisitions/' + id + '/void', { token, body: { reason: 'ZT 编号对齐' } }), 'void');
     const doDel = async (id) => needOk(await api('DELETE', '/api/materialRequisitions/' + id, { token }), 'delete');
+    // 独立业务日，避免与其他用例互相干扰（补缺/对齐按「同类型 + 同单号日期」生效）
+    const AD = dOff(hy(TODAY), -25), pre = AD.replace(/-/g, '');
 
-    // 干扰：插一个超大号，新口径下不应把补号抬到 10000
-    await insertReq('LL-' + TODAY + '-9999');
+    // 前置：同日三单 0001 / 0002 / 0003
+    const a1 = await mkRec(AD), a2 = await mkRec(AD), a3 = await mkRec(AD);
+    const want3 = ['0001', '0002', '0003'].map(n => 'LL-' + pre + '-' + n).join(',');
+    need([a1, a2, a3].map(x => x.reqNo).join(',') === want3, '前置：同日三单应为 0001/0002/0003，实际 ' + [a1, a2, a3].map(x => x.reqNo).join(','));
 
-    // (c) 删 0001 → 新建得 0001
-    const r1 = await byNo('LL-' + TODAY + '-0001');
-    need(!!r1, '前置：当日 0001 应存在');
-    await doVoid(r1.id); await doDel(r1.id);
-    const g1 = await mkRec();
-    need(g1.reqNo === 'LL-' + TODAY + '-0001', '(c) 删 0001 后新建应得 0001，实际 ' + g1.reqNo);
+    // (b) 只作废 0002 不删 → 任何号不变
+    await doVoid(a2.id);
+    need((await byId(a2.id)).reqNo === 'LL-' + pre + '-0002' && (await byId(a3.id)).reqNo === 'LL-' + pre + '-0003',
+      '(b) 只作废不删时单号一律不变');
 
-    // (b) 0002 作废但不删 → 新建跳过 0002 得 0003
-    const r2 = await byNo('LL-' + TODAY + '-0002');
-    need(!!r2, '前置：当日 0002 应存在');
-    await doVoid(r2.id);
-    const g2 = await mkRec();
-    need(g2.reqNo === 'LL-' + TODAY + '-0003', '(b) 0002 作废未删，新建应得 0003，实际 ' + g2.reqNo);
+    // (a) 删 0002 → 原 0003 前移为 0002
+    await doDel(a2.id);
+    const a3b = await byId(a3.id);
+    need(a3b && a3b.reqNo === 'LL-' + pre + '-0002', '(a) 删 0002 后原 0003 应变 0002，实际 ' + (a3b && a3b.reqNo));
+    need((await byId(a1.id)).reqNo === 'LL-' + pre + '-0001', '(a) 0001 不受影响');
 
-    // (a) 再删 0002 → 新建补回 0002
-    await doDel(r2.id);
-    const g3 = await mkRec();
-    need(g3.reqNo === 'LL-' + TODAY + '-0002', '(a) 删 0002 后新建应补 0002，实际 ' + g3.reqNo);
+    // (g) 回读已删除记录：单号保持删除时原值（审计留痕，允许与活单同号）
+    const raw = JSON.parse(fs.readFileSync(path.join(TMP, 'data', 'db.json'), 'utf8'));
+    const dead = (raw.materialRequisitions || []).find(x => x.id === a2.id);
+    need(dead && dead.deleted === true && dead.reqNo === 'LL-' + pre + '-0002', '(g) 已删除记录单号应保持原值：' + (dead && dead.reqNo));
 
-    return '删0001→补0001 · 0002作废→0003 · 删0002→补0002 · 9999 不干扰';
+    // (c) 删当日最后一张 → 其余单不改号
+    await doVoid(a3.id); await doDel(a3.id);
+    need((await byId(a1.id)).reqNo === 'LL-' + pre + '-0001', '(c) 删当日最后一张后其余单不改号');
+
+    // (e) 对齐后再新建 → 末尾连续号
+    const a4 = await mkRec(AD);
+    need(a4.reqNo === 'LL-' + pre + '-0002', '(e) 对齐后新建应为末尾 +1：' + a4.reqNo);
+
+    // (d) 删另一天的一张 → 该日自身对齐、本日单号全不变
+    const BD = dOff(AD, -1), bpre = BD.replace(/-/g, '');
+    const b1 = await mkRec(BD), b2 = await mkRec(BD);
+    await doVoid(b1.id); await doDel(b1.id);
+    need((await byId(b2.id)).reqNo === 'LL-' + bpre + '-0001', '(d) 另一日的单只在该日内对齐：' + (await byId(b2.id)).reqNo);
+    need((await byId(a1.id)).reqNo === 'LL-' + pre + '-0001' && (await byId(a4.id)).reqNo === 'LL-' + pre + '-0002',
+      '(d) 跨日删除不影响本日单号');
+    return '删0002→0003前移0002 · 作废不改号 · 删末张不改号 · 跨日不串 · 删单留痕 · 再新建=末尾+1';
   });
   await step('materials', '单号排序：日期升序 → 流水组（数值）→ 6 位时间组 → 无法识别', async () => {
     const D = TODAY;
@@ -3932,6 +3948,44 @@ async function runSmoke() {
     need((await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: m.id, qty: 1 }], reqDate: p4Future } })).status === 400, '未来日期应 400');
     need((await api('GET', '/api/materialRequisitions', { token })).data.length === cnt, '未来日期不应占号落库');
     return r2.reqNo + ' · ' + o.data.data.outNo;
+  });
+
+  await step('materials', '删除对齐：出库单同口径 + 单号引用缓存（correctedFromNo/correctedByNo）同批改写', async () => {
+    // 出库单：独立出库日造同日三单 → 作废并删中间 → 原第三单前移
+    const DO = dayOff(srvToday, -22);
+    const m = await p4Mat('N', 100);
+    const rq = await p4Req(m.id, 50, DO);
+    needOk(await p4Confirm(rq.id, m.id, 50, DO), '对齐 confirm');
+    const preO = 'OUT-' + p4Tag(DO) + '-';
+    const o1 = await p4Out(m.id, 1, { outDate: DO });
+    const o2 = await p4Out(m.id, 1, { outDate: DO });
+    const o3 = await p4Out(m.id, 1, { outDate: DO });
+    needOk(o1, 'o1'); needOk(o2, 'o2'); needOk(o3, 'o3');
+    need(o3.data.data.outNo === preO + '0003', '前置：同日三单应到 0003，实际 ' + o3.data.data.outNo);
+    needOk(await api('PUT', '/api/materialOutbound/' + o2.data.data.id + '/void', { token, body: { reason: 'ZT 出库对齐' } }), '作废出库');
+    needOk(await api('DELETE', '/api/materialOutbound/' + o2.data.data.id, { token }), '删除出库');
+    const outs = needOk(await api('GET', '/api/materialOutbound/orders?project=' + encodeURIComponent(P4PJ), { token }), 'orders');
+    const o3n = outs.find(x => x.id === o3.data.data.id);
+    need(o3n && o3n.outNo === preO + '0002', '出库单删除后原 0003 应变 0002：' + (o3n && o3n.outNo));
+
+    // 引用缓存：重开链上两单在删前置单后一起改号，correctedFromNo/correctedByNo 必须同步
+    const AR = dayOff(srvToday, -21), pre = 'LL-' + p4Tag(AR) + '-';
+    const m2 = await p4Mat('R', 100);
+    const r0 = await p4Req(m2.id, 1, AR);
+    const r1 = await p4Req(m2.id, 1, AR);
+    needOk(await api('PUT', '/api/materialRequisitions/' + r1.id + '/void', { token, body: { reason: 'ZT 引用同步' } }), '作废 r1');
+    const r2 = await p4Req(m2.id, 1, AR, { correctedFrom: r1.id });
+    need(r2.reqNo === pre + '0003', '前置：重开单应为 0003，实际 ' + r2.reqNo);
+    need(r2.correctedFromNo === r1.reqNo, '前置：重开单 correctedFromNo 记原单号');
+    needOk(await api('PUT', '/api/materialRequisitions/' + r0.id + '/void', { token, body: { reason: 'ZT 引用同步' } }), '作废 r0');
+    needOk(await api('DELETE', '/api/materialRequisitions/' + r0.id, { token }), '删除 r0');
+    const list = needOk(await api('GET', '/api/materialRequisitions', { token }), 'reqs');
+    const nr1 = list.find(x => x.id === r1.id), nr2 = list.find(x => x.id === r2.id);
+    need(nr1.reqNo === pre + '0001' && nr2.reqNo === pre + '0002', '删前置单后链上两单前移：' + nr1.reqNo + ' / ' + nr2.reqNo);
+    need(nr2.correctedFrom === r1.id, 'id 引用不变：' + nr2.correctedFrom);
+    need(nr2.correctedFromNo === pre + '0001', '重开单 correctedFromNo 应同步为原单新号：' + nr2.correctedFromNo);
+    need(nr1.correctedBy === r2.id && nr1.correctedByNo === pre + '0002', '原单 correctedByNo 应同步为重开单新号：' + nr1.correctedByNo);
+    return '出库单删中→后单前移 · 重开链双向引用同步新号 · id 引用不变';
   });
 
   await step('materials', 'P4-3 作废后按原开单日重开：双向 correctedFrom / correctedBy；不存在则拒', async () => {

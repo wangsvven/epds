@@ -10,7 +10,7 @@ const { genId, nowISO, aliveFilter, fmtNow, bjStr } = require('../core/util');
 const { withGen, materialStatus, roundQty, replayAvailability } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 const { isWorkerAdmitted } = require('../core/worker-status');
-const { docNoKey, cmpDocNo, nextDocNo } = require('../core/doc-no');
+const { docNoKey, cmpDocNo, nextDocNo, alignPlan, refPatchPlan } = require('../core/doc-no');
 
 /* ---------- 业务日期（P4-1）与按业务日期取号（P4-2） ----------
  * 口径：业务日期一律 'YYYY-MM-DD'；「今天」取服务器北京时间（bjStr().slice(0,10)，含手动校时），
@@ -55,7 +55,8 @@ function replayFail(res, m, rp, what) {
     available: rp.available, qty: rp.qty, refs
   });
 }
-// 取号与编号规则统一在 core/doc-no：取号 = 同类型同日最小未占用流水（未删除才算占号）。
+// 取号与编号规则统一在 core/doc-no（2026-11-13 晚定版）：取号 = 同类型同日最小未占用流水（未删除才算占号），
+// 删除后同类型同日的活单按流水顺序对齐重编为 1..n（见 core/doc-no 的 alignPlan）。
 const dateTagOf = d => String(d || '').replace(/-/g, '');
 function reqNoOf(reqDate) { return nextDocNo(DB.materialRequisitions, 'reqNo', 'LL-' + dateTagOf(reqDate) + '-'); }
 function outNoOf(outDate) { return nextDocNo(DB.materialOutbound, 'outNo', 'OUT-' + dateTagOf(outDate) + '-'); }
@@ -83,12 +84,30 @@ function resolveReopenSource(kind, input) {
 
 
 // 领料单删除：仅已作废的领料单可删除（须注册在通用 CRUD 工厂之前以覆盖默认删除）
+/* 删除 + 同日编号对齐（2026-11-13 晚定版）：
+ * 先算计划（core/doc-no 的 alignPlan）再落库——删除标记、同类型同日活单改号、单号引用缓存同步，
+ * 全部写在同一份内存对象里，最后只调用一次 saveDB()；中途任何异常（含写盘失败）按相反顺序回滚，删除也不生效。 */
+function deleteDocWithAlign(list, field, rec) {
+  const plan = alignPlan(list, field, rec);
+  const refs = refPatchPlan([list], plan.changes);
+  const undo = [];
+  try {
+    rec.deleted = true; undo.push(() => { rec.deleted = false; });
+    plan.changes.forEach(c => { undo.push(() => { c.rec[c.field] = c.from; }); c.rec[c.field] = c.to; });
+    refs.forEach(c => { undo.push(() => { c.rec[c.field] = c.from; }); c.rec[c.field] = c.to; });
+    saveDB();
+  } catch (e) {
+    undo.reverse().forEach(fn => { try { fn(); } catch (x) { /* 回滚本身失败不再抛出 */ } });
+    return { error: '保存失败，删除与改号已整体回滚' };
+  }
+  return { aligned: plan.changes.length, refs: refs.length };
+}
 app.delete('/api/materialRequisitions/:id', (req, res) => {
   const rec = DB.materialRequisitions.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到领料单' });
   if (rec.status !== '已作废') return res.status(400).json({ error: '仅已作废的领料单可删除，请先作废' });
-  rec.deleted = true; // 逻辑删除（保留记录，符合逻辑删除策略）
-  saveDB();
+  const r = deleteDocWithAlign(DB.materialRequisitions, 'reqNo', rec);
+  if (r.error) return res.status(500).json({ error: r.error });
   res.json({ ok: true });
 });
 
@@ -161,6 +180,8 @@ function reqUsedQty(reqId, materialId) {
   return roundQty(used);
 }
 // P4-6：出库单默认按「出库日」倒序，同一天按单号流水倒序（补录单不再因今天录入排最前）
+// 出库单列表排序（2026-11-13 晚定版）：整体升序——业务日期升序、同日流水升序，最早的单排最前。
+// 等价实现：按单号日期段 + 流水段升序（编号与业务日期一一对应）；单号无法识别时退回按 outDate 升序。
 function byDocNoAsc(a, b) {
   const ka = docNoKey(a && a.outNo), kb = docNoKey(b && b.outNo);
   if (ka && kb) return cmpDocNo(a.outNo, b.outNo);
@@ -419,8 +440,8 @@ app.delete('/api/materialOutbound/:id', (req, res) => {
   const rec = DB.materialOutbound.find(x => x.id === req.params.id && !x.deleted);
   if (!rec) return res.status(404).json({ error: '未找到出库单' });
   if (rec.status !== '已作废') return res.status(400).json({ error: '仅已作废的出库单可删除，请先作废' });
-  rec.deleted = true; // 逻辑删除（保留记录，符合逻辑删除策略）
-  saveDB();
+  const r = deleteDocWithAlign(DB.materialOutbound, 'outNo', rec);
+  if (r.error) return res.status(500).json({ error: r.error });
   res.json({ ok: true });
 });
 
