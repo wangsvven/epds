@@ -517,11 +517,42 @@ async function runSmoke() {
     reqNoNew = n2;
     return n1 + ' → ' + n2 + '（已插入 ' + TODAY + '-005 与 LL-' + YDAY + '-005 作干扰）';
   });
-  await step('materials', '领料单号当日超 9999 位数自然增长（不报错、不截断）', async () => {
+  await step('materials', '领料单号删除补缺：作废不腾号、删号回收、大号不干扰（V4 a/b/c）', async () => {
+    const mkRec = async () => {
+      const d = needOk(await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: materialId, qty: 1 }] } }), 'requisition create');
+      return d.data;
+    };
+    const listAll = async () => {
+      const r = needOk(await api('GET', '/api/materialRequisitions', { token }), 'GET reqs');
+      return (Array.isArray(r) ? r : (r.data || []));
+    };
+    const byNo = async (no) => (await listAll()).find(x => x.reqNo === no && !x.deleted);
+    const doVoid = async (id) => needOk(await api('PUT', '/api/materialRequisitions/' + id + '/void', { token, body: { reason: 'ZT 编号补缺' } }), 'void');
+    const doDel = async (id) => needOk(await api('DELETE', '/api/materialRequisitions/' + id, { token }), 'delete');
+
+    // 干扰：插一个超大号，新口径下不应把补号抬到 10000
     await insertReq('LL-' + TODAY + '-9999');
-    const n = await mkReq(1);
-    need(n === 'LL-' + TODAY + '-10000', '应自然增长为 LL-' + TODAY + '-10000，实际 ' + n);
-    return n;
+
+    // (c) 删 0001 → 新建得 0001
+    const r1 = await byNo('LL-' + TODAY + '-0001');
+    need(!!r1, '前置：当日 0001 应存在');
+    await doVoid(r1.id); await doDel(r1.id);
+    const g1 = await mkRec();
+    need(g1.reqNo === 'LL-' + TODAY + '-0001', '(c) 删 0001 后新建应得 0001，实际 ' + g1.reqNo);
+
+    // (b) 0002 作废但不删 → 新建跳过 0002 得 0003
+    const r2 = await byNo('LL-' + TODAY + '-0002');
+    need(!!r2, '前置：当日 0002 应存在');
+    await doVoid(r2.id);
+    const g2 = await mkRec();
+    need(g2.reqNo === 'LL-' + TODAY + '-0003', '(b) 0002 作废未删，新建应得 0003，实际 ' + g2.reqNo);
+
+    // (a) 再删 0002 → 新建补回 0002
+    await doDel(r2.id);
+    const g3 = await mkRec();
+    need(g3.reqNo === 'LL-' + TODAY + '-0002', '(a) 删 0002 后新建应补 0002，实际 ' + g3.reqNo);
+
+    return '删0001→补0001 · 0002作废→0003 · 删0002→补0002 · 9999 不干扰';
   });
   await step('materials', '单号排序：日期升序 → 流水组（数值）→ 6 位时间组 → 无法识别', async () => {
     const D = TODAY;
