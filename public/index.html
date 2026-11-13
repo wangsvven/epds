@@ -934,6 +934,9 @@
     .ob-filters > .el-button { grid-column:1 / -1; }
   }
 
+  /* 出库管理筛选行：「全部导入状态」默认是空值占位，文字按常规色显示，与相邻下拉一致（只改颜色，不动选项与筛选） */
+  .ob-filters .ob-imp-state .el-select__placeholder.is-transparent { color:var(--el-text-color-regular); }
+
   /* ===== 统一卡片观感（浅色 / 深色通用） ===== */
   .stat-card, .wv-card, .doc-card, .wt-card, .wt-collapse, .lib-card, .lib-group, .init-block, .init-footer {
     border-radius: var(--radius); box-shadow: var(--shadow-sm); background: var(--surface); border-color: var(--line); }

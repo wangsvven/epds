@@ -3667,7 +3667,21 @@ async function runSmoke() {
     need(/class="ob-filters"/.test(body)
       && /\.ob-filters \{ display:grid !important; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/.test(html),
       '≤768px 四框应改两列网格，避免被压成「在..」「全..」');
-    return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列';
+    // 「全部导入状态」是空值占位：只把文字颜色改回常规色，与相邻下拉一致（选项/筛选/默认值不变）
+    need(/class="ob-imp-state" placeholder="全部导入状态"/.test(body)
+      && /\.ob-filters \.ob-imp-state \.el-select__placeholder\.is-transparent \{ color:var\(--el-text-color-regular\)/.test(html),
+      '「全部导入状态」文字应按常规色显示（与旁边下拉一致）');
+    // 出库单页签：默认只列已出库（有效），作废单靠状态筛选切出；未选工程时按全部工程取数
+    need(/const oStatus = ref\('已出库（有效）'\)/.test(body), '出库单页签默认应为「已出库（有效）」');
+    need(/label="已出库（有效）" value="已出库（有效）"[\s\S]{0,160}label="全部" value="全部"[\s\S]{0,160}label="已作废" value="已作废"/.test(body),
+      '单据状态筛选选项应为 已出库（有效）/ 全部 / 已作废');
+    need(/oStatus\.value === '已出库（有效）'\) arr = arr\.filter\(o => o\.status === '有效'\)/.test(body)
+      && /oStatus\.value === '已作废'\) arr = arr\.filter\(o => o\.status === '已作废'\)/.test(body),
+      '默认口径应过滤为有效单，「已作废」只列作废单');
+    need(/\/api\/materialOutbound\/orders' \+ \(project\.value \? '\?project='/.test(body),
+      '未选工程时应取「全部工程」的出库单');
+    need(body.indexOf('description="请先选择工程。"') === -1, '出库单页签不应再被「请先选择工程」挡住');
+    return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列 + 导入状态常规色 + 出库单默认有效单';
   });
 
   /* ---------- P0-4 存量不一致：脏数据夹具 + 只读性（放最后，需重启临时服务） ---------- */

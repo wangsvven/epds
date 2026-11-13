@@ -1335,8 +1335,9 @@ const Outbounds = {
     const rdlg = reactive({ visible: false, rec: null, rows: [], returnDate: '', returnDateReason: '' });
     const vdlg = reactive({ visible: false, rec: null, reason: '' });
     const pdlg = reactive({ visible: false, rec: null });
-    // 出库单页签筛选：材料筛选（点击「查看出库单」带入）+ 关键字（出库编号/工程/领取人）
+    // 出库单页签筛选：材料筛选（点击「查看出库单」带入）+ 单据状态（默认只列有效）+ 关键字（出库编号/工程/领取人）
     const matFilter = ref(null);
+    const oStatus = ref('已出库（有效）');
     const oKeyword = ref('');
 
     function chip(color) { return 'display:inline-block;padding:2px 10px;border-radius:3px;font-size:12px;line-height:20px;background:' + color + '1f;color:' + color + ';'; }
@@ -1395,15 +1396,19 @@ const Outbounds = {
     watch([f1, f2, f3], () => {
       if (project.value && projects.value.indexOf(project.value) < 0) { project.value = ''; onProjectChange(); }
     });
+    // 出库单：未选工程时按「全部工程」取数（2026-11-13 定版）；可出库材料仍维持「未选工程不显示」
     async function load() {
-      if (!project.value) { list.value = []; orders.value = []; return; }
       loading.value = true;
       try {
-        const r = await api.get('/api/materialOutbound/stock?project=' + encodeURIComponent(project.value));
-        list.value = Array.isArray(r) ? r : (r.data || []);
-        const r2 = await api.get('/api/materialOutbound/orders?project=' + encodeURIComponent(project.value));
+        if (project.value) {
+          const r = await api.get('/api/materialOutbound/stock?project=' + encodeURIComponent(project.value));
+          list.value = Array.isArray(r) ? r : (r.data || []);
+        } else {
+          list.value = [];
+        }
+        const r2 = await api.get('/api/materialOutbound/orders' + (project.value ? '?project=' + encodeURIComponent(project.value) : ''));
         orders.value = Array.isArray(r2) ? r2 : (r2.data || []);
-        await loadLinks();
+        if (project.value) await loadLinks();
       } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { loading.value = false; }
     }
     // 关联候选（计划）—— 量小，随工程加载一并拉取；失败静默（关联是可选项）
@@ -1517,12 +1522,17 @@ const Outbounds = {
     onUnmounted(() => window.removeEventListener('outbounds-focus-material', focusMaterial));
     const ofiltered = computed(() => {
       let arr = orders.value;
+      // 单据状态：默认「已出库（有效）」＝只列有效单；作废单数据不丢，切「全部」或「已作废」可看
+      if (oStatus.value === '已出库（有效）') arr = arr.filter(o => o.status === '有效');
+      else if (oStatus.value === '已作废') arr = arr.filter(o => o.status === '已作废');
       if (matFilter.value) arr = arr.filter(o => (o.items || []).some(it => it.materialId === matFilter.value.id));
       const k = oKeyword.value.trim();
       if (k) arr = arr.filter(o => String(o.outNo || '').includes(k) || String(o.project || '').includes(k) || String(o.receiver || '').includes(k));
       return arr;
     });
     const opaged = computed(() => ofiltered.value.slice((opage.value - 1) * opageSize.value, opage.value * opageSize.value));
+    // 未选工程也可看「全部工程」的出库单：进入出库单页签时按需取数（选工程时由 onProjectChange 取）
+    watch(tab, (nv) => { if (nv === 'orders' && !project.value && !orders.value.length) load(); });
     // 出库单行汇总：累计领取/累计归还/补回数量/净出库（作废单已补回，净出库为 0）
     function oTake(o) { return (o.items || []).reduce((s, i) => s + (Number(i.qty) || 0), 0); }
     function oReturned(o) { return (o.items || []).reduce((s, i) => s + (Number(i.returned) || 0), 0); }
@@ -1647,7 +1657,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
   },
   template: `
   <div>
@@ -1665,7 +1675,7 @@ const Outbounds = {
       <el-select v-model="f2" style="width:140px">
         <el-option label="全部工程类型" value="全部工程类型" /><el-option label="自有工程" value="自有工程" /><el-option label="客户工程" value="客户工程" />
       </el-select>
-      <el-select v-model="f3" placeholder="全部导入状态" clearable style="width:150px"
+      <el-select v-model="f3" class="ob-imp-state" placeholder="全部导入状态" clearable style="width:150px"
         @change="loadImportMap" @visible-change="v => v && loadImportMap()">
         <el-option label="全部导入状态" value="" /><el-option label="已导入" value="已导入" /><el-option label="未导入" value="未导入" />
       </el-select>
@@ -1719,14 +1729,17 @@ const Outbounds = {
       </el-tab-pane>
 
       <el-tab-pane label="出库单" name="orders">
-        <div style="display:flex;gap:10px;align-items:center;margin:2px 0 12px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:2px 0 12px">
+          <el-select v-model="oStatus" style="width:150px" @change="opage = 1">
+            <el-option label="已出库（有效）" value="已出库（有效）" />
+            <el-option label="全部" value="全部" />
+            <el-option label="已作废" value="已作废" />
+          </el-select>
           <el-tag v-if="matFilter" closable type="info" @close="clearMatFilter">{{ matFilter.description }}</el-tag>
           <el-input v-model="oKeyword" placeholder="搜索出库编号、工程、领取人" style="width:280px" clearable @keyup.enter="load" />
           <el-button type="primary" @click="load">搜索</el-button>
         </div>
-        <el-empty v-if="!project" description="请先选择工程。" />
-        <template v-else>
-          <el-table :data="opaged" v-loading="loading" border style="width:100%">
+        <el-table :data="opaged" v-loading="loading" border style="width:100%">
             <el-table-column prop="outNo" label="出库单号" width="200" />
             <el-table-column prop="project" label="工程" min-width="240" show-overflow-tooltip />
             <el-table-column prop="receiver" label="领取人" width="100" />
@@ -1755,7 +1768,6 @@ const Outbounds = {
             <el-pagination v-model:current-page="opage" v-model:page-size="opageSize" :total="ofiltered.length"
               :page-sizes="[30, 50, 100]" layout="prev, pager, next, sizes" background />
           </div>
-        </template>
       </el-tab-pane>
     </el-tabs>
 
