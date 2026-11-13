@@ -289,11 +289,11 @@ const MaterialsView = {
         Object.keys(stagingQty).forEach(k => delete stagingQty[k]);
       } catch (e) {}
     }
-    // P4-6：生成领料单前先确认开单日（默认今天，可补录），并预示即将生成的单号
-    const gdlg = reactive({ visible: false, date: '', reason: '', items: [], no: '' });
+    // 生成领料单：点按钮直接出单（开单日固定「今天」，不再弹确认框）；genSaving 防重复点击
     const gToday = () => ((window.ServerTime && ServerTime.ymd) ? ServerTime.ymd() : new Date().toISOString().slice(0, 10));
-    const gLimit30 = () => { const t = new Date(gToday() + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() - 30); return t.toISOString().slice(0, 10); };
-    function genRequisition() {
+    const genSaving = ref(false);
+    async function genRequisition() {
+      if (genSaving.value) return;
       // 客户端校验：数量必须 > 0 且 ≤ 可继续领料
       for (const r of stagingRows.value) {
         const q = Number(stagingQty[r.id]);
@@ -301,37 +301,19 @@ const MaterialsView = {
         if (!(q > 0)) { ElementPlus.ElMessage.error('物料「' + (r.description || r.code) + '」领料数量无效，必须大于 0'); return; }
         if (q > canGen + 1e-9) { ElementPlus.ElMessage.error('物料「' + (r.description || r.code) + '」领料数量 ' + q + ' 不能大于可继续领料 ' + canGen); return; }
       }
-      gdlg.items = stagingRows.value.map(r => ({ id: r.id, qty: Number(stagingQty[r.id]) }));
-      gdlg.date = gToday(); gdlg.reason = ''; gdlg.no = '';
-      gdlg.visible = true;
-      refreshGenNo();
-    }
-    async function refreshGenNo() {
+      const items = stagingRows.value.map(r => ({ id: r.id, qty: Number(stagingQty[r.id]) }));
+      genSaving.value = true;
       try {
-        const res = await api.get('/api/materialRequisitions');
-        const rows = Array.isArray(res) ? res : (res.data || []);
-        const pre = 'LL-' + String(gdlg.date || '').replace(/-/g, '') + '-';
-        let max = 0;
-        rows.forEach(r => {
-          const no = String((r && r.reqNo) || '');
-          if (no.indexOf(pre) !== 0) return;
-          const sfx = no.slice(pre.length);
-          if (/^\d+$/.test(sfx)) max = Math.max(max, parseInt(sfx, 10));
-        });
-        gdlg.no = pre + String(max + 1).padStart(4, '0');
-      } catch (e) { gdlg.no = ''; }
-    }
-    async function doGenRequisition() {
-      try {
-        const items = gdlg.items;
-        const res = await api.post('/api/requisitions/create', { items, reqDate: gdlg.date || '', reqDateReason: gdlg.reason || '' });
-        staging.value = []; stagingVisible.value = false; gdlg.visible = false;
+        const res = await api.post('/api/requisitions/create', { items, reqDate: gToday() });
+        staging.value = []; stagingVisible.value = false;
         Object.keys(stagingQty).forEach(k => delete stagingQty[k]);
-        ElementPlus.ElMessage.success('领料单 ' + res.data.reqNo + ' 已生成（开单日 ' + (res.data.reqDate || '') + '）');
+        ElementPlus.ElMessage.success('已生成 ' + res.data.reqNo);
         load(); // 材料明细同步：已生成领料单 X / 可继续领料 Y、状态与勾选锁定即时刷新
         tab.value = 'requisition';
         window.dispatchEvent(new CustomEvent('requisitions-refresh'));
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) {
+        ElementPlus.ElMessage.error(e.message); // 失败：暂存清单原样保留
+      } finally { genSaving.value = false; }
     }
     // ---------- 关联领料单弹窗（点击状态标签跳转） ----------
     const relDlg = reactive({ visible: false, material: null, recs: [], page: 1, pageSize: 30 });
@@ -451,7 +433,7 @@ const MaterialsView = {
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
       projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
-      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, gdlg, doGenRequisition, refreshGenNo, gLimit30, gToday, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, idlg, previewImport, doImport, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
+      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, genSaving, gToday, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, idlg, previewImport, doImport, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
   <div>
@@ -689,7 +671,7 @@ const MaterialsView = {
         <template #footer>
           <el-button @click="stagingVisible=false">关 闭</el-button>
           <el-button type="danger" plain @click="clearStaging">清 空</el-button>
-          <el-button type="primary" @click="genRequisition">生成领料单</el-button>
+          <el-button type="primary" :loading="genSaving" @click="genRequisition">生成领料单</el-button>
         </template>
       </el-dialog>
 
@@ -856,24 +838,6 @@ const MaterialsView = {
       </template>
     </el-dialog>
 
-    <el-dialog title="生成领料单" v-model="gdlg.visible" width="560px" top="12vh">
-      <el-form label-position="top">
-        <el-form-item label="领料日期（开单日，决定单号日期）" required>
-          <el-date-picker v-model="gdlg.date" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" @change="refreshGenNo" />
-        </el-form-item>
-        <el-form-item label="即将生成的单号">
-          <el-input :model-value="gdlg.no" readonly />
-        </el-form-item>
-        <el-form-item v-if="gdlg.date && gdlg.date < gLimit30()" label="领料日期早于 30 天，补录原因" required>
-          <el-input v-model="gdlg.reason" placeholder="请说明补录原因" />
-        </el-form-item>
-      </el-form>
-      <div style="color:var(--text-2);font-size:13px">共 {{ gdlg.items.length }} 种材料；提交后按该开单日取号，录入时间另行记录。</div>
-      <template #footer>
-        <el-button @click="gdlg.visible=false">取 消</el-button>
-        <el-button type="primary" @click="doGenRequisition">确认生成</el-button>
-      </template>
-    </el-dialog>
   </div>`
 };
 
@@ -1808,11 +1772,20 @@ const Outbounds = {
         <el-form-item label="工程">
           <el-select v-model="project" disabled style="width:100%" placeholder="请选择工程" />
         </el-form-item>
-        <el-form-item label="领取人" required style="margin-top:-8px">
-          <el-select v-model="dlg.workerId" placeholder="选择领取人" filterable style="width:100%">
-            <el-option v-for="w in workers" :key="w.id" :label="w.name" :value="w.id" />
-          </el-select>
-        </el-form-item>
+        <el-row :gutter="12" style="margin-top:-8px">
+          <el-col :span="12" :xs="24">
+            <el-form-item label="领取人" required>
+              <el-select v-model="dlg.workerId" placeholder="选择领取人" filterable style="width:100%">
+                <el-option v-for="w in workers" :key="w.id" :label="w.name" :value="w.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" :xs="24">
+            <el-form-item label="出库日期" required>
+              <el-date-picker v-model="dlg.outDate" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-row :gutter="12" style="margin-top:-8px">
           <el-col :span="12" :xs="24">
             <el-form-item label="关联周计划（可选）">
@@ -1828,10 +1801,7 @@ const Outbounds = {
           </el-col>
         </el-row>
         <el-form-item label="工序 / 工作内容（可选）" style="margin-top:-8px">
-          <el-input v-model="dlg.processName" placeholder="如：立杆、架线、安装开关" />
-        </el-form-item>
-        <el-form-item label="出库日期" required style="margin-top:-8px">
-          <el-date-picker v-model="dlg.outDate" type="date" value-format="YYYY-MM-DD" placeholder="YYYY-MM-DD" style="width:100%" />
+          <el-input v-model="dlg.processName" type="textarea" :autosize="{ minRows: 1, maxRows: 6 }" resize="none" placeholder="如：立杆、架线、安装开关" />
         </el-form-item>
         <el-form-item v-if="needOutReason" label="出库日期早于 30 天，补录原因" required style="margin-top:-8px">
           <el-input v-model="dlg.outDateReason" placeholder="请说明补录原因" />
