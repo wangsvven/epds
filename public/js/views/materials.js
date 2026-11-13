@@ -1335,9 +1335,9 @@ const Outbounds = {
     const rdlg = reactive({ visible: false, rec: null, rows: [], returnDate: '', returnDateReason: '' });
     const vdlg = reactive({ visible: false, rec: null, reason: '' });
     const pdlg = reactive({ visible: false, rec: null });
-    // 出库单页签筛选：材料筛选（点击「查看出库单」带入）+ 单据状态（默认只列有效）+ 关键字（出库编号/工程/领取人）
+    // 出库单页签筛选：材料筛选（点击「查看出库单」带入）+ 单据状态（默认「全部」）+ 关键字（出库编号/工程/领取人）
     const matFilter = ref(null);
-    const oStatus = ref('已出库（有效）');
+    const oStatus = ref('全部');
     const oKeyword = ref('');
 
     function chip(color) { return 'display:inline-block;padding:2px 10px;border-radius:3px;font-size:12px;line-height:20px;background:' + color + '1f;color:' + color + ';'; }
@@ -1522,7 +1522,7 @@ const Outbounds = {
     onUnmounted(() => window.removeEventListener('outbounds-focus-material', focusMaterial));
     const ofiltered = computed(() => {
       let arr = orders.value;
-      // 单据状态：默认「已出库（有效）」＝只列有效单；作废单数据不丢，切「全部」或「已作废」可看
+      // 单据状态：默认「全部」＝全量显示（含作废单）；可切「已出库（有效）」或「已作废」
       if (oStatus.value === '已出库（有效）') arr = arr.filter(o => o.status === '有效');
       else if (oStatus.value === '已作废') arr = arr.filter(o => o.status === '已作废');
       if (matFilter.value) arr = arr.filter(o => (o.items || []).some(it => it.materialId === matFilter.value.id));

@@ -3672,7 +3672,7 @@ async function runSmoke() {
       && /\.ob-filters \.ob-imp-state \.el-select__placeholder\.is-transparent \{ color:var\(--el-text-color-regular\)/.test(html),
       '「全部导入状态」文字应按常规色显示（与旁边下拉一致）');
     // 出库单页签：默认只列已出库（有效），作废单靠状态筛选切出；未选工程时按全部工程取数
-    need(/const oStatus = ref\('已出库（有效）'\)/.test(body), '出库单页签默认应为「已出库（有效）」');
+    need(/const oStatus = ref\('全部'\)/.test(body), '出库单页签默认应为「全部」（全量显示）');
     need(/label="已出库（有效）" value="已出库（有效）"[\s\S]{0,160}label="全部" value="全部"[\s\S]{0,160}label="已作废" value="已作废"/.test(body),
       '单据状态筛选选项应为 已出库（有效）/ 全部 / 已作废');
     need(/oStatus\.value === '已出库（有效）'\) arr = arr\.filter\(o => o\.status === '有效'\)/.test(body)
