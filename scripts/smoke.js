@@ -1312,7 +1312,11 @@ async function runSmoke() {
     need(!/v-model="row\.requisitionId"/.test(src) && !/reqOptionsOf/.test(src), '明细行不应再有来源领料单下拉');
     need(!/requisitionId: r\.requisitionId \|\| ''/.test(src), '提交不应再组装行级 requisitionId');
     need(/关联计划：\{\{ od\.rec\.workPlanName/.test(src) && /作业日：\{\{ od\.rec\.workDate/.test(src), '出库单详情应只读展示关联字段');
-    return '计划/作业日/工序 + 行级来源领料单已撤 + 详情只读';
+    need(!/label="来源领料单"/.test(src), '出库单详情不应再有「来源领料单」列');
+    need((src.match(/<col style="width:/g) || []).length === 7, '详情明细表应为七列固定比例');
+    need(/text-align:right">出库</.test(src) && /text-align:right">归还</.test(src) && /text-align:right">未归还</.test(src), '详情数量列表头应为精简后的 出库/归还/未归还');
+    need(/table-layout:fixed/.test(src), '详情明细表应为固定布局（不横向滚动）');
+    return '计划/作业日/工序 + 行级来源领料单已撤 + 详情只读 · 七列固定布局';
   });
 
   /* ---------- P3 小项组 ---------- */

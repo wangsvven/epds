@@ -1839,16 +1839,42 @@ const Outbounds = {
         <div v-if="od.rec.correctedFromNo">重开自：{{ od.rec.correctedFromNo }}</div>
         <div v-if="od.rec.correctedByNo">已由 {{ od.rec.correctedByNo }} 重开</div>
       </div>
-      <el-table :data="od.rec.items" size="small" border style="width:100%">
-        <el-table-column prop="description" label="材料" min-width="180" />
-        <el-table-column prop="code" label="编码" width="130" />
-        <el-table-column prop="unit" label="单位" width="70" />
-        <el-table-column label="来源领料单" width="140"><template #default="{row}">{{ row.reqNo || '—' }}</template></el-table-column>
-        <el-table-column label="已出库" width="100" align="right"><template #default="{row}">{{ fmt4(row.qty) }}</template></el-table-column>
-        <el-table-column label="已归还" width="100" align="right"><template #default="{row}">{{ fmt4(row.returned) }}</template></el-table-column>
-        <el-table-column label="剩余未归还" width="120" align="right"><template #default="{row}">{{ fmt4(remaining(row)) }}</template></el-table-column>
-        <el-table-column label="净出库" width="100" align="right"><template #default="{row}">{{ fmt4(row.qty - row.returned) }}</template></el-table-column>
-      </el-table>
+      <table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px">
+        <colgroup>
+          <col style="width:23%" />
+          <col style="width:17%" />
+          <col style="width:9%" />
+          <col style="width:12.75%" />
+          <col style="width:12.75%" />
+          <col style="width:12.75%" />
+          <col style="width:12.75%" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-weight:600;text-align:left">材料</th>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 10px;font-weight:600;text-align:left">编码</th>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 4px;font-weight:600;text-align:center">单位</th>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 6px;font-weight:600;text-align:right">出库</th>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 6px;font-weight:600;text-align:right">归还</th>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 6px;font-weight:600;text-align:right">未归还</th>
+            <th style="background:var(--surface-3);border:1px solid var(--line-strong);padding:8px 6px;font-weight:600;text-align:right">净出库</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(it, i) in od.rec.items" :key="i">
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;vertical-align:top;word-break:break-word;overflow-wrap:anywhere">{{ it.description }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 10px;vertical-align:top;word-break:break-all;overflow-wrap:anywhere">{{ it.code }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 4px;vertical-align:top;text-align:center">{{ it.unit }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 6px;vertical-align:top;text-align:right;word-break:break-all;overflow-wrap:anywhere">{{ fmt4(it.qty) }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 6px;vertical-align:top;text-align:right;word-break:break-all;overflow-wrap:anywhere">{{ fmt4(it.returned) }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 6px;vertical-align:top;text-align:right;word-break:break-all;overflow-wrap:anywhere">{{ fmt4(remaining(it)) }}</td>
+            <td style="border:1px solid var(--line-strong);padding:8px 6px;vertical-align:top;text-align:right;word-break:break-all;overflow-wrap:anywhere">{{ fmt4(it.qty - it.returned) }}</td>
+          </tr>
+          <tr v-if="!od.rec.items || !od.rec.items.length">
+            <td colspan="7" style="border:1px solid var(--line-strong);padding:18px 10px;text-align:center;color:var(--text-3)">暂无材料</td>
+          </tr>
+        </tbody>
+      </table>
       <template #footer>
         <el-button v-if="od.rec.status === '有效' && canWrite('materials')" @click="openReturn()">登记归还</el-button>
         <el-button v-if="od.rec.status === '有效' && canWrite('materials')" type="danger" plain @click="openVoid()">作废并补回</el-button>
