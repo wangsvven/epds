@@ -3681,7 +3681,10 @@ async function runSmoke() {
     need(/\/api\/materialOutbound\/orders' \+ \(project\.value \? '\?project='/.test(body),
       '未选工程时应取「全部工程」的出库单');
     need(body.indexOf('description="请先选择工程。"') === -1, '出库单页签不应再被「请先选择工程」挡住');
-    return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列 + 导入状态常规色 + 出库单默认有效单';
+    // 两个列表整体升序（领料单前端排序、出库单后端排序，同一套单号语义）
+    need(/\.slice\(\)\.sort\(\(a, b\) => cmpReqNo\(a\.reqNo, b\.reqNo\)\)/.test(body), '领料单列表应按单号升序排序完整结果集');
+    need(/function byDocNoAsc\(a, b\)/.test(fs.readFileSync(path.join(ROOT, 'server', 'routes', 'materials.js'), 'utf8')), '出库单列表应按单号升序排序（后端 byDocNoAsc）');
+    return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列 + 导入状态常规色 + 出库单默认全部 + 两列表升序';
   });
 
   /* ---------- P0-4 存量不一致：脏数据夹具 + 只读性（放最后，需重启临时服务） ---------- */
@@ -4138,7 +4141,7 @@ async function runSmoke() {
     return '领料日期 + 两行到货历史（' + hist.map(x => x[0]).join(' / ') + '）';
   });
 
-  await step('materials', 'P4-6-C 出库列表按出库日倒序（补录单不再排最前）', async () => {
+  await step('materials', 'P4-6-C 出库列表按出库日升序（补录单在前、今天在后）', async () => {
     const m = await p4Mat('O', 100);
     const r = await p4Req(m.id, 20, p4D4);
     needOk(await p4Confirm(r.id, m.id, 20, p4D4), 'P4-6-C confirm');
@@ -4149,8 +4152,12 @@ async function runSmoke() {
     const list = needOk(await api('GET', '/api/materialOutbound/orders?project=' + encodeURIComponent(P4PJ), { token }), 'orders');
     const ids = (list || []).map(x => x.id);
     const iNew = ids.indexOf(oNew.data.data.id), iOld = ids.indexOf(oOld.data.data.id);
-    need(iNew >= 0 && iOld >= 0 && iNew < iOld, '今天的单应排在补录单之前：' + brief(ids.slice(0, 5)));
-    return 'outDate 倒序 · 今天在前、补录在后';
+    need(iNew >= 0 && iOld >= 0 && iOld < iNew, '补录单应排在今天的单之前（整体升序）：' + brief(ids.slice(0, 5)));
+    // 整列表按单号升序：日期段 + 流水段非降
+    const nos = (list || []).map(x => x.outNo);
+    const sorted = nos.slice().sort((a, b) => MaterialNo.cmp(a, b));
+    need(JSON.stringify(nos) === JSON.stringify(sorted), '出库单列表整体应按单号升序：' + brief(nos.slice(0, 6)));
+    return 'outDate 升序 · 补录在前、今天在后 · 整表按单号升序';
   });
 
   // 退回更正后：原来与「入库/出库更正」绑定的冒烟用例随业务代码一并退出，

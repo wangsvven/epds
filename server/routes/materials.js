@@ -10,6 +10,7 @@ const { genId, nowISO, aliveFilter, fmtNow, bjStr } = require('../core/util');
 const { withGen, materialStatus, roundQty, replayAvailability } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 const { isWorkerAdmitted } = require('../core/worker-status');
+const { docNoKey, cmpDocNo, nextDocNo } = require('../core/doc-no');
 
 /* ---------- 业务日期（P4-1）与按业务日期取号（P4-2） ----------
  * 口径：业务日期一律 'YYYY-MM-DD'；「今天」取服务器北京时间（bjStr().slice(0,10)，含手动校时），
@@ -54,22 +55,7 @@ function replayFail(res, m, rp, what) {
     available: rp.available, qty: rp.qty, refs
   });
 }
-// 取号：该单据类型 + 该业务日期前缀下，只统计「未删除」单据，取最小未占用的正整数流水（删除补缺；作废不腾号）。
-// 例：0001 在、0002 已删除、0003 已作废、0004 在 → 下一张 0002；补上后再下一张 0005。无空缺时等价于最大号 +1。
-// 超过 9999 位数自然增长。
-function nextDocNo(list, field, prefix) {
-  const used = new Set();
-  for (const r of (list || [])) {
-    if (!r || r.deleted) continue; // 已删除记录不占号（其原单号字段保持原值不动）
-    const no = r[field];
-    if (typeof no !== 'string' || no.indexOf(prefix) !== 0) continue;
-    const suf = no.slice(prefix.length);
-    if (/^\d+$/.test(suf)) used.add(parseInt(suf, 10));
-  }
-  let n = 1;
-  while (used.has(n)) n++;
-  return prefix + String(n).padStart(4, '0');
-}
+// 取号与编号规则统一在 core/doc-no：取号 = 同类型同日最小未占用流水（未删除才算占号）。
 const dateTagOf = d => String(d || '').replace(/-/g, '');
 function reqNoOf(reqDate) { return nextDocNo(DB.materialRequisitions, 'reqNo', 'LL-' + dateTagOf(reqDate) + '-'); }
 function outNoOf(outDate) { return nextDocNo(DB.materialOutbound, 'outNo', 'OUT-' + dateTagOf(outDate) + '-'); }
@@ -175,11 +161,13 @@ function reqUsedQty(reqId, materialId) {
   return roundQty(used);
 }
 // P4-6：出库单默认按「出库日」倒序，同一天按单号流水倒序（补录单不再因今天录入排最前）
-function byOutDateDesc(a, b) {
+function byDocNoAsc(a, b) {
+  const ka = docNoKey(a && a.outNo), kb = docNoKey(b && b.outNo);
+  if (ka && kb) return cmpDocNo(a.outNo, b.outNo);
   const da = String((a && a.outDate) || '').slice(0, 10);
   const db = String((b && b.outDate) || '').slice(0, 10);
-  if (da !== db) return db.localeCompare(da);
-  return String((b && b.outNo) || '').localeCompare(String((a && a.outNo) || ''));
+  if (da !== db) return da < db ? -1 : 1;
+  return String((a && a.outNo) || '').localeCompare(String((b && b.outNo) || ''));
 }
 // 出库单读侧补关联：明细行补来源领料单号、单头补计划名称（按当前数据解析，不落库快照）
 function withOutboundLinks(list) {
@@ -197,7 +185,7 @@ function withOutboundLinks(list) {
 app.get('/api/materialOutbound/orders', (req, res) => {
   const project = String(req.query.project || '');
   const list = DB.materialOutbound.filter(o => !o.deleted && (!project || o.project === project))
-    .slice().sort(byOutDateDesc);
+    .slice().sort(byDocNoAsc);
   res.json(withOutboundLinks(list));
 });
 // P1：以该领料单为来源的出库单（含已作废，带状态标记）
@@ -207,7 +195,7 @@ app.get('/api/materialRequisitions/:id/outbounds', (req, res) => {
   const list = DB.materialOutbound
     .filter(o => !o.deleted && (o.items || []).some(it => it && it.requisitionId === rec.id))
     .slice()
-    .sort(byOutDateDesc);
+    .sort(byDocNoAsc);
   res.json(withOutboundLinks(list));
 });
 // P1：按计划汇总已关联出库的净出库（材料编码 + 描述维度；有效单领取 − 归还，作废单计 0）
