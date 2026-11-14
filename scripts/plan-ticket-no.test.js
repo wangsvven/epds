@@ -683,6 +683,79 @@ t('K14 线路 / 空 / 未知票种字符串一律 skip，不新增服务端门�
   });
 });
 
+g('L 最小补修：planType 身份逐字比较（不 trim）');
+t('L1 planType 首尾/单侧/制表/换行空白 → INVALID_INPUT（参数化 6 例）', () => {
+  [' 周计划 ', '周计划 ', ' 周计划', '周计划\t', '\n周计划', '周计划\n'].forEach(v => {
+    const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: v, address: 'x' } });
+    assert.equal(r.ok, false, JSON.stringify(v) + ' 不应放行');
+    assert.equal(r.error, 'INVALID_INPUT', JSON.stringify(v));
+  });
+});
+t('L2 planType 内部字符差异 → INVALID_INPUT', () => {
+  ['周 计划', '周计 划', '周计划X', '周汁划', '周计划\u00a0'].forEach(v => {
+    const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: v } });
+    assert.equal(r.error, 'INVALID_INPUT', JSON.stringify(v));
+  });
+});
+t('L3 planType 逐字相同 → 通过身份关，后续按原分支（validate）', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: '周计划', address: 'x' } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.workTicketNo, N801);
+  assert.deepEqual(r.excludeIds, ['w1']);
+});
+t('L4 planType 未提供 → 沿用已存值，行为与基线一致', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { address: 'x' } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.workTicketNo, N801);
+});
+t('L5 planType 为 undefined → 等同未提供，沿用已存值', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: undefined, address: 'x' } });
+  assert.equal(r.action, 'validate');
+});
+t('L6 守卫覆盖 skip 路径：本应 skip 的线路记录 + 空白 planType → 仍 INVALID_INPUT', () => {
+  const stored = { id: 'l1', planType: '周计划', ticketType: L1, workTicketNo: LINE_OLD };
+  const r = M.classifyPlanTicketEdit({ stored, body: { planType: ' 周计划 ', address: 'x' } });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'INVALID_INPUT');
+  assert.equal(r.action, undefined, '不得落到 skip_ticket_rule');
+});
+t('L7 守卫覆盖 skip 路径：未知票种串应 skip，但空白 planType 先行拒绝', () => {
+  const r = M.classifyPlanTicketEdit({
+    stored: storedWeek(), body: { planType: '周计划 ', ticketType: '未知票种' }
+  });
+  assert.equal(r.error, 'INVALID_INPUT');
+});
+t('L8 守卫覆盖月计划分支：空白 planType 先行拒绝', () => {
+  const stored = { id: 'm1', planType: '月计划', name: '月计划A' };
+  const r = M.classifyPlanTicketEdit({ stored, body: { planType: ' 月计划 ', maintDevice: '设备' } });
+  assert.equal(r.error, 'INVALID_INPUT');
+});
+t('L9 不回退裁定：显式 null/数字/数组/对象仍 INVALID_INPUT，不沿用不抛', () => {
+  [null, 7, ['周计划'], { a: 1 }, { toString: null }, Symbol('s'), true].forEach(v => {
+    let r;
+    assert.doesNotThrow(() => { r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: v } }); }, 'planType 不应抛');
+    assert.equal(r.error, 'INVALID_INPUT');
+  });
+});
+t('L10 月计划 planType 逐字相同 → 通过身份关，后续按原分支（skip）', () => {
+  const stored = { id: 'm1', planType: '月计划', name: '月计划A' };
+  const r = M.classifyPlanTicketEdit({ stored, body: { planType: '月计划', maintDevice: '设备' } });
+  assert.deepEqual(r, { ok: true, action: 'skip_ticket_rule' });
+});
+t('L11 身份关在类型守卫之后：非字符串 + 逐字相同的其它键不改变结论', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: null, ticketType: T1 } });
+  assert.equal(r.error, 'INVALID_INPUT');
+  assert.match(r.message, /planType/);
+});
+t('L12 不抛异常：空白 planType 与抛异常 toString 对象共存时按守卫顺序安全失败', () => {
+  const evil = { toString() { throw new Error('bad'); } };
+  let r;
+  assert.doesNotThrow(() => {
+    r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planType: ' 周计划 ', note: evil } });
+  });
+  assert.equal(r.error, 'INVALID_INPUT');
+});
+
 console.log('\n===== 分组结果 =====');
 Object.keys(groups).forEach(k => console.log('  ' + k + '：' + groups[k].pass + ' 通过 / ' + groups[k].fail + ' 失败'));
 console.log('===== 总计：' + total + ' 项，通过 ' + passed + '，失败 ' + failed + ' =====');

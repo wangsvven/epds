@@ -278,9 +278,12 @@ function classifyPlanTicketEdit(input) {
   const wroteTicket = has('workTicketNo') || has('ticketType');
   const planType = str(stored.planType);
 
-  // 3. 身份以已存记录为准；请求 planType 与已存不同一律拒绝，不调用 saveDB
-  if (has('planType') && str(body.planType) !== planType) {
-    return fail('INVALID_INPUT', '请求 planType 与已存记录不一致，不得借改类型绕过票号校验');
+  // 3. 身份以已存记录为准：显式提供 planType 时须与已存原始字符串逐字一致（不 trim/规范化）；
+  //    未提供或为 undefined → 沿用已存值。显式 null/数字/数组/对象由 2a 的
+  //    checkProvidedStringFields 守卫先拦（仍为 INVALID_INPUT，不因本补修沿用或放行）。
+  //    本守卫位于下面全部分流（月计划 / 周计划 / 其它）之前，skip 路径同样不能绕过。
+  if (has('planType') && body.planType !== stored.planType) {
+    return fail('INVALID_INPUT', '请求 planType 与已存记录不一致（须逐字一致），不得借改类型绕过票号校验');
   }
 
   // 4. 月计划：未主动写票号/票种 → 维持无票号月计划原语义，不新增改号入口
