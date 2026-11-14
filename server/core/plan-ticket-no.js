@@ -11,6 +11,11 @@
  * 新旧码表必须分开——本模块不修改 plan-no.js，前端预填改新格式属 Step 4。
  *
  * 只向下依赖 core/util 的 aliveFilter（存活 = !!rec && !rec.deleted），不反向改调用方。
+ *
+ * 2026-11-14 Step 2 修正（用户审阅裁定，覆盖 r6 2.4.1 过宽表述）：
+ *  - 修正一：编辑判别按「合并后候选记录」判断，删除「已存配电就必须按原票种校验」口径；合法换票种不是绕过。
+ *  - 修正二：候选票种为线路 → skip_ticket_rule，沿用线路既有行为，本轮不新增任何线路服务端编号门禁。
+ *  - 修正三：契约字符串字段类型严格性，非字符串只返回 INVALID_INPUT 失败结果，不抛异常。
  */
 const { aliveFilter } = require('./util');
 
@@ -25,7 +30,29 @@ const SERIAL_MAX = 999;
 const LIGHT_PLAN_EDIT_KEYS = ['status', 'planNote'];
 const DIST_NO_RE = /^(\d{4})(\d{2})([679])(\d{3})$/;
 
-function str(v) { return v == null ? '' : String(v).trim(); }
+/* 契约字符串字段严格性（Step 2 修正三）：
+ * - str() 只接受字符串；null/undefined 视为「未提供」→ ''；数字/数组/对象/Symbol 一律 → ''，
+ *   绝不调用 String(v)，避免 {toString:null} / Object.create(null) / 抛异常的 toString 泄漏 TypeError。
+ * - checkStringFields() 在四个共享函数入口对显式传入的非字符串契约字段返回 INVALID_INPUT 失败结果
+ *   （只返回失败、不抛异常），调用方按 ok === false 处理。
+ * - isLightPlanEdit 仍只按键集判定，不因键值类型改变分类结果。 */
+function typeLabel(v) {
+  if (Array.isArray(v)) return '数组';
+  if (v === null) return 'null';
+  return typeof v;
+}
+function str(v) {
+  if (v == null) return '';
+  return typeof v === 'string' ? v.trim() : '';
+}
+function checkStringFields(pairs) {
+  for (const [field, v] of pairs) {
+    if (v != null && typeof v !== 'string') {
+      return fail('INVALID_INPUT', field + ' 应为字符串，实际为 ' + typeLabel(v));
+    }
+  }
+  return null;
+}
 function fail(error, message) { return { ok: false, error, message }; }
 function codeOf(ticketType) {
   const t = str(ticketType);
@@ -42,10 +69,13 @@ function isDistPowerTicketType(ticketType) {
 
 /** 解析新格式配电工作票号；旧格式 / 号段外 / 非法码走 INVALID_INPUT，不进新流水。 */
 function parseDistWorkTicketNo(workTicketNo) {
-  const m = DIST_NO_RE.exec(str(workTicketNo));
+  const bad = checkStringFields([['workTicketNo', workTicketNo]]);
+  if (bad) return bad;
+  const no = str(workTicketNo);
+  const m = DIST_NO_RE.exec(no);
   if (!m) {
     return fail('INVALID_INPUT',
-      '配电工作票号格式不合法：应为 YYYYMM + 一位类型码(6/7/9) + 3 位流水(801–999)，实际：' + (str(workTicketNo) || '(空)'));
+      '配电工作票号格式不合法：应为 YYYYMM + 一位类型码(6/7/9) + 3 位流水(801–999)，实际：' + (no || '(空)'));
   }
   const month = Number(m[2]);
   if (month < 1 || month > 12) return fail('INVALID_INPUT', '配电工作票号月份不合法：' + m[1] + m[2]);
@@ -61,7 +91,7 @@ function parseDistWorkTicketNo(workTicketNo) {
 /** 存活记录里同年月同票种的新格式最大流水；旧格式、软删、异月异码不计。 */
 function maxUsedSerial(records, yearMonth, typeCode) {
   let max = SERIAL_MIN - 1; // 800：无占用时下一个号即 801
-  for (const rec of (records || []).filter(aliveFilter())) {
+  for (const rec of (Array.isArray(records) ? records : []).filter(aliveFilter())) {
     if (!rec) continue;
     const parsed = parseDistWorkTicketNo(rec.workTicketNo);
     if (!parsed.ok) continue;                       // 历史 11 位等旧格式不进新流水
@@ -77,6 +107,8 @@ function yearMonthLabel(ym) { return ym.slice(0, 4) + '-' + ym.slice(4, 6); }
 /** 与存活新格式配电号撞号（排除 excludeIds）或批内重复 → DUPLICATE；不验月份一致性。 */
 function assertDistWorkTicketNoAvailable(input) {
   const b = input || {};
+  const bad = checkStringFields([['workTicketNo', b.workTicketNo], ['ticketType', b.ticketType]]);
+  if (bad) return bad;
   const parsed = parseDistWorkTicketNo(b.workTicketNo);
   if (!parsed.ok) return parsed;
   const code = codeOf(b.ticketType);
@@ -103,6 +135,8 @@ function assertDistWorkTicketNoAvailable(input) {
  *  避免把首日保留的原号再分配给其它新日。 */
 function allocateWorkTicketNo(input) {
   const b = input || {};
+  const bad = checkStringFields([['ticketType', b.ticketType], ['yearMonth', b.yearMonth]]);
+  if (bad) return bad;
   if (!isDistPowerTicketType(b.ticketType)) {
     return fail('UNSUPPORTED_TICKET_TYPE', '非配电票种不分配新格式工作票号：' + (str(b.ticketType) || '(空)'));
   }
@@ -120,7 +154,8 @@ function allocateWorkTicketNo(input) {
   return { ok: true, workTicketNo: ym + code + String(next).padStart(3, '0') };
 }
 
-/** 批量分配：与 items 等长、互不重复；任一项失败整体失败，不返回部分成功号码列表。 */
+/** 批量分配：与 items 等长、互不重复；任一项失败整体失败，不返回部分成功号码列表。
+ *  每项的 ticketType / yearMonth 类型严格性由 allocateWorkTicketNo 逐项落实，不另写一套。 */
 function allocateWorkTicketNos(input) {
   const b = input || {};
   const items = Array.isArray(b.items) ? b.items : [];
@@ -177,8 +212,9 @@ function validateBranch(ticketType, workTicketNo, storedId) {
   };
 }
 
-/** r6 2.4.1 第 1–6 条：按真实请求体判别；身份以已存 planType/ticketType 为准。
- *  撞号（需要 records）不在本函数内，由调用方用 assertDistWorkTicketNoAvailable 完成。 */
+/** r6 2.4.1 第 1–6 条（按 2026-11-14 修正一/二调整）：按真实请求体判别；
+ *  planType 身份仍以已存记录为准，票种与票号一律按「合并后候选记录」判断。
+ *  撞号（需要 records）不在本函数内，由调用方持 excludeIds 用 assertDistWorkTicketNoAvailable 完成。 */
 function classifyPlanTicketEdit(input) {
   const b = input || {};
   const stored = isPlainObject(b.stored) ? b.stored : {};
@@ -186,8 +222,18 @@ function classifyPlanTicketEdit(input) {
 
   // 1. body 非普通对象
   if (!isPlainObject(body)) return fail('INVALID_INPUT', '请求体必须是普通对象');
-  // 2. 轻操作豁免（只读状态/备注，不因旧号或缺号受阻）
+  // 2. 轻操作豁免（只看键集，不因键值类型改变分类；类型严格性不扩围到本分支）
   if (isLightPlanEdit(body)) return { ok: true, action: 'light' };
+  // 2a. 类型严格性守卫（修正三；插在轻操作之后、r6 第 3 条身份判定之前，不改变第 1–6 条语义）
+  const bad = checkStringFields([
+    ['stored.planType', stored.planType],
+    ['stored.ticketType', stored.ticketType],
+    ['stored.workTicketNo', stored.workTicketNo],
+    ['body.planType', body.planType],
+    ['body.ticketType', body.ticketType],
+    ['body.workTicketNo', body.workTicketNo]
+  ]);
+  if (bad) return bad;
 
   const has = k => hasOwn(body, k);
   const storedType = str(stored.ticketType);
@@ -208,13 +254,12 @@ function classifyPlanTicketEdit(input) {
     return validateBranch(candidateType, candidateNo, stored.id);
   }
 
-  // 5. 周计划（含单日周记录）：已存配电不得靠改 ticketType 躲开
+  // 5. 周计划（含单日周记录）：按「合并后候选记录」判断（2026-11-14 修正一 / 修正二）
+  //    候选为配电 → 以候选票种校验候选号；候选为线路（或非配电）→ 退出配电专用校验，
+  //    沿用线路既有行为，不新增线路服务端编号门禁。合法换票种不是绕过。
   if (planType === '周计划') {
-    const mustValidate = isDistPowerTicketType(storedType) || isDistPowerTicketType(candidateType);
-    if (!mustValidate) return { ok: true, action: 'skip_ticket_rule' };
-    // 已存配电时以已存票种为身份基准；已存非配电而请求配电时用候选票种
-    const ticketType = isDistPowerTicketType(storedType) ? storedType : candidateType;
-    return validateBranch(ticketType, candidateNo, stored.id);
+    if (!isDistPowerTicketType(candidateType)) return { ok: true, action: 'skip_ticket_rule' };
+    return validateBranch(candidateType, candidateNo, stored.id);
   }
 
   // 6. 其它未核 planType：不新开规则；主动写入配电票种/号才校验
