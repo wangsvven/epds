@@ -275,9 +275,12 @@ const PlansView = {
         const ym = PlanNo.ymOf(ServerTime.now());
         body.surveyNo = PlanNo.nextSurveyNo(list.value, ym);
         body.workTicketNo = PlanNo.nextTicketNo(list.value, ym, body.ticketType);
+        // 复制沿用既有直接 POST 入口（不重构、不改字段清理、不改 survey 保留），
+        // 并在复制自身入口上报 auto：由服务端按已定规则重算新号（忽略客户端预填号）
+        body.ticketNoMode = 'auto';
         await api.post('/api/workPlans', body);
         ElementPlus.ElMessage.success('已复制为新计划'); load();
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) { ElementPlus.ElMessage.error((e.data && e.data.message) || e.message); }
     }
     async function execPlan(row) {
       try {
@@ -1320,11 +1323,17 @@ const PlansView = {
       const fb = unitsByType('分包单位'); if (fb.length) dlg.form.subcontractors = [fb[0].name];
       const sj = unitsByType('监理单位'); if (sj.length) dlg.form.supervisor = sj[0].name;
       const cs = unitsByType('抄送单位'); if (cs.length) dlg.form.ccUnits = cs.slice(0, 2).map(u => u.name);
-      // 编号自动生成：勘察 = 年月 + 当月最大流水 +1；工作票 = 年月 + 类型码 + 该类型最大流水 +1
+      // 编号自动生成：勘察 = 年月 + 当月最大流水 +1（既有口径不变）；
+      // 工作票 = 配电三类走新格式预填（Step 4：YYYYMM + 一位码 + 流水 801 起），线路沿用既有口径
       // 统计口径 = list（GET /api/workPlans 的全量存活记录，不受页签/筛选/分页影响）
       const ym = PlanNo.ymOf(ServerTime.now());
       dlg.form.surveyNo = PlanNo.nextSurveyNo(list.value, ym);
-      dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, ym, dlg.form.ticketType);
+      dlg.form.workTicketNo = PlanNo.prefillTicketNo(list.value, ym, dlg.form.ticketType);
+      if (dlg.form.workTicketNo == null) {
+        // 配电当月 801–999 已用尽：不生成 1000、不扩位、不跨月借号；预填置空，手填框仍可用（服务端校验兜底）
+        dlg.form.workTicketNo = '';
+        warnTicketNoExhausted(ym, dlg.form.ticketType);
+      }
       dlg.ticketNoDirty = false;
       dlg.visible = true;
     }
@@ -1423,11 +1432,18 @@ const PlansView = {
         if (f.team) body.team = f.team;
         if (f.teamLeader) body.leader = f.teamLeader;
         if (Array.isArray(f.chargePersons) && f.chargePersons.length) body.chargePerson = f.chargePersons[0];
-        if (dlg.editingId) await api.put('/api/workPlans/' + dlg.editingId, body);
-        else await api.post('/api/workPlans', body);
+        if (dlg.editingId) {
+          delete body.ticketNoMode;   // 编辑走 PUT：不报创建 mode（r6 2.4），也不因改其它字段换号
+          await api.put('/api/workPlans/' + dlg.editingId, body);
+        } else {
+          // 创建（含新建、月生周、月计划页签创建）统一在共用提交点上报 mode：
+          // 未手改 = auto（服务端重算）、手改过（脏标记）= manual（服务端校验用户手填号）
+          body.ticketNoMode = dlg.ticketNoDirty ? 'manual' : 'auto';
+          await api.post('/api/workPlans', body);
+        }
         ElementPlus.ElMessage.success(dlg.editingId ? '计划已更新' : '计划已新增');
         dlg.visible = false; load();
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) { ElementPlus.ElMessage.error((e.data && e.data.message) || e.message); }
     }
     async function remove(row) {
       try {
@@ -1546,11 +1562,22 @@ const PlansView = {
       finally { qtyDlg.busy = false; }
     }
 
-    // 新增模式切换工作票类型 → 立即按新类型重算；用户手改过编号（脏标记）后不再覆盖；编辑模式一律不动
+    // 配电当月票号耗尽提示（Step 4）：明确告知 801–999 已用尽，不自动扩位、不跨月借号；
+    // 预填只是手改起点，手填框仍可用，最终以服务端校验兜底
+    function warnTicketNoExhausted(ym, ticketType) {
+      ElementPlus.ElMessage.warning(String(ym).slice(0, 4) + '年' + Number(String(ym).slice(4, 6)) + '月「' + ticketType +
+        '」工作票号 801–999 已用尽：不自动扩位、不跨月借号；可改选票种，或手工填写可用号（以服务端校验为准）');
+    }
+    // 新增模式切换工作票类型 → 立即按新类型重预填（配电走新格式算法、线路沿用既有）并重置脏标记；
+    // 编辑模式一律不动（不重填、不清空、不进创建 mode 逻辑）
     function onTicketTypeChange(v) {
-      if (dlg.editingId || dlg.ticketNoDirty) return;
+      if (dlg.editingId) return;
       const type = v || (dlg.form && dlg.form.ticketType);
-      dlg.form.workTicketNo = PlanNo.nextTicketNo(list.value, PlanNo.ymOf(ServerTime.now()), type);
+      const ym = PlanNo.ymOf(ServerTime.now());
+      const no = PlanNo.prefillTicketNo(list.value, ym, type);
+      dlg.form.workTicketNo = no == null ? '' : no;
+      if (no == null) warnTicketNoExhausted(ym, type);
+      dlg.ticketNoDirty = false;
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 

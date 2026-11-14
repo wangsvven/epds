@@ -1,5 +1,5 @@
 /* ========== scripts/plan-mgmt-20261114.test.js ========== */
-/* 计划管理优化 Step 3 起共用的「进程内隔离测试」。
+/* 计划管理优化 Step 3 / Step 4 共用的「进程内隔离测试」。
  * 直接运行：node scripts/plan-mgmt-20261114.test.js
  *
  * 隔离方式（不监听端口 / 不启动服务 / 不写生产数据）：
@@ -513,9 +513,171 @@ t('J3 真实 server/core/db.js 始终未进入 require.cache', () => {
   assert.equal(require.cache[DB_PATH], undefined);
 });
 
+/* ========== Step 4：K 前端预填纯函数（public/js/plan-no.js，进程内直载） ========== */
+// plan-no.js 以 IIFE 挂到「window 或 this」；CommonJS 模块顶层 this === module.exports，
+// Node 直载即得 PlanNo。ymOf 的 ServerTime 分支不会触发（全部用例显式传 ym）。
+const planNo = require('../public/js/plan-no.js').PlanNo;
+const PNO_ROOT = path.join(ROOT, 'public/js/plan-no.js');
+const VIEWS_PLANS = fs.readFileSync(path.join(ROOT, 'public/js/views/plans.js'), 'utf8');
+const VIEWS_MONTH = fs.readFileSync(path.join(ROOT, 'public/js/views/monthPlans.js'), 'utf8');
+const PN = (code, serial) => YM + code + String(serial).padStart(3, '0');
+const seedRec = (no, extra) => Object.assign({ workTicketNo: no, ticketType: T1, deleted: false }, extra || {});
+// 截取某函数源码段（自「function 名(」起至下一个同层 function / async function 声明），供静态断言用
+function fnSrc(src, name) {
+  const i = src.indexOf('function ' + name + '(');
+  assert.ok(i > -1, '函数 ' + name + ' 应存在');
+  let end = src.length;
+  ['\n    function ', '\n    async function '].forEach(pat => {
+    const j = src.indexOf(pat, i + 10);
+    if (j > -1 && j < end) end = j;
+  });
+  return src.slice(i, end);
+}
+
+g('K 前端预填纯函数（配电新格式：按月按票种、max+1、旧11位不计、耗尽 null）');
+t('K1 nextDistTicketNo 基线：空记录 → 三票种各自 801（一位码 6/7/9）', () => {
+  assert.equal(planNo.nextDistTicketNo([], YM, T1), PN('6', 801));
+  assert.equal(planNo.nextDistTicketNo([], YM, T2), PN('7', 801));
+  assert.equal(planNo.nextDistTicketNo([], YM, T3), PN('9', 801));
+});
+t('K2 同月同票种取 max+1：仅 805 占用 → 806（不补中间空号）', () => {
+  assert.equal(planNo.nextDistTicketNo([seedRec(PN('6', 805))], YM, T1), PN('6', 806));
+});
+t('K3 票种独立：码 6 与码 7 各记各的，互不相干', () => {
+  const seeds = [seedRec(PN('6', 999)), seedRec(PN('7', 803), { ticketType: T2 })];
+  assert.equal(planNo.nextDistTicketNo(seeds, YM, T1), null);      // 码 6 耗尽
+  assert.equal(planNo.nextDistTicketNo(seeds, YM, T2), PN('7', 804));
+});
+t('K4 业务月独立（不跨月借号）：上月 999 不占本月 → 801', () => {
+  const prevYM = YM.slice(4, 6) === '01'
+    ? String(Number(YM.slice(0, 4)) - 1) + '12'
+    : YM.slice(0, 4) + String(Number(YM.slice(4, 6)) - 1).padStart(2, '0');
+  assert.equal(planNo.nextDistTicketNo([seedRec(prevYM + '6' + '999')], YM, T1), PN('6', 801));
+});
+t('K5 历史 11 位旧格式不计入新流水 → 仍得 801', () => {
+  assert.equal(planNo.nextDistTicketNo([seedRec(OLD11)], YM, T1), PN('6', 801));
+});
+t('K6 软删记录不占号：deleted 的 999 → 801', () => {
+  assert.equal(planNo.nextDistTicketNo([seedRec(PN('6', 999), { deleted: true })], YM, T1), PN('6', 801));
+});
+t('K7 801–999 占满 → 返回 null（不生成 1000、不扩位）', () => {
+  assert.equal(planNo.nextDistTicketNo([seedRec(PN('6', 999))], YM, T1), null);
+});
+t('K8 isDistPowerTicketType：配电三 true；线路/未知/空/非字符串 false', () => {
+  [T1, T2, T3].forEach(x => assert.equal(planNo.isDistPowerTicketType(x), true, x));
+  [L1, '未映射的类型', '', null, 123, undefined].forEach(x => assert.equal(planNo.isDistPowerTicketType(x), false, String(x)));
+});
+t('K8b isDistPowerTicketType 口径 = trim 后查码表（与手填空白一致）', () => {
+  assert.equal(planNo.isDistPowerTicketType('  ' + T1 + '  '), true);
+});
+t('K9 prefillTicketNo 统一分流：配电走新格式；线路沿用既有 nextTicketNo', () => {
+  assert.equal(planNo.prefillTicketNo([], YM, T1), PN('6', 801));
+  assert.equal(planNo.prefillTicketNo([], YM, L1), planNo.nextTicketNo([], YM, L1));
+  assert.equal(planNo.prefillTicketNo([], YM, L1), YM + '67' + '001');
+});
+t('K10 nextTicketNo 旧行为零改动：配电一号仍为 11 位旧口径（冒烟既有断言不受影响）', () => {
+  const seeds = [seedRec(YM + '68' + '001'), seedRec(YM + '68' + '002')];
+  assert.equal(planNo.nextTicketNo(seeds, YM, T1), YM + '68' + '003');
+  assert.equal(planNo.nextTicketNo([], YM, '未映射的类型'), YM);
+});
+t('K11 号源口径：记录票号首尾空白不影响匹配（noOf 已 trim）', () => {
+  assert.equal(planNo.nextDistTicketNo([seedRec('  ' + PN('6', 805) + '  ')], YM, T1), PN('6', 806));
+});
+
+/* ========== Step 4：L views/plans.js 静态断言（mode 上报 / 预填 / 脏标记 / 手填保留） ========== */
+g('L views/plans.js 静态断言（mode 上报覆盖两入口、预填分流、手填保留）');
+t('L1 共用 submit 的 POST 分支上报 mode：未手改 = auto、脏标记 = manual', () => {
+  const src = fnSrc(VIEWS_PLANS, 'submit');
+  assert.match(src, /body\.ticketNoMode = dlg\.ticketNoDirty \? 'manual' : 'auto'/);
+  assert.match(src, /api\.post\('\/api\/workPlans', body\)/);
+});
+t('L2 编辑走 PUT：分支内 delete body.ticketNoMode（不报创建 mode）', () => {
+  const src = fnSrc(VIEWS_PLANS, 'submit');
+  const putBranch = src.slice(src.indexOf('if (dlg.editingId)'));
+  assert.match(putBranch, /delete body\.ticketNoMode/);
+  assert.match(putBranch, /api\.put\('\/api\/workPlans\/' \+ dlg\.editingId, body\)/);
+});
+t('L3 复制入口在自身入口上报 auto（沿用既有直接 POST，未重构）', () => {
+  const src = fnSrc(VIEWS_PLANS, 'copyPlan');
+  assert.match(src, /body\.ticketNoMode = 'auto'/);
+  const modeAt = src.indexOf("body.ticketNoMode = 'auto'");
+  const postAt = src.indexOf("await api.post('/api/workPlans', body)");
+  assert.ok(modeAt > -1 && postAt > modeAt, 'mode 赋值须在 POST 之前');
+  assert.match(src, /delete body\.id; delete body\.createdAt/);          // 既有字段清理原样
+  assert.doesNotMatch(src, /dlg\.visible|openAdd/);                     // 不走表单预填
+});
+t('L4 openAdd 预填走统一分流入口 prefillTicketNo（勘察仍 nextSurveyNo）', () => {
+  const src = fnSrc(VIEWS_PLANS, 'openAdd');
+  assert.match(src, /PlanNo\.prefillTicketNo\(list\.value, ym, dlg\.form\.ticketType\)/);
+  assert.match(src, /PlanNo\.nextSurveyNo\(list\.value, ym\)/);
+  assert.doesNotMatch(src, /PlanNo\.nextTicketNo/);
+  assert.match(src, /dlg\.ticketNoDirty = false/);
+});
+t('L5 openAdd 耗尽分支：置空 + 明确提示（不生成 1000、不扩位、不跨月借号）', () => {
+  const src = fnSrc(VIEWS_PLANS, 'openAdd');
+  assert.match(src, /dlg\.form\.workTicketNo == null/);
+  assert.match(src, /dlg\.form\.workTicketNo = ''/);
+  assert.match(src, /warnTicketNoExhausted\(ym, dlg\.form\.ticketType\)/);
+  const warn = fnSrc(VIEWS_PLANS, 'warnTicketNoExhausted');
+  assert.match(warn, /801–999 已用尽/);
+  assert.match(warn, /不自动扩位、不跨月借号/);
+});
+t('L6 onTicketTypeChange：编辑态仍提前返回；创建态重预填并重置脏标记（不再因 dirty 跳过）', () => {
+  const src = fnSrc(VIEWS_PLANS, 'onTicketTypeChange');
+  assert.match(src, /if \(dlg\.editingId\) return/);
+  assert.doesNotMatch(src, /dlg\.ticketNoDirty\) return/);
+  assert.match(src, /PlanNo\.prefillTicketNo\(list\.value, ym, type\)/);
+  assert.match(src, /dlg\.ticketNoDirty = false/);
+});
+t('L7 手填保留：工作票编号输入框仍可编辑（onTicketNoInput 置脏标记，无 disabled）', () => {
+  assert.match(VIEWS_PLANS, /<el-input v-model="dlg\.form\.workTicketNo" placeholder="自动生成，可手动修改" @input="onTicketNoInput" \/>/);
+  const src = fnSrc(VIEWS_PLANS, 'onTicketNoInput');
+  assert.match(src, /dlg\.ticketNoDirty = true/);
+});
+t('L8 月生周同通道：makeWeekFromMonth 仍经 openAdd 进共用 submit（无直连 POST）', () => {
+  const src = fnSrc(VIEWS_PLANS, 'makeWeekFromMonth');
+  assert.match(src, /await openAdd\(/);
+  assert.doesNotMatch(src, /api\.post/);
+});
+t('L9 错误提示走服务端明确 message：submit 与 copyPlan 的 catch 优先 e.data.message', () => {
+  const submitSrc = fnSrc(VIEWS_PLANS, 'submit');
+  const copySrc = fnSrc(VIEWS_PLANS, 'copyPlan');
+  assert.match(submitSrc, /\(e\.data && e\.data\.message\) \|\| e\.message/);
+  assert.match(copySrc, /\(e\.data && e\.data\.message\) \|\| e\.message/);
+});
+t('L10 monthPlans.js 零改动约束：全程不含 ticketNoMode（Step 4 未触碰该文件）', () => {
+  assert.doesNotMatch(VIEWS_MONTH, /ticketNoMode/);
+});
+
+/* ========== Step 4：M 前端预填值与服务端分配的一致性（同一 seed 直比） ========== */
+g('M 前端预填值与服务端 Step 3 分配/校验一致（同 seed 直比）');
+t('M1 预填号 === 服务端 auto 首次分配号（空库均 801；占用 805 后均 806）', () => {
+  reset([]);
+  assert.equal(planNo.nextDistTicketNo([], YM, T1), invoke(autoBody()).last.workTicketNo);
+  reset([rec('seed', PN('6', 805))]);
+  assert.equal(planNo.nextDistTicketNo([rec('seed', PN('6', 805))], YM, T1),
+    invoke(autoBody()).last.workTicketNo);
+});
+t('M2 前端判耗尽（null）时，服务端 auto 同样 400 EXHAUSTED 且零保存', () => {
+  const seeds = [rec('seed', PN('6', 999))];
+  assert.equal(planNo.nextDistTicketNo(seeds.map(r => ({ ...r })), YM, T1), null);
+  const r = call(autoBody(), seeds);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'EXHAUSTED');
+  assert.equal(state.saveCalls, 0);
+});
+t('M3 用预填函数生成的号走 manual → 200 且落库逐字同号（校验值==保存值）', () => {
+  reset([]);
+  const pre = planNo.nextDistTicketNo([], YM, T1);
+  const r = invoke(manualBody(pre));
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.last.workTicketNo, pre);
+  assert.equal(state.saveCalls, 1);
+});
+
 /* ---------- 执行与汇总 ---------- */
 async function run() {
-  console.log('计划管理优化 Step 3 · 进程内隔离测试（不监听端口 / 不启服务 / 不写生产库）');
+  console.log('计划管理优化 Step 3 / Step 4 · 进程内隔离测试（不监听端口 / 不启服务 / 不写生产库）');
   console.log('操作当天月份 YYYYMM = ' + YM + '（' + YM_LABEL + '，与 todayBizDate 同源 bjStr）\n');
   for (const x of queue) {
     total += 1;
