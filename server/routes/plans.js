@@ -14,9 +14,11 @@ const app = require('../core/app');
 const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
-const { genId, nowISO, safeFileName, INLINE_MIME } = require('../core/util');
+const { genId, nowISO, bjStr, safeFileName, INLINE_MIME } = require('../core/util');
 const { resolveDocPath, resolveSurveyTemplate } = require('../core/doc-templates');
 const { buildSurveyDocx } = require('../core/survey-doc');
+// Step 3：配电工作票号取号与共享校验（Step 2 纯模块，本文件不另写一套规则）
+const { isDistPowerTicketType, allocateWorkTicketNo, assertDistWorkTicketNoAvailable } = require('../core/plan-ticket-no');
 
 const PLAN_QTY_FIELDS = ['wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04'];
 
@@ -723,7 +725,74 @@ app.delete('/api/workPlans/:id/generated/:fileId', (req, res) => {
 // 月计划 xlsx 导出 → routes/monthPlans.js；借工管理专用端点 → routes/borrow.js
 // 二者均在 server.js 中先于本文件加载，保证静态路径不被通用 /:id 路由抢先匹配。
 
-// 计划相关集合走通用 CRUD（逻辑删除；须晚于本文件所有专用端点注册）
+/* ---------- Step 3：专用创建 POST（须注册在下面 crud() 之前，接管本集合创建） ----------
+ * 只接管「配电工作票号 + ticketNoMode」语义；其余分支复刻 core/crud.js 通用 POST 的
+ * 默认值 / 记录构造顺序 / 身份与时间字段 / HTTP 状态 / 响应形态。全分支落库前剥离
+ * ticketNoMode，不写为记录字段；非目标分支不新增任何规范化规则。
+ * 临界区：Node 单进程、本 handler 全程同步无 await，「读占用 → 分配/校验 → push → saveDB」
+ * 处于同一同步临界区；不声称磁盘原子或跨进程全局锁（saveDB 为非原子 writeFileSync，本步不改 db.js）。
+ * 号源规则一律走 core/plan-ticket-no（Step 2 已审阅模块），本文件不另写一套。
+ * 本步不改导入、不挂专用 PUT、不改勘察生成；此 POST 亦为 Step 4 月生周的唯一创建通道（本步只预留）。
+ */
+// 「无工作票号」：仅认非空字符串；非字符串一并视为无票号（不抛异常、不新增类型门禁）
+function hasNonEmptyTicketNo(v) { return typeof v === 'string' && v.trim() !== ''; }
+// 与 core/plan-ticket-no 的 str() 同口径的规范化，供 manual「校验什么就保存什么」
+function normTicketString(v) { return typeof v === 'string' ? v.trim() : ''; }
+// 通用 POST 等价落库：构造顺序/默认值/响应形态与 core/crud.js 一致；saveDB 抛错则内存回滚
+function commitPlanCreate(res, body) {
+  // 与 core/crud.js:23 逐字一致：crud('workPlans','workPlans') 的 prefix.slice(0,2) === 'wo'
+  const item = { id: genId('workPlans'.slice(0, 2)), createdAt: nowISO(), ...body };
+  item.deleted = false;
+  const before = DB.workPlans.length;
+  DB.workPlans.push(item);
+  try {
+    saveDB();
+  } catch (e) {
+    DB.workPlans.length = before;  // 内存回滚到调用前状态（不声称磁盘原子/半写安全）
+    return res.status(500).json({ ok: false, error: 'SAVE_FAILED', message: '保存失败，已回滚内存记录：' + String((e && e.message) || e) });
+  }
+  return res.json(item);
+}
+
+app.post('/api/workPlans', (req, res) => {
+  const raw = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+  const body = { ...raw };
+  delete body.ticketNoMode;                     // 全分支剥离（含非目标）
+
+  // 分流 1（先豁免）：月计划且无工作票号 → 原通用创建语义，不进入 mode 逻辑，
+  // 也不因「月计划带配电票种」被强制取号或报 MODE_REQUIRED。
+  if (raw.planType === '月计划' && !hasNonEmptyTicketNo(raw.workTicketNo)) {
+    return commitPlanCreate(res, body);
+  }
+  // 分流 3（非目标）：线路 / 其它非配电计划 → 原通用创建语义，不套 mode 与 801 规则。
+  if (!isDistPowerTicketType(raw.ticketType)) {
+    return commitPlanCreate(res, body);
+  }
+  // 分流 2（目标配电三类）：按 ticketNoMode 接管编号。
+  const mode = raw.ticketNoMode;
+  if (mode === 'auto') {
+    // 操作当天月份：服务端业务日期（Asia/Shanghai），与 routes/materials.js 的 todayBizDate() 同源 bjStr
+    const yearMonth = bjStr().slice(0, 10).replace(/-/g, '').slice(0, 6);
+    const allocated = allocateWorkTicketNo({ ticketType: body.ticketType, yearMonth, records: DB.workPlans });
+    if (!allocated.ok) return res.status(400).json(allocated);   // EXHAUSTED 等：400 + 模块错误码，不落库
+    body.workTicketNo = allocated.workTicketNo;                  // 忽略客户端预填号，保存服务端生成号
+    return commitPlanCreate(res, body);
+  }
+  if (mode === 'manual') {
+    // 校验与保存使用同一规范化后的 ticketType / workTicketNo（校验什么就保存什么）
+    const ticketType = normTicketString(raw.ticketType);
+    const workTicketNo = normTicketString(raw.workTicketNo);
+    const checked = assertDistWorkTicketNoAvailable({ workTicketNo, ticketType, records: DB.workPlans });
+    if (!checked.ok) return res.status(400).json(checked);       // 格式/号段/票种码/存活撞号：400，不落库
+    body.ticketType = ticketType;
+    body.workTicketNo = workTicketNo;
+    return commitPlanCreate(res, body);
+  }
+  // 缺 mode 或 mode 为其它值：不默判 auto、不把预填号当已校验 manual、不重算、不落库
+  return res.status(400).json({ ok: false, error: 'MODE_REQUIRED', message: '配电计划创建须显式上报 ticketNoMode（auto / manual）' });
+});
+
+// 计划相关集合走通用 CRUD（逻辑删除；须晚于本文件所有专用端点注册，含上面的专用创建 POST）
 // borrowWorks 的 CRUD 已移至 routes/borrow.js，月计划 xlsx 导出已移至 routes/monthPlans.js
 ['plans', 'workPlans'].forEach(c => {
   crud(c, c, { biz: true, soft: true });
