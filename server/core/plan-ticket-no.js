@@ -16,6 +16,13 @@
  *  - 修正一：编辑判别按「合并后候选记录」判断，删除「已存配电就必须按原票种校验」口径；合法换票种不是绕过。
  *  - 修正二：候选票种为线路 → skip_ticket_rule，沿用线路既有行为，本轮不新增任何线路服务端编号门禁。
  *  - 修正三：契约字符串字段类型严格性，非字符串只返回 INVALID_INPUT 失败结果，不抛异常。
+ *
+ * 2026-11-14 Step 2 再修正（用户最新裁定，冲突处以本提示词为准）：
+ *  - 再修正一：校验值与返回保存值逐字一致——规范化（trim）后的字符串同时是 parse / 码对应 /
+ *    撞号校验的输入与 validate 分支的返回值，禁止「校验 trim 值、返回原值」。
+ *  - 再修正二：字段未提供（键不存在）沿用已存值；键显式给出但非字符串（含 null）一律
+ *    INVALID_INPUT 失败、不沿用、不抛异常。票种为字符串时非配电字符串（含 '' / 未知票种）
+ *    一律 skip_ticket_rule，不新增票种枚举门禁。
  */
 const { aliveFilter } = require('./util');
 
@@ -30,11 +37,13 @@ const SERIAL_MAX = 999;
 const LIGHT_PLAN_EDIT_KEYS = ['status', 'planNote'];
 const DIST_NO_RE = /^(\d{4})(\d{2})([679])(\d{3})$/;
 
-/* 契约字符串字段严格性（Step 2 修正三）：
- * - str() 只接受字符串；null/undefined 视为「未提供」→ ''；数字/数组/对象/Symbol 一律 → ''，
+/* 契约字符串字段严格性（Step 2 修正三 + 再修正二）：
+ * - str() 只接受字符串；null/undefined → ''；数字/数组/对象/Symbol → ''，
  *   绝不调用 String(v)，避免 {toString:null} / Object.create(null) / 抛异常的 toString 泄漏 TypeError。
- * - checkStringFields() 在四个共享函数入口对显式传入的非字符串契约字段返回 INVALID_INPUT 失败结果
- *   （只返回失败、不抛异常），调用方按 ok === false 处理。
+ * - checkStringFields() 用于位置参数与必填入参：undefined 视为「未提供」，其余非字符串（含 null）
+ *   一律 INVALID_INPUT 失败结果；绝不把显式 null 当作未提供。
+ * - checkProvidedStringFields() 用于请求体 / 已存记录的对象字段：只按「键是否出现」判定，
+ *   键未出现 → 不检查、交由合并语义沿用原值；键出现但值非字符串 → INVALID_INPUT。
  * - isLightPlanEdit 仍只按键集判定，不因键值类型改变分类结果。 */
 function typeLabel(v) {
   if (Array.isArray(v)) return '数组';
@@ -47,7 +56,8 @@ function str(v) {
 }
 function checkStringFields(pairs) {
   for (const [field, v] of pairs) {
-    if (v != null && typeof v !== 'string') {
+    // undefined = 未提供；null / 数字 / 数组 / 对象 / Symbol 均为显式非法值
+    if (v !== undefined && typeof v !== 'string') {
       return fail('INVALID_INPUT', field + ' 应为字符串，实际为 ' + typeLabel(v));
     }
   }
@@ -59,6 +69,28 @@ function codeOf(ticketType) {
   return Object.prototype.hasOwnProperty.call(DIST_TICKET_CODE, t) ? DIST_TICKET_CODE[t] : '';
 }
 function hasOwn(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+/* 再修正二：请求体 / 已存记录的契约字符串字段，按「键是否显式提供」判定。
+ * 键不存在、或值为 undefined（等同未提供）→ 不检查、交由合并语义沿用原值；
+ * 键出现且值为 null / 数字 / 数组 / 对象等非字符串 → INVALID_INPUT，不沿用、不抛异常。
+ * 与 checkStringFields 的「undefined = 未提供」语义一致，不另造一套。 */
+function checkProvidedStringFields(obj, keys, label) {
+  for (const key of keys) {
+    if (!hasOwn(obj, key)) continue;
+    const v = obj[key];
+    if (v === undefined) continue;
+    if (typeof v !== 'string') {
+      return fail('INVALID_INPUT', label + '.' + key + ' 应为字符串，实际为 ' + typeLabel(v));
+    }
+  }
+  return null;
+}
+
+/* 再修正一：票种 / 票号规范化为唯一一份「校验值 == 返回保存值」。
+ * parse、码对应、撞号比较与 validate 分支返回值全部引用此结果，杜绝 trim 后校验、原值返回。 */
+function normTicketPair(ticketType, workTicketNo) {
+  return { ticketType: str(ticketType), workTicketNo: str(workTicketNo) };
+}
 
 /* ---------- 2.2 票种、解析 ---------- */
 
@@ -109,14 +141,16 @@ function assertDistWorkTicketNoAvailable(input) {
   const b = input || {};
   const bad = checkStringFields([['workTicketNo', b.workTicketNo], ['ticketType', b.ticketType]]);
   if (bad) return bad;
-  const parsed = parseDistWorkTicketNo(b.workTicketNo);
+  const norm = normTicketPair(b.ticketType, b.workTicketNo);
+  const no = norm.workTicketNo;
+  const typeStr = norm.ticketType;
+  const parsed = parseDistWorkTicketNo(no);
   if (!parsed.ok) return parsed;
-  const code = codeOf(b.ticketType);
-  if (!code) return fail('UNSUPPORTED_TICKET_TYPE', '非配电票种不走新格式工作票号校验：' + (str(b.ticketType) || '(空)'));
+  const code = codeOf(typeStr);
+  if (!code) return fail('UNSUPPORTED_TICKET_TYPE', '非配电票种不走新格式工作票号校验：' + (typeStr || '(空)'));
   if (parsed.parsed.typeCode !== code) {
-    return fail('INVALID_INPUT', '工作票号类型码 ' + parsed.parsed.typeCode + ' 与票种「' + str(b.ticketType) + '」不符');
+    return fail('INVALID_INPUT', '工作票号类型码 ' + parsed.parsed.typeCode + ' 与票种「' + typeStr + '」不符');
   }
-  const no = str(b.workTicketNo);
   const batch = new Set((Array.isArray(b.batchNos) ? b.batchNos : []).map(str));
   if (batch.has(no)) return fail('DUPLICATE', '工作票号与本次批次内其它记录重复：' + no);
   const excluded = new Set(Array.isArray(b.excludeIds) ? b.excludeIds : []);
@@ -194,20 +228,23 @@ function isLightPlanEdit(body) {
   return Object.keys(body).every(k => LIGHT_PLAN_EDIT_KEYS.indexOf(k) > -1);
 }
 
-/** validate 分支：候选号缺/空/旧格式/码不符 → INVALID_INPUT；否则交调用方做撞号断言。 */
+/** validate 分支：候选号缺/空/旧格式/码不符 → INVALID_INPUT；否则交调用方做撞号断言。
+ *  返回的 ticketType / workTicketNo 即被校验通过的规范化字符串（再修正一）。 */
 function validateBranch(ticketType, workTicketNo, storedId) {
-  const no = str(workTicketNo);
+  const norm = normTicketPair(ticketType, workTicketNo);
+  const no = norm.workTicketNo;
+  const typeStr = norm.ticketType;
   if (!no) return fail('INVALID_INPUT', '配电计划缺少工作票号，请补合规且不重复的号后再保存');
   const parsed = parseDistWorkTicketNo(no);
   if (!parsed.ok) return parsed;
-  if (parsed.parsed.typeCode !== codeOf(ticketType)) {
-    return fail('INVALID_INPUT', '工作票号类型码 ' + parsed.parsed.typeCode + ' 与票种「' + str(ticketType) + '」不符');
+  if (parsed.parsed.typeCode !== codeOf(typeStr)) {
+    return fail('INVALID_INPUT', '工作票号类型码 ' + parsed.parsed.typeCode + ' 与票种「' + typeStr + '」不符');
   }
   return {
     ok: true,
     action: 'validate',
-    ticketType: str(ticketType),
-    workTicketNo: no,
+    ticketType: typeStr,   // 与 assertDistWorkTicketNoAvailable 校验的字符串逐字相同
+    workTicketNo: no,      // 被校验通过的规范化字符串，供调用方保存
     excludeIds: storedId ? [storedId] : []
   };
 }
@@ -224,18 +261,16 @@ function classifyPlanTicketEdit(input) {
   if (!isPlainObject(body)) return fail('INVALID_INPUT', '请求体必须是普通对象');
   // 2. 轻操作豁免（只看键集，不因键值类型改变分类；类型严格性不扩围到本分支）
   if (isLightPlanEdit(body)) return { ok: true, action: 'light' };
-  // 2a. 类型严格性守卫（修正三；插在轻操作之后、r6 第 3 条身份判定之前，不改变第 1–6 条语义）
-  const bad = checkStringFields([
-    ['stored.planType', stored.planType],
-    ['stored.ticketType', stored.ticketType],
-    ['stored.workTicketNo', stored.workTicketNo],
-    ['body.planType', body.planType],
-    ['body.ticketType', body.ticketType],
-    ['body.workTicketNo', body.workTicketNo]
-  ]);
+  // 2a. 类型严格性守卫（修正三 + 再修正二）：只按「键是否显式提供」判定，
+  //     键未提供不检查（沿用已存原值）；键出现但非字符串（含显式 null）→ INVALID_INPUT。
+  const CONTRACT_FIELDS = ['planType', 'ticketType', 'workTicketNo'];
+  const bad = checkProvidedStringFields(stored, CONTRACT_FIELDS, 'stored')
+    || checkProvidedStringFields(body, CONTRACT_FIELDS, 'body');
   if (bad) return bad;
 
-  const has = k => hasOwn(body, k);
+  // 「字段已提供」统一口径：键存在且值不为 undefined；与 checkProvidedStringFields 一致，
+  // 避免「类型检查放行、候选取值却用 undefined 覆盖原值」的分叉。
+  const has = k => hasOwn(body, k) && body[k] !== undefined;
   const storedType = str(stored.ticketType);
   const candidateType = has('ticketType') ? str(body.ticketType) : storedType;
   // cur + body 合并语义：body 带号用请求值，否则用已存值

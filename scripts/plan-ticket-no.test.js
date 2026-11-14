@@ -528,6 +528,161 @@ t('I4 批量分配配合 excludeIds：首日保留号不被再分配、各新日
   assert.ok(!r.workTicketNos.includes(N801));
 });
 
+g('J 再修正一：校验值与返回保存值逐字一致');
+t('J1 票号带首尾空白 → 决策返回 trim 后的值', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { workTicketNo: '  2026116801  ' } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.workTicketNo, N801);
+  assert.equal(r.ticketType, T1);
+});
+t('J2 票种带首尾空白 → 决策返回 trim 后的票种', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: '  ' + T1 + '  ' } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.ticketType, T1);
+});
+t('J3 票号与票种同时带空白（tab/换行）→ 返回值全部规范化', () => {
+  const r = M.classifyPlanTicketEdit({
+    stored: storedWeek(),
+    body: { ticketType: '\t' + T2 + '\n', workTicketNo: '  2026117801\t' }
+  });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.ticketType, T2);
+  assert.equal(r.workTicketNo, N7);
+});
+t('J4 多组空白组合：不存在「校验值 ≠ 返回保存值」的路径', () => {
+  const pairs = [
+    [N801, T1, '  2026116801  ', ' ' + T1 + ' '],
+    [N802, T1, '\n2026116802\t', T1],
+    [N7, T2, ' 2026117801 ', ' ' + T2 + '  '],
+    [N9, T3, '  2026119801  ', '  ' + T3 + '\t']
+  ];
+  pairs.forEach(([wantNo, wantType, rawNo, rawType]) => {
+    const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: rawType, workTicketNo: rawNo } });
+    assert.equal(r.action, 'validate');
+    assert.equal(r.workTicketNo, wantNo, '返回值应为被校验通过的规范化号');
+    assert.equal(r.ticketType, wantType, '返回值应为被校验通过的规范化票种');
+    // 返回值本身已规范化：再次 trim 幂等，且与 parse / assert 校验的是同一个字符串
+    assert.equal(r.workTicketNo, r.workTicketNo.trim());
+    assert.equal(r.ticketType, r.ticketType.trim());
+    assert.equal(M.parseDistWorkTicketNo(r.workTicketNo).ok, true);
+    assert.deepEqual(M.assertDistWorkTicketNoAvailable({
+      workTicketNo: r.workTicketNo, ticketType: r.ticketType, records: [], excludeIds: r.excludeIds
+    }), { ok: true });
+  });
+});
+t('J5 stored 沿用的原值带空白 → 返回值仍是规范化后的值', () => {
+  const stored = { id: 'w1', planType: '周计划', ticketType: '  ' + T1 + ' ', workTicketNo: ' 2026116802 ' };
+  const r = M.classifyPlanTicketEdit({ stored, body: { address: 'x' } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.workTicketNo, N802);
+  assert.equal(r.ticketType, T1);
+});
+t('J6 assert 侧同样以规范化值校验：带空白票号不误判 DUPLICATE', () => {
+  const r = M.assertDistWorkTicketNoAvailable({
+    workTicketNo: '  2026116801  ', ticketType: T1, records: [rec('b', N801)]
+  });
+  assert.equal(r.error, 'DUPLICATE');
+  assert.deepEqual(M.assertDistWorkTicketNoAvailable({
+    workTicketNo: ' 2026116801 ', ticketType: ' ' + T1 + ' ', records: []
+  }), { ok: true });
+});
+
+g('K 再修正二：未提供沿用原值 / 显式非字符串安全失败');
+t('K1 字段未提供 → 沿用已存原值（合并语义不变）', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { address: 'x' } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.ticketType, T1);
+  assert.equal(r.workTicketNo, N801);
+});
+t('K2 仅未提供票种、显式给出票号 → 沿用已存票种', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { workTicketNo: N802 } });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.ticketType, T1);
+  assert.equal(r.workTicketNo, N802);
+});
+t('K3 ticketType: null → INVALID_INPUT（不得当作未提供或 skip）', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: null } });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'INVALID_INPUT');
+  assert.match(r.message, /ticketType/);
+});
+t('K4 候选配电 + 候选号显式 null → INVALID_INPUT（不是沿用、不是缺号沿用）', () => {
+  const r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { workTicketNo: null } });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'INVALID_INPUT');
+  assert.match(r.message, /workTicketNo/);
+});
+t('K5 ticketType 显式数字/数组/对象 → 全部安全失败、不抛异常', () => {
+  [7, [T2], { a: 1 }, { toString: null }, Symbol('s'), true].forEach(v => {
+    let r;
+    assert.doesNotThrow(() => { r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: v } }); }, 'ticketType 不应抛');
+    assert.equal(r.error, 'INVALID_INPUT');
+  });
+});
+t('K6 workTicketNo 显式数字/数组/对象 → 全部安全失败、不抛异常', () => {
+  [123, [N801], { a: 1 }, { toString: null }, Symbol('s'), false].forEach(v => {
+    let r;
+    assert.doesNotThrow(() => { r = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { workTicketNo: v } }); }, 'workTicketNo 不应抛');
+    assert.equal(r.error, 'INVALID_INPUT');
+  });
+});
+t('K7 ticketType: 空字符串 → skip_ticket_rule（不报 INVALID_INPUT）', () => {
+  assert.deepEqual(M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: '' } }),
+    { ok: true, action: 'skip_ticket_rule' });
+});
+t('K8 ticketType: 未知票种字符串 → skip_ticket_rule（不新增票种枚举门禁）', () => {
+  ['未知票种', '带电作业工作票', '随便写的'].forEach(v => {
+    assert.deepEqual(M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: v } }),
+      { ok: true, action: 'skip_ticket_rule' }, v);
+  });
+});
+t('K9 对照分明：null 失败、空字符串 skip（不得混同）', () => {
+  const a = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: null } });
+  const b = M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: '' } });
+  assert.equal(a.error, 'INVALID_INPUT');
+  assert.equal(b.action, 'skip_ticket_rule');
+  assert.notDeepEqual(a, b);
+});
+t('K10 parse / assert / allocate 显式 null → INVALID_INPUT 且不抛异常', () => {
+  const calls = [
+    () => M.parseDistWorkTicketNo(null),
+    () => M.assertDistWorkTicketNoAvailable({ workTicketNo: null, ticketType: T1, records: [] }),
+    () => M.assertDistWorkTicketNoAvailable({ workTicketNo: N801, ticketType: null, records: [] }),
+    () => M.allocateWorkTicketNo({ ticketType: null, yearMonth: '202611', records: [] }),
+    () => M.allocateWorkTicketNo({ ticketType: T1, yearMonth: null, records: [] })
+  ];
+  calls.forEach((fn, i) => {
+    let r;
+    assert.doesNotThrow(() => { r = fn(); }, '调用 ' + i + ' 不应抛异常');
+    assert.equal(r.error, 'INVALID_INPUT', '调用 ' + i);
+  });
+});
+t('K11 值为 undefined 等同未提供 → 沿用原值、不抛异常', () => {
+  const r = M.classifyPlanTicketEdit({
+    stored: storedWeek(), body: { ticketType: undefined, workTicketNo: undefined, address: 'x' }
+  });
+  assert.equal(r.action, 'validate');
+  assert.equal(r.ticketType, T1);
+  assert.equal(r.workTicketNo, N801);
+});
+t('K12 stored 字段显式 null → 安全失败不抛异常', () => {
+  const stored = { id: 'w1', planType: '周计划', ticketType: T1, workTicketNo: null };
+  let r;
+  assert.doesNotThrow(() => { r = M.classifyPlanTicketEdit({ stored, body: { address: 'x' } }); });
+  assert.equal(r.error, 'INVALID_INPUT');
+});
+t('K13 轻操作分类不受影响（仍只按键集）', () => {
+  assert.equal(M.isLightPlanEdit({ status: null }), true);
+  assert.deepEqual(M.classifyPlanTicketEdit({ stored: storedWeek(), body: { planNote: 123 } }),
+    { ok: true, action: 'light' });
+});
+t('K14 线路 / 空 / 未知票种字符串一律 skip，不新增服务端门禁', () => {
+  [L1, L2, '', '未知票种'].forEach(v => {
+    assert.deepEqual(M.classifyPlanTicketEdit({ stored: storedWeek(), body: { ticketType: v, workTicketNo: LINE_OLD } }),
+      { ok: true, action: 'skip_ticket_rule' }, v);
+  });
+});
+
 console.log('\n===== 分组结果 =====');
 Object.keys(groups).forEach(k => console.log('  ' + k + '：' + groups[k].pass + ' 通过 / ' + groups[k].fail + ' 失败'));
 console.log('===== 总计：' + total + ' 项，通过 ' + passed + '，失败 ' + failed + ' =====');
