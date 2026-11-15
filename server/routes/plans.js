@@ -77,9 +77,9 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       if (t) HEAD[t] = i;
     }));
     const NEW_LAYOUT = HEAD['作业计划名称'] !== undefined && HEAD['计划开始时间'] !== undefined;
-    // Step 5B 号码承接：现行模板与导出均无「工作票号」列，故按表头名「可选读取」——
-    // 文件里有该列才逐行校验；没有该列则整份视为「无号」全部豁免（不补号、不改模板、不以空值冒充已读取）。
-    const HAS_NO_COL = HEAD['工作票号'] !== undefined || HEAD['工作票编号'] !== undefined;
+    // Step 5B 号码列：模板与导出统一为第 49 列「工作票号」；历史文件可能写「工作票编号」，
+    // 保留别名兼容读取。两列同时填写且不一致时按行报错（整批拒绝），不静默择一。
+    // 无该列时取值为空 —— 解析照旧，但配电周计划缺号会在整批校验里被拒（不再整份豁免）。
     const cellText = (r, i) => String(r[i] == null ? '' : r[i]).trim();
     const cellList = (r, i) => (cellText(r, i) ? cellText(r, i).split(/[；;]/).map(s => s.trim()).filter(Boolean) : []);
     const col = (r, name) => (HEAD[name] === undefined ? '' : cellText(r, HEAD[name]));
@@ -117,8 +117,15 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
         if (!start) { errors.push('第' + rowNo + '行：计划开始时间「' + (String(startRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (!end) { errors.push('第' + rowNo + '行：计划结束时间「' + (String(endRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (end < start) { errors.push('第' + rowNo + '行：计划结束时间早于开始时间'); return; }
-        // 可选票号列：有列才取值，空单元格不写入记录（不塞空字符串冒充已读取）
-        const noCell = HAS_NO_COL ? (col(r, '工作票号') || col(r, '工作票编号')) : '';
+        // 第 49 列「工作票号」+ 别名「工作票编号」：单列有值即用；两列皆有值时必须一致，
+        // 冲突即报错（整批拒绝、零保存），绝不静默择一；空单元格不写入记录
+        const noMain = col(r, '工作票号');
+        const noAlias = col(r, '工作票编号');
+        if (noMain && noAlias && noMain !== noAlias) {
+          errors.push('第' + rowNo + '行：「工作票号」与「工作票编号」两列同时填写且不一致（' + noMain + ' / ' + noAlias + '），请只保留一列');
+          return;
+        }
+        const noCell = noMain || noAlias;
         parsed.push(planItem({
           name: pName,
           planType: PLAN_TYPES.includes(wantType) ? wantType : '周计划',
@@ -175,37 +182,36 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     }
     if (!parsed.length) return res.status(400).json({ error: '模板中没有可导入的数据行' });
     /* ---------- Step 5B：配电工作票号整批校验（须在业务判重之前，顺序不可颠倒） ----------
-     * 适用面：仅配电票种（非配电/线路不扩围）；无号月计划先行豁免（不补号、不套校验）。
+     * 适用面：仅配电票种（非配电/线路不扩围）；无号月计划先行豁免（不补号、不套校验）；
+     *         月计划主动写配电号时仍须校验。
      * 规则：格式 / 号段 / 票种码 / 存活撞号 / 批内重复，全部走 core/plan-ticket-no 的
      * assertDistWorkTicketNoAvailable（Step 2 已审阅模块），本文件不另写一套。
      * 任一不合法 → 整批拒绝、不调用 saveDB、不静默改号，按既有导入报错形态返回；
      * 绝不允许「先按业务键跳过非法行再校验」。
-     * 文件无票号列时不进入本段（整份视为无号，全部豁免）。
+     * 无票号列（历史 48 列模板）时取值为空：解析照旧，但配电周计划缺号在此被整批拒绝。
      */
-    if (HAS_NO_COL) {
-      const noErrors = [];
-      const batchNos = [];
-      parsed.forEach((p, i) => {
-        const rowNo = rowNos[i] || (i + 2);
-        const type = normTicketString(p.ticketType);
-        if (!isDistPowerTicketType(type)) return;              // 非配电（含线路）：不扩围、不校验
-        const no = normTicketString(p.workTicketNo);
-        if (!no && p.planType === '月计划') return;            // 无号月计划先豁免：不补号、不套校验
-        if (!no) {
-          noErrors.push('第' + rowNo + '行：配电计划缺少工作票号（须为 YYYYMM + 类型码 6/7/9 + 801–999）');
-          return;
-        }
-        const checked = assertDistWorkTicketNoAvailable({
-          workTicketNo: no, ticketType: type, records: DB.workPlans, batchNos
-        });
-        if (!checked.ok) { noErrors.push('第' + rowNo + '行：' + checked.message); return; }
-        batchNos.push(no);                                     // 批内已用号占位，后续同号即 DUPLICATE
-      });
-      if (noErrors.length) {
-        return res.status(400).json({
-          error: '导入失败，共 ' + noErrors.length + ' 处问题：' + noErrors.slice(0, 5).join('；') + (noErrors.length > 5 ? '（仅显示前 5 处）' : '')
-        });
+    const noErrors = [];
+    const batchNos = [];
+    parsed.forEach((p, i) => {
+      const rowNo = rowNos[i] || (i + 2);
+      const type = normTicketString(p.ticketType);
+      if (!isDistPowerTicketType(type)) return;              // 非配电（含线路）：不扩围、不校验
+      const no = normTicketString(p.workTicketNo);
+      if (!no && p.planType === '月计划') return;            // 无号月计划先豁免：不补号、不套校验
+      if (!no) {
+        noErrors.push('第' + rowNo + '行：配电计划缺少工作票号（须为 YYYYMM + 类型码 6/7/9 + 801–999）');
+        return;
       }
+      const checked = assertDistWorkTicketNoAvailable({
+        workTicketNo: no, ticketType: type, records: DB.workPlans, batchNos
+      });
+      if (!checked.ok) { noErrors.push('第' + rowNo + '行：' + checked.message); return; }
+      batchNos.push(no);                                     // 批内已用号占位，后续同号即 DUPLICATE
+    });
+    if (noErrors.length) {
+      return res.status(400).json({
+        error: '导入失败，共 ' + noErrors.length + ' 处问题：' + noErrors.slice(0, 5).join('；') + (noErrors.length > 5 ? '（仅显示前 5 处）' : '')
+      });
     }
     // 判重：planType + project + name + startDate；范围 = 库中同键未删除计划 + 本文件内先出现的行。
     // 现行导入对话框无逐行勾选能力，命中重复的行一律跳过（不覆盖、不改动已有记录）。
@@ -230,7 +236,7 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     res.json({ ok: true, added: fresh.length, skipped: skippedRows.length, skippedRows });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
-// ---------- 导出：对齐原周报「周计划」文件（48 列 / 两行表头 / 三处分组表头） ----------
+// ---------- 导出：对齐原周报「周计划」文件（49 列 / 两行表头 / 三处分组表头；第 49 列「工作票号」） ----------
 const PLAN_XLSX_ROW1 = [
   '序号', '作业计划名称', '作业类型', '作业专业', '省专业管理部门', '计划开始时间', '计划结束时间', '电压等级',
   '变电站/线路', '作业地址', '作业内容', '工作票类型', '作业风险等级', '电网风险等级', '风险因素',
@@ -239,19 +245,19 @@ const PLAN_XLSX_ROW1 = [
   '作业实施（施工）人员（不包含工作负责人）', '重特大人身事故风险', '风险管控措施', '作业人员（共多少人）',
   '其中高处作业人员', '专责监护人', '到岗到位人员', '安全巡查人员', '作业资料审核负责人',
   '高处作业、培训交底负责人', '队伍、人员准入检查负责人', '施工机具和安全工器具检查负责人',
-  '气体检测人员', '是否涉及机械施工', '当日计划工作量', '', '', '', '', '', '', '备注', ''
+  '气体检测人员', '是否涉及机械施工', '当日计划工作量', '', '', '', '', '', '', '备注', '', '工作票号'
 ];
 const PLAN_XLSX_ROW2 = [
   '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
   '', '', '', '', '', '', '', '', '', '', '', '', '', '',
   '杆塔（基）', '10kV/35kV线路（km/单线）', '电缆（千米）', '环网柜（个）', '真空开关（个）', '变压器（个）',
-  '0.4/0.22kV线路（km/单线）', '停电范围', '时户数'
+  '0.4/0.22kV线路（km/单线）', '停电范围', '时户数', ''
 ];
 const PLAN_XLSX_COLS = [
   8.83, 22.83, 12.83, 10.83, 16.83, 21.83, 21.83, 10.83, 18.83, 40.83, 27.83, 24.83, 14.83, 14.83, 40.83,
   20.83, 20.83, 28.83, 28.83, 12.83, 19.83, 10.83, 10.83, 12.83, 20.83, 40.83, 20.83, 40.83, 22.83, 24.83,
   12.83, 14.83, 14.83, 20.83, 26.83, 26.83, 32.83, 14.83, 18.83, 16.83, 26.83, 14.83, 14.83, 16.83, 14.83,
-  27.83, 21.83, 8.83
+  27.83, 21.83, 8.83, 18.83
 ];
 function planXlsxText(v) { return v == null ? '' : String(v); }
 // 数组字段（风险因素 / 分包单位 / 抄送单位）按「；」连接；字符串原样
@@ -285,7 +291,8 @@ function planXlsxRow(p, i) {
     planXlsxText(p.gasTester), planXlsxText(p.machine),
     planXlsxNum(p.wlPole), planXlsxNum(p.wlLine1035), planXlsxNum(p.wlCable), planXlsxNum(p.wlRing),
     planXlsxNum(p.wlVacuum), planXlsxNum(p.wlTransformer), planXlsxNum(p.wlLine04),
-    planXlsxText(p.outageRange), planXlsxNum(p.outageHours)
+    planXlsxText(p.outageRange), planXlsxNum(p.outageHours),
+    planXlsxText(p.workTicketNo)   // 第 49 列：原值直出，不 trim / 不补零 / 不转数字
   ];
 }
 // 导出表下拉：与原「周计划」文件逐字对齐（7 处、内联选项、从第 3 行覆盖到末行）
@@ -353,7 +360,7 @@ app.get('/api/workPlans/export', async (req, res) => {
     for (let r = 1; r <= lastRow; r++) {
       const row = ws.getRow(r);
       if (r > 2) row.height = 100;
-      for (let c = 1; c <= 48; c++) {
+      for (let c = 1; c <= 49; c++) {
         const cell = row.getCell(c);
         cell.font = { name: '宋体', size: 12 };
         cell.alignment = { wrapText: true, vertical: 'middle' };

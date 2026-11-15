@@ -1192,23 +1192,36 @@ function importCall(file, seed, planType, opts) {
 }
 
 /* ========== Step 5B：Q 导入整批校验（可选票号列 / 整批拒绝 / 判重之前 / 回滚） ========== */
-g('Q 导入整批校验（Step 5B：可选票号列 / 整批拒绝 / 判重之前 / 回滚）');
+g('Q 导入整批校验（Step 5B：第 49 列票号 / 别名冲突 / 整批拒绝 / 判重之前 / 回滚）');
 const csv = lines => Buffer.from('\uFEFF' + lines.join('\n'), 'utf8');
 const H_BASE = ['作业计划名称', '计划开始时间', '计划结束时间', '工作票类型'];
 const H_NO = H_BASE.concat(['工作票号']);
 const NO801 = N('6', 801);
 const NO802 = N('6', 802);
 
-t('Q1 文件无票号列（现行模板 48 列形态）→ 整份视为无号、全部豁免，导入成功且不补号', () => {
+t('Q1 文件无票号列（历史 48 列模板）→ 解析照旧，但配电周计划缺号整批拒绝、零保存', () => {
   const buf = csv([H_BASE.join(','), ['ZT导入无列', '2026-11-20', '2026-11-21', T1].join(',')]);
   const r = importCall(buf, []);
   assert.equal(r.thrown, null);
+  assert.equal(r.res.statusCode, 400, '无列不再是豁免：配电周计划缺号必须整批拒绝');
+  assert.match(r.res.payload.error, /缺少工作票号/);
+  assert.equal(r.count, 0);
+  assert.equal(state.saveCalls, 0);
+});
+t('Q1b 无票号列 + 无号月计划 → 仍豁免通过（旧模板月计划可导入，不补号）', () => {
+  const buf = csv([H_BASE.join(','), ['ZT导入旧模板月计划', '2026-11-20', '2026-11-21', T1].join(',')]);
+  const r = importCall(buf, [], '月计划');
   assert.equal(r.res.statusCode, 200);
   assert.equal(r.res.payload.added, 1);
-  assert.equal(r.count, 1);
-  assert.equal(r.rows[0].ticketType, T1);
-  assert.equal(r.rows[0].workTicketNo, undefined, '无该列时不得凭空写号');
+  assert.equal(r.rows[0].workTicketNo, undefined);
   assert.equal(state.saveCalls, 1);
+});
+t('Q1c 无票号列 + 线路票种 → 不受本校验影响（不扩围）', () => {
+  const buf = csv([H_BASE.join(','), ['ZT导入旧模板线路', '2026-11-20', '2026-11-21', L1].join(',')]);
+  const r = importCall(buf, []);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.added, 1);
+  assert.equal(r.rows[0].workTicketNo, undefined);
 });
 t('Q2 文件带票号列 + 合规新格式号 → 保存该号，单次保存', () => {
   const buf = csv([H_NO.join(','), ['ZT导入有号', '2026-11-20', '2026-11-21', T1, NO801].join(',')]);
@@ -1339,19 +1352,118 @@ t('Q15 真实 xlsx 文件（有票号列）同样读取并校验', () => {
   assert.equal(r.res.statusCode, 200);
   assert.equal(r.rows[0].workTicketNo, NO802);
 });
-t('Q16 其它导入规则不变：缺名称仍 400；作业内容/地址仍按表头名落库', () => {
-  const H = H_BASE.concat(['作业内容', '作业地址']);
-  const bad = csv([H.join(','), ['', '2026-11-20', '2026-11-21', T1, '', ''].join(',')]);
+t('Q16 其它导入规则不变：缺名称仍 400；作业内容/地址仍按表头名落库（补合规号后）', () => {
+  const H = H_BASE.concat(['工作票号', '作业内容', '作业地址']);
+  const bad = csv([H.join(','), ['', '2026-11-20', '2026-11-21', T1, NO801, '', ''].join(',')]);
   const rb = importCall(bad, []);
   assert.equal(rb.res.statusCode, 400);
   assert.match(rb.res.payload.error, /作业计划名称不能为空/);
   assert.equal(state.saveCalls, 0);
-  const ok = csv([H.join(','), ['ZT导入映射', '2026-11-20', '2026-11-21', T1, '检修内容', '某作业地址'].join(',')]);
+  const ok = csv([H.join(','), ['ZT导入映射', '2026-11-20', '2026-11-21', T1, NO801, '检修内容', '某作业地址'].join(',')]);
   const ro = importCall(ok, []);
   assert.equal(ro.res.statusCode, 200);
   assert.equal(ro.rows[0].content, '检修内容');
   assert.equal(ro.rows[0].address, '某作业地址');
 });
+
+t('Q17 模板资产：第 49 列为「工作票号」，A1:AV1 原 48 列表头与行数逐字未变，说明按分层口径', () => {
+  const tplPath = path.join(ROOT, 'assets/plan-import-template.xlsx');
+  const tplWb = XLSX.read(fs.readFileSync(tplPath), { type: 'buffer' });
+  assert.deepEqual(tplWb.SheetNames, ['最新版', '填写说明']);
+  const ws = tplWb.Sheets['最新版'];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  assert.equal(aoa[0].length, 49, '模板应为 49 列');
+  assert.equal(aoa[0][48], '工作票号');
+  assert.equal(aoa[0][47], '时户数', '第 48 列仍是时户数（未位移）');
+  assert.equal(aoa[0][0], '序号');
+  assert.equal(aoa.length, 1, '仍为单行表头，未新增样例行');
+  assert.match(String(ws['!ref']), /^A1:AW1$/);
+  const note = XLSX.utils.sheet_to_json(tplWb.Sheets['填写说明'], { header: 1, defval: '' })
+    .map(r => String((r && r[0]) || '')).join('\n');
+  assert.match(note, /本模板共 49 列/);
+  assert.match(note, /配电周计划须填写/);
+  assert.match(note, /无号月计划豁免/);
+  assert.match(note, /月计划主动填写配电号时仍须合规/);
+  assert.doesNotMatch(note, /配电计划须填写/, '不得写成笼统的「配电计划须填写」');
+});
+t('Q18 导出：第 49 列「工作票号」，号码原值直出，既有列位/合并不变', async () => {
+  const seed = [
+    seedRec('202611680003', { id: 'wp-q18', planType: '周计划', name: 'ZT导出旧号样本', startDate: '2026-11-20 08:00:00', endDate: '2026-11-21 18:00:00', createdAt: '2026-11-01T00:00:00.000Z' })
+  ];
+  const r = await exportCall(seed);
+  assert.equal(r.statusCode, 200);
+  assert.ok(Buffer.isBuffer(r.payload));
+  const ws = XLSX.read(r.payload, { type: 'buffer' }).Sheets.Sheet1;
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  assert.equal(aoa[0].length, 49, '导出应为 49 列');
+  assert.equal(aoa[0][48], '工作票号');
+  assert.equal(aoa[0][0], '序号');
+  assert.equal(aoa[0][39], '当日计划工作量', 'AN 列未位移');
+  assert.equal(aoa[1][39], '杆塔（基）');
+  assert.equal(aoa[2][48], '202611680003', '号码须原值直出（旧格式也不清洗、不格式化）');
+  assert.equal((ws['!merges'] || []).length, 41, '合并区仍为 41 个');
+});
+t('Q19 独立空库回导成功：导出 → 解析 → 空库导入，号码逐字保留', async () => {
+  const seed = [
+    seedRec(N('6', 801), { id: 'wp-q19a', planType: '周计划', name: 'ZT回导甲', startDate: '2026-11-20 08:00:00', endDate: '2026-11-21 18:00:00', createdAt: '2026-11-01T00:00:00.000Z' }),
+    seedRec(N('6', 802), { id: 'wp-q19b', planType: '周计划', name: 'ZT回导乙', startDate: '2026-11-22 08:00:00', endDate: '2026-11-23 18:00:00', createdAt: '2026-11-02T00:00:00.000Z' })
+  ];
+  const ex = await exportCall(seed);
+  const r = importCall(ex.payload, [], '周计划', { filename: 'roundtrip.xlsx' });
+  assert.equal(r.res.statusCode, 200, '空库回导应成功：' + JSON.stringify(r.res.payload));
+  assert.equal(r.res.payload.added, 2);
+  assert.deepEqual(r.rows.map(x => x.workTicketNo).sort(), [N('6', 801), N('6', 802)]);
+  assert.equal(state.saveCalls, 1);
+});
+t('Q20 同库回导撞号拒绝：同一导出文件回灌自身库 → 400 DUPLICATE、零保存', async () => {
+  const seed = [
+    seedRec(N('6', 801), { id: 'wp-q20', planType: '周计划', name: 'ZT回导自身', startDate: '2026-11-20 08:00:00', endDate: '2026-11-21 18:00:00', createdAt: '2026-11-01T00:00:00.000Z' })
+  ];
+  const ex = await exportCall(seed);
+  const r = importCall(ex.payload, seed, '周计划', { filename: 'roundtrip.xlsx' });
+  assert.equal(r.res.statusCode, 400);
+  assert.match(r.res.payload.error, /已被其它存活记录占用/);
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.count, 1);
+});
+t('Q21 导入规范化保存：单元格带首尾空白 → 保存值 = 校验值（去空白后逐字相同）', () => {
+  const buf = csv([H_NO.join(','), ['ZT导入空白', '2026-11-20', '2026-11-21', T1, '   ' + NO801 + '   '].join(',')]);
+  const r = importCall(buf, []);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.rows[0].workTicketNo, NO801, '落库值应为去空白后的合规号');
+  assert.equal(r.rows[0].name, 'ZT导入空白');
+});
+t('Q22 别名列并存：两列同值通过；两列冲突 → 400 报出两值、零保存（不静默择一）', () => {
+  const H_DUAL = H_BASE.concat(['工作票号', '工作票编号']);
+  const same = csv([H_DUAL.join(','), ['ZT双列同值', '2026-11-20', '2026-11-21', T1, NO801, NO801].join(',')]);
+  const r1 = importCall(same, []);
+  assert.equal(r1.res.statusCode, 200);
+  assert.equal(r1.rows[0].workTicketNo, NO801);
+  const diff = csv([H_DUAL.join(','), ['ZT双列冲突', '2026-11-22', '2026-11-23', T1, NO801, NO802].join(',')]);
+  const r2 = importCall(diff, []);
+  assert.equal(r2.res.statusCode, 400);
+  assert.match(r2.res.payload.error, /工作票编号/);
+  assert.ok(r2.res.payload.error.indexOf(NO801) > -1 && r2.res.payload.error.indexOf(NO802) > -1, '应报出两列的值');
+  assert.match(r2.res.payload.error, /第2行/);
+  assert.equal(r2.count, 0);
+  assert.equal(state.saveCalls, 0);
+});
+
+const XLSX = require('xlsx');
+const exportHandler = (routes.find(r => r.method === 'GET' && r.path === '/api/workPlans/export') || {}).handler;
+async function exportCall(seed, query) {
+  reset(seed);
+  const req = { query: query || {}, params: {}, headers: {} };
+  const res = {
+    statusCode: 200, payload: undefined, headers: {},
+    status(n) { this.statusCode = n; return this; },
+    json(v) { this.payload = v; return this; },
+    send(v) { this.payload = v; return this; },
+    setHeader(k, v) { this.headers[k] = v; }
+  };
+  await exportHandler(req, res, () => { throw new Error('unexpected next()'); });
+  return res;
+}
 
 /* ---------- 执行与汇总 ---------- */
 async function run() {
