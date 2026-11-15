@@ -1730,7 +1730,7 @@ async function runSmoke() {
     need(buf.slice(0, 2).toString() === 'PK', '不是 xlsx（zip）文件');
     return buf.length + 'B';
   });
-  await step('plans', '周计划导出 GET /api/workPlans/export（48 列 / 两行表头 / 41 合并 / 下拉选项）', async () => {
+  await step('plans', '周计划导出 GET /api/workPlans/export（49 列 / 两行表头 / 41 合并 / 下拉选项 / 第 49 列工作票号）', async () => {
     const r = await fetch(base + '/api/workPlans/export', { headers: { Authorization: 'Bearer ' + token } });
     need(r.status === 200, '状态码 ' + r.status);
     need(/spreadsheetml\.sheet/.test(r.headers.get('content-type') || ''), 'Content-Type 非 xlsx');
@@ -1738,9 +1738,10 @@ async function runSmoke() {
     const wb = xlsx.read(buf, { type: 'buffer' });
     need(wb.SheetNames.length === 1 && wb.SheetNames[0] === 'Sheet1', 'sheet 名应为 Sheet1，实为 ' + wb.SheetNames.join(','));
     const ws = wb.Sheets.Sheet1;
-    need(ws['!ref'] && xlsx.utils.decode_range(ws['!ref']).e.c + 1 === 48, '列数应为 48，实为 ' + (ws['!ref'] ? xlsx.utils.decode_range(ws['!ref']).e.c + 1 : '空'));
+    need(ws['!ref'] && xlsx.utils.decode_range(ws['!ref']).e.c + 1 === 49, '列数应为 49，实为 ' + (ws['!ref'] ? xlsx.utils.decode_range(ws['!ref']).e.c + 1 : '空'));
     need(Array.isArray(ws['!merges']) && ws['!merges'].length === 41, '合并区域应为 41 个，实为 ' + (ws['!merges'] ? ws['!merges'].length : 0));
     need(String(ws.A1.v) === '序号' && String(ws.AN1.v) === '当日计划工作量' && String(ws.AN2.v) === '杆塔（基）', '表头文字不符');
+    need(String(ws.AW1.v) === '工作票号', '第 49 列表头应为「工作票号」，实为 ' + (ws.AW1 && ws.AW1.v));
     const rows = xlsx.utils.decode_range(ws['!ref']).e.r + 1;
     const sheetXml = (unzipEntry(buf, 'xl/worksheets/sheet1.xml') || Buffer.from('')).toString();
     const dvCount = (sheetXml.match(/<dataValidation /g) || []).length;
@@ -1752,35 +1753,38 @@ async function runSmoke() {
     const rows3 = xlsx.utils.decode_range(wb3.Sheets.Sheet1['!ref']).e.r + 1;
     need(rows3 === 2, 'scope=month 应为 0 条数据行，实为 ' + (rows3 - 2));
     need(rows - 2 >= 1, '不带 scope 时应导出全部，实为 ' + (rows - 2));
-    return '48 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / scope 过滤 OK / ' + buf.length + 'B';
+    return '49 列 / 41 合并 / ' + rows + ' 行 / 下拉 ' + dvCount + ' 处 / 第 49 列工作票号 / scope 过滤 OK / ' + buf.length + 'B';
   });
-  await step('plans', '周计划导出 → 回灌判重 + 48 列单行表头模板落位', async () => {
+  await step('plans', '周计划导出 → 回灌整批拒绝（判重前票号校验）+ 49 列单行表头模板落位', async () => {
     // 先造一条字段齐全的计划，保证往返有可比对的数据
     const mk = needOk(await api('POST', '/api/workPlans', {
       token, body: { name: '冒烟回灌计划', planType: '周计划', workType: '配农网工程', team: '施工一队', startDate: '2026-11-02 08:00:00', endDate: '2026-11-03 18:00:00', staffText: '张三/13800000000', voltage: '10kV' }
     }), 'plan POST');
     need(mk && mk.id, '响应缺少 id');
+    const beforeList = needOk(await api('GET', '/api/workPlans', { token }), 'list before');
+    const beforeCount = (Array.isArray(beforeList) ? beforeList : (beforeList.data || [])).filter(p => !p.deleted).length;
     const r = await fetch(base + '/api/workPlans/export?scope=week', { headers: { Authorization: 'Bearer ' + token } });
     const buf = Buffer.from(await r.arrayBuffer());
-    const total = xlsx.utils.decode_range(xlsx.read(buf, { type: 'buffer' }).Sheets.Sheet1['!ref']).e.r + 1;
     const fd = new FormData();
     fd.append('file', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'roundtrip.xlsx');
     const up = await fetch(base + '/api/workPlans/import?planType=' + encodeURIComponent('周计划'), { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd, signal: AbortSignal.timeout(15000) });
     const d = await up.json();
-    need(up.status === 200 && d && d.ok, '往返导入失败：' + brief(d));
-    // 判重后回灌行应全部跳过，且不改动已有记录
-    need(d.added === 0 && d.skipped === total - 2,
-      '判重应跳过全部 ' + (total - 2) + ' 条回灌行：' + brief(d));
+    // Step 5B 起：导出已带第 49 列工作票号 → 空号/旧号配电行在「业务判重之前」即整批拒绝
+    need(up.status === 400 && d && /缺少工作票号|已被其它存活记录占用|格式不合法/.test(String(d.error || '')),
+      '导出自带票号列，回灌应整批拒绝：' + up.status + ' ' + brief(d));
     const again = needOk(await api('GET', '/api/workPlans', { token }), 'list');
-    const hit = (Array.isArray(again) ? again : (again.data || [])).filter(p => p.name === '冒烟回灌计划' && !p.deleted);
-    need(hit.length === 1 && hit[0].id === mk.id, '判重后不应新增同名计划，实为 ' + hit.length + ' 条');
+    const afterList = Array.isArray(again) ? again : (again.data || []);
+    need(afterList.filter(p => !p.deleted).length === beforeCount, '整批拒绝不得新增记录');
+    const hit = afterList.filter(p => p.name === '冒烟回灌计划' && !p.deleted);
+    need(hit.length === 1 && hit[0].id === mk.id, '整批拒绝后不应新增同名计划，实为 ' + hit.length + ' 条');
     const a = hit[0];
     need(a && a.team === '施工一队' && a.startDate === '2026-11-02 08:00:00' && a.staffText === '张三/13800000000',
-      '判重跳过后原记录字段被改动：' + brief(a));
-    // 内置导入模板已改为 48 列单行表头（与导出逐列同名同序），按表头名称取列验证不错位
+      '拒绝后原记录字段被改动：' + brief(a));
+    // 内置导入模板已改为 49 列单行表头（与导出逐列同名同序），按表头名称取列验证不错位
     const tplWb = xlsx.read(fs.readFileSync(path.join(ROOT, 'assets', 'plan-import-template.xlsx')), { type: 'buffer' });
     const ts = tplWb.Sheets[tplWb.SheetNames[0]];
     const rng = xlsx.utils.decode_range(ts['!ref']);
+    need(rng.e.c + 1 === 49, '模板应为 49 列，实为 ' + (rng.e.c + 1));
     const findCol = nm => {
       for (let R = 0; R <= 1; R++) for (let C = 0; C <= rng.e.c; C++) {
         const c = ts[xlsx.utils.encode_cell({ r: R, c: C })];
@@ -1798,6 +1802,8 @@ async function runSmoke() {
     put('杆塔（基）', '9'); put('停电范围', '模板停电范围');
     put('作业实施（施工）人员（不包含工作负责人）', '甲/13000000001；乙/13000000002');
     put('作业人员（共多少人）', '9');   // 与名单人数冲突时，应以名单为准（导入按名单重算）
+    // 第 49 列必须填合规新格式号：模板未填票种 → 默认配电第二种（码 7），故用 7 码
+    put('工作票号', '2026117999');
     ts['!ref'] = xlsx.utils.encode_range({ s: rng.s, e: { r: 2, c: rng.e.c } });   // 模板原本只有两行表头，写入行后要扩范围
     const tplOut = xlsx.utils.book_new();
     xlsx.utils.book_append_sheet(tplOut, ts, tplWb.SheetNames[0]);
@@ -1810,11 +1816,12 @@ async function runSmoke() {
     const got = needOk(await api('GET', '/api/workPlans', { token }), 'list');
     const tp = (Array.isArray(got) ? got : (got.data || [])).find(p => p.name === '冒烟模板列位计划');
     need(tp && tp.wlPole === '9' && tp.outageRange === '模板停电范围',
-      '48 列模板列位错位：' + brief(tp && { wlPole: tp.wlPole, outageRange: tp.outageRange }));
+      '49 列模板列位错位：' + brief(tp && { wlPole: tp.wlPole, outageRange: tp.outageRange }));
     need(tp.startDate === '2026-11-09 08:00:00' && tp.endDate === '2026-11-09 18:00:00',
       '只写到小时的时间未补全：' + brief({ s: tp.startDate, e: tp.endDate }));
     need(tp.staffCount === '2', '人数应按施工人员名单重算为 2，实为 ' + tp.staffCount);
-    return '判重跳过回灌 ' + d.skipped + ' 条；48 列单行表头模板落位正确';
+    need(tp.workTicketNo === '2026117999', '第 49 列工作票号应落库，实为 ' + tp.workTicketNo);
+    return '回灌整批拒绝（票号校验先于判重）；49 列单行表头模板落位正确且票号落库';
   });
   await step('plans', '施工资料图纸：上传 → 下载 → 删除（老记录无 drawings 不报错）', async () => {
     const p = needOk(await api('POST', '/api/workPlans', { token, body: { name: '冒烟图纸计划', planType: '周计划' } }), 'plan POST');
@@ -3404,7 +3411,7 @@ async function runSmoke() {
     return '时刻沿用 08:00/10:00 + 按天工程量 + 预览不落库 + 三类 400 + 缺天逐天列全 + 无标题提示 + 超范围';
   });
 
-  await step('plans', '拆分执行：父收缩首日 + 子计划命名/状态/编号沿用 + 勘察克隆 + 幂等与子计划再拆', async () => {
+  await step('plans', '拆分确认：父收缩首日 + 子计划命名/状态 + 编号沿用（非配电）+ 不复制勘察 + 重放/再拆', async () => {
     const survey = {
       surveyNo: '202611001', team: '冒烟班组', dualName: '10kV冒烟线', workTask: '立杆', envDesc: '晴',
       surveyDate: '2026-11-10', grouping: '不分小组', groups: [],
@@ -3412,6 +3419,7 @@ async function runSmoke() {
         { id: 'hz_seed_b', title: '触电', measure: '验电接地', scope: '全组' }],
       createdAt: '2026-11-10 09:00:00', updatedAt: '2026-11-10 09:00:00'
     };
+    // 非配电（无 ticketType）→ 子计划沿用源号，用于验证「沿既有口径」未被新规则破坏
     const parent = needOk(await api('POST', '/api/workPlans', { token, body: {
       planType: '周计划', name: '冒烟拆分三日计划', status: '未执行',
       startDate: '2026-11-11 08:00:00', endDate: '2026-11-13 10:00:00',
@@ -3419,67 +3427,87 @@ async function runSmoke() {
       surveyNo: '202611001', workTicketNo: '202611680001', team: '冒烟班组', leader: '张三',
       wlPole: '9', wlCable: '9', generatedFiles: [{ id: 'gf1', name: '旧生成物.docx' }], survey
     } }), 'POST 拆分父计划');
-    const sp = needOk(await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: { days: [
-      { date: '2026-11-11', content: '电杆组立3根', quantities: { wlPole: 3 } },
-      { date: '2026-11-12', content: '电缆敷设1200米', quantities: { wlCable: 1.2 } },
-      { date: '2026-11-13', content: '导线架设2.5km', quantities: { wlLine1035: 2.5 } }
-    ] } }), 'split');
-    need(sp.ok === true && sp.children.length === 2 && !!sp.batchId, '应生成 2 条子计划：' + brief(sp));
+    // Step 7：确认需先预览并携带 previewVersion + 完整 days
+    const pv = needOk(await api('POST', '/api/workPlans/' + parent.id + '/split/preview', { token, body: {} }), 'preview');
+    const sp = needOk(await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: {
+      previewVersion: pv.previewVersion,
+      days: pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }))
+    } }), 'split');
+    need(sp.ok === true && sp.createdPlanIds.length === 2 && !!sp.batchId && sp.firstDayPlanId === parent.id,
+      '应生成 2 条子计划且返回 new 字段：' + brief(sp));
 
     const p = needOk(await api('GET', '/api/workPlans/' + parent.id, { token }), '父计划详情');
     need(p.endDate === '2026-11-11 10:00:00', '父计划应收缩为第一天：' + p.endDate);
     need(p.content === '电杆组立3根' && p.wlPole === '3' && p.wlCable === '',
       '父计划内容与工程量应换成第一天：' + brief({ c: p.content, w: p.wlPole, c2: p.wlCable }));
-    need(p.splitBatchId === sp.batchId && p.splitSnapshot && p.splitSnapshot.endDate === '2026-11-13 10:00:00',
-      '父计划快照应保留原起止：' + brief(p.splitSnapshot));
-    need(p.splitSnapshot.content.indexOf('12日') > -1 && p.splitSnapshot.wlPole === '9',
-      '快照应保留原内容与工程量：' + brief({ c: p.splitSnapshot.content, w: p.splitSnapshot.wlPole }));
+    need(p.splitBatchId === sp.batchId, '父计划应带本批批次：' + p.splitBatchId);
+    need(!p.splitSnapshot, 'Step 7 起不再写拆分快照：' + brief(p.splitSnapshot));
+    need(p.splitCommitVersion === pv.previewVersion, '首日应写入本次 previewVersion：' + p.splitCommitVersion);
     need(!p.survey.splitBatchId && p.survey.updatedAt === '2026-11-10 09:00:00' && p.survey.hazardPoints[0].id === 'hz_seed_a',
       '父计划勘察不应被拆分改动：' + brief({ b: p.survey.splitBatchId, u: p.survey.updatedAt }));
 
-    const c1 = needOk(await api('GET', '/api/workPlans/' + sp.children[0].id, { token }), '子计划1详情');
+    const c1 = needOk(await api('GET', '/api/workPlans/' + sp.createdPlanIds[0], { token }), '子计划1详情');
     need(c1.name === '冒烟拆分三日计划（11月12日）', '子计划名应为原名 + （M月D日）：' + c1.name);
     need(c1.startDate === '2026-11-12 08:00:00' && c1.endDate === '2026-11-12 10:00:00',
       '子计划起止应为当天 + 父计划时刻：' + c1.startDate + ' ~ ' + c1.endDate);
     need(c1.planType === '周计划' && c1.status === '未执行' && c1.parentPlanId === parent.id && c1.splitBatchId === sp.batchId,
       '子计划类型/状态/父引用不符：' + brief({ t: c1.planType, s: c1.status, p: c1.parentPlanId }));
-    need(c1.surveyNo === '202611001' && c1.workTicketNo === '202611680001', '子计划应沿用父计划勘察/工作票编号，不生成子编号');
+    need(c1.surveyNo === '202611001' && c1.workTicketNo === '202611680001',
+      '非配电子计划沿用源勘察号与源工作票号（沿既有口径）');
     need(!c1.splitSnapshot && !c1.generatedFiles, '子计划不应继承快照与生成物：' + brief({ s: !!c1.splitSnapshot, g: !!c1.generatedFiles }));
-    need(c1.survey && c1.survey.splitBatchId === sp.batchId && c1.survey.hazardPoints.length === 2,
-      '子计划勘察应为克隆且带本批标记：' + brief(c1.survey && { b: c1.survey.splitBatchId, n: (c1.survey.hazardPoints || []).length }));
-    const hIds = c1.survey.hazardPoints.map(h => h.id);
-    need(hIds.every(id => id !== 'hz_seed_a' && id !== 'hz_seed_b') && hIds[0] !== hIds[1],
-      '克隆勘察的危险点应重发 id：' + brief(hIds));
-    need(c1.survey.createdAt !== '2026-11-10 09:00:00' && c1.survey.updatedAt === c1.survey.createdAt,
-      '克隆勘察时间戳应刷新为拆分时刻：' + brief({ c: c1.survey.createdAt, u: c1.survey.updatedAt }));
+    need(!c1.survey, '不复制勘察对象（各日共用源勘察号）：' + brief(c1.survey));
+    need(!c1.splitCommitVersion, '仅首日写 splitCommitVersion');
 
-    const again = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: { days: [] } });
-    need(again.status === 409 && /已拆分/.test(again.data.error), '已拆分的父计划再拆应 409：' + again.status + ' ' + brief(again.data));
-    const sub = await api('POST', '/api/workPlans/' + sp.children[0].id + '/split', { token, body: { days: [] } });
-    need(sub.status === 400 && /子计划不能再次拆分/.test(sub.data.error), '子计划再拆应 400：' + sub.status + ' ' + brief(sub.data));
+    // 同一请求再次确认 → 精确重放 200（不是已拆拒绝）
+    const again = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: {
+      previewVersion: pv.previewVersion,
+      days: pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }))
+    } });
+    need(again.status === 200 && again.data.replay === true, '同请求重复确认应精确重放 200：' + again.status + ' ' + brief(again.data));
+    need((again.data.createdPlanIds || []).join(',') === sp.createdPlanIds.join(','), '重放应返回同一批子记录');
+    // 改动内容（同版本）→ 已拆拒绝
+    const tampered = pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }));
+    tampered[0].content = '改过内容';
+    const bad = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: { previewVersion: pv.previewVersion, days: tampered } });
+    need(bad.status === 409 && bad.data.error === 'ALREADY_SPLIT', '已拆 + days 不同应 409 ALREADY_SPLIT：' + bad.status + ' ' + brief(bad.data));
+    const sub = await api('POST', '/api/workPlans/' + sp.createdPlanIds[0] + '/split', { token, body: { previewVersion: pv.previewVersion, days: tampered } });
+    need(sub.status === 409 && sub.data.error === 'ALREADY_SPLIT', '子计划再拆应 409 ALREADY_SPLIT：' + sub.status + ' ' + brief(sub.data));
 
-    // 提交天数与计划天数不一致时服务端重跑校验（不落库）
+    // 提交天数与计划天数不一致 / 版本过期（不落库）
     const guard = needOk(await api('POST', '/api/workPlans', { token, body: {
       planType: '周计划', name: '冒烟拆分校验', status: '未执行',
       startDate: '2026-11-11 08:00:00', endDate: '2026-11-12 10:00:00', content: '11日：立杆3根；12日：放线'
     } }), 'POST 校验计划');
-    const g1 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-11', content: '立杆3根' }] } });
+    const gpv = needOk(await api('POST', '/api/workPlans/' + guard.id + '/split/preview', { token, body: {} }), 'preview 校验计划');
+    const g1 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: {
+      previewVersion: gpv.previewVersion, days: [{ date: '2026-11-11', content: '立杆3根' }]
+    } });
     need(g1.status === 400 && g1.data.errors.indexOf('工作内容缺少计划日期：2026-11-12') > -1,
       '缺天应 400 并逐天列全：' + g1.status + ' ' + brief(g1.data));
-    const g2 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-11', content: '  ' }, { date: '2026-11-12', content: '放线' }] } });
+    const g2 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: {
+      previewVersion: gpv.previewVersion,
+      days: [{ date: '2026-11-11', content: '  ' }, { date: '2026-11-12', content: '放线' }]
+    } });
     need(g2.status === 400 && g2.data.errors.some(e => /内容为空/.test(e)), '空内容应 400：' + g2.status + ' ' + brief(g2.data));
-    const g3 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-10', content: 'x' }, { date: '2026-11-12', content: '放线' }] } });
-    need(g3.status === 400 && g3.data.errors.some(e => /不在计划日期范围内/.test(e)), '超范围应 400：' + g3.status + ' ' + brief(g3.data));
+    const g3 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: {
+      previewVersion: 'v1:stale:stale:stale',
+      days: [{ date: '2026-11-11', content: '立杆3根' }, { date: '2026-11-12', content: '放线' }]
+    } });
+    need(g3.status === 409 && g3.data.error === 'PREVIEW_STALE', '版本不符应 409 PREVIEW_STALE：' + g3.status + ' ' + brief(g3.data));
+    const g4 = await api('POST', '/api/workPlans/' + guard.id + '/split', { token, body: { days: [{ date: '2026-11-11', content: 'x' }] } });
+    need(g4.status === 400 && g4.data.error === 'INVALID_INPUT', '缺 previewVersion 应 400 INVALID_INPUT：' + g4.status + ' ' + brief(g4.data));
     const still = needOk(await api('GET', '/api/workPlans/' + guard.id, { token }), '校验后详情');
     need(!still.splitBatchId && still.endDate === '2026-11-12 10:00:00', '校验失败不得落库：' + brief(still.endDate));
     await api('DELETE', '/api/workPlans/' + guard.id, { token });
-    return '父收缩为 08:00–10:00 首日 / 子计划（11月12日）未执行 + 编号沿用 / 勘察克隆重发 id / 再拆 409 与 400 / 三类提交校验 400 不落库';
+    return '父收缩首日 / 子计划命名与状态 / 非配电号沿用 + 不复制勘察 / 不再写快照 / 同请求重放 200 / 已拆 409 / 缺天·空内容·过期·缺版本 400/409 不落库';
   });
 
   await step('plans', '拆分用例矩阵：七天/两天字段沿用/跨月/只有工序无地点/单日拒/幂等总数不变', async () => {
     const mk = async (body, label) => needOk(await api('POST', '/api/workPlans', { token, body }), label || 'plan POST').id;
     const pvOf = async id => needOk(await api('POST', '/api/workPlans/' + id + '/split/preview', { token, body: {} }), 'preview');
     const daysOf = pv => pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }));
+    // Step 7：确认必须带 previewVersion + 完整 days
+    const bodyOf = pv => ({ previewVersion: pv.previewVersion, days: daysOf(pv) });
 
     // ① 七天完整 → 父 + 6 子，各日内容一一对应
     const seven = await mk({ planType: '周计划', name: '冒烟七天计划', status: '未执行',
@@ -3487,10 +3515,10 @@ async function runSmoke() {
       content: '1日：电杆组立3根\n2日：电缆敷设1200米\n3日：导线架设2.5km\n4日：环网柜安装1台\n5日：真空开关安装2台\n6日：变压器安装1台\n7日：清理现场' });
     const pv7 = await pvOf(seven);
     need(pv7.ok === true && pv7.days.length === 7, '七天应切出 7 行：' + brief(pv7.errors));
-    const sp7 = needOk(await api('POST', '/api/workPlans/' + seven + '/split', { token, body: { days: daysOf(pv7) } }), 'split 7 天');
-    need(sp7.children.length === 6, '七天应生成 6 条子计划：' + sp7.children.length);
+    const sp7 = needOk(await api('POST', '/api/workPlans/' + seven + '/split', { token, body: bodyOf(pv7) }), 'split 7 天');
+    need(sp7.createdPlanIds.length === 6, '七天应生成 6 条子计划：' + sp7.createdPlanIds.length);
     const kids = [];
-    for (const c of sp7.children) kids.push(needOk(await api('GET', '/api/workPlans/' + c.id, { token }), '七天子计划'));
+    for (const id of sp7.createdPlanIds) kids.push(needOk(await api('GET', '/api/workPlans/' + id, { token }), '七天子计划'));
     need(kids.map(k => k.startDate.slice(0, 10)).join(',') === '2026-11-02,2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-07',
       '子计划应逐日递增：' + brief(kids.map(k => k.startDate)));
     need(kids[0].content === '电缆敷设1200米' && kids[5].content === '清理现场',
@@ -3502,22 +3530,30 @@ async function runSmoke() {
     const two = await mk({ planType: '周计划', name: '冒烟字段沿用计划', status: '未执行',
       startDate: '2026-11-20 08:00:00', endDate: '2026-11-21 10:00:00',
       content: '20日：电杆组立3根；21日：电缆敷设1200米',
-      ticketType: '配电：配电第一种工作票', team: '冒烟班组', chargePerson: '李四', chargePersonPhone: '13900000009',
+      ticketType: '配电：配电第一种工作票', ticketNoMode: 'auto', team: '冒烟班组', chargePerson: '李四', chargePersonPhone: '13900000009',
       staffText: '张三/13800138000；李四/13900000009', station: '冒烟变电站', voltage: '10kV',
-      planNote: '沿用备注', surveyNo: '202611003', workTicketNo: '202611680003' });
+      planNote: '沿用备注', surveyNo: '202611003' });
     const pv2 = await pvOf(two);
     need(pv2.ok === true && pv2.days.length === 2, '两天应切出 2 行：' + brief(pv2.errors));
-    const sp2 = needOk(await api('POST', '/api/workPlans/' + two + '/split', { token, body: { days: daysOf(pv2) } }), 'split 2 天');
-    need(sp2.children.length === 1, '两天应生成 1 条子计划：' + sp2.children.length);
-    const k2 = needOk(await api('GET', '/api/workPlans/' + sp2.children[0].id, { token }), '两天子计划');
+    const sp2 = needOk(await api('POST', '/api/workPlans/' + two + '/split', { token, body: bodyOf(pv2) }), 'split 2 天');
+    need(sp2.createdPlanIds.length === 1, '两天应生成 1 条子计划：' + sp2.createdPlanIds.length);
+    const k2 = needOk(await api('GET', '/api/workPlans/' + sp2.createdPlanIds[0], { token }), '两天子计划');
     const keepFields = {
       ticketType: '配电：配电第一种工作票', team: '冒烟班组', chargePerson: '李四', chargePersonPhone: '13900000009',
       staffText: '张三/13800138000；李四/13900000009', station: '冒烟变电站', voltage: '10kV',
-      planNote: '沿用备注', surveyNo: '202611003', workTicketNo: '202611680003'
+      planNote: '沿用备注', surveyNo: '202611003'
     };
     Object.keys(keepFields).forEach(f =>
       need(String(k2[f]) === keepFields[f], '子计划应沿用父计划字段 ' + f + '：' + k2[f]));
     need(k2.content === '电缆敷设1200米' && k2.name === '冒烟字段沿用计划（11月21日）', '子计划内容/名称错：' + brief({ c: k2.content, n: k2.name }));
+    // Step 7：非首日配电按各自月份取新号（源号为当月新格式号，后日应为其流水 +1）
+    const pTwo = needOk(await api('GET', '/api/workPlans/' + two, { token }), '两天父计划');
+    const srcNo = String(pTwo.workTicketNo || '');
+    const expectNo = /^\d{6}[679]\d{3}$/.test(srcNo)
+      ? srcNo.slice(0, 6) + srcNo.slice(6, 7) + String(Number(srcNo.slice(7)) + 1).padStart(3, '0')
+      : null;
+    need(expectNo && k2.workTicketNo === expectNo, '后日应取源号 +1（' + expectNo + '），实为 ' + k2.workTicketNo);
+    need(!k2.survey, '子计划不得复制勘察对象（各日共用勘察号）');
 
     // ③ 跨月 11-29→12-02：月份按段落顺序推断
     const cross = await mk({ planType: '周计划', name: '冒烟跨月计划', status: '未执行',
@@ -3541,93 +3577,43 @@ async function runSmoke() {
     const r1 = await api('POST', '/api/workPlans/' + one + '/split', { token, body: { days: [{ date: '2026-11-11', content: '电杆组立3根' }] } });
     need(r1.status === 400 && /单日计划无需拆分/.test(r1.data.error), '单日计划 split 应 400：' + r1.status + ' ' + brief(r1.data));
 
-    // ⑥ 幂等：同一计划连调两次 split → 第二次 409，workPlans 总数不变
+    // ⑥ 幂等：同一请求连调两次 → 第二次按精确重放 200，总数不变
     const before = (await listOk('/api/workPlans', token)).length;
-    const again = await api('POST', '/api/workPlans/' + two + '/split', { token, body: { days: daysOf(pv2) } });
+    const again = await api('POST', '/api/workPlans/' + two + '/split', { token, body: bodyOf(pv2) });
     const after = (await listOk('/api/workPlans', token)).length;
-    need(again.status === 409 && before === after, '重复拆分应 409 且总数不变：' + again.status + ' ' + before + '→' + after);
+    need(again.status === 200 && again.data.replay === true && before === after, '重复确认应精确重放 200 且总数不变：' + again.status + ' ' + brief(again.data) + ' ' + before + '→' + after);
+    need((again.data.createdPlanIds || []).join(',') === sp2.createdPlanIds.join(','), '重放应返回同一 createdPlanIds');
 
     for (const id of [seven, two, cross, noLoc, one]) await api('DELETE', '/api/workPlans/' + id, { token });
     return '七天父+6子逐日对应 / 两天 10 字段沿用 + 内容去前缀 / 跨月 11-29→12-02 / 无地点可解析 / 单日 400 / 幂等 409 总数不变';
   });
 
-  await step('plans', '撤销拆分：四类拦截（状态/编辑/工程量/勘察）+ 通过后恢复快照并删子计划', async () => {
-    const surveySeed = {
-      surveyNo: '202611002', team: '冒烟班组', dualName: '10kV冒烟线', workTask: '立杆', envDesc: '晴',
-      surveyDate: '2026-11-10', grouping: '不分小组', groups: [], hazardPoints: [],
-      createdAt: '2026-11-10 09:00:00', updatedAt: '2026-11-10 09:00:00'
-    };
-    // A：5 天 → 4 条子计划，各触发一类拦截
-    const aId = needOk(await api('POST', '/api/workPlans', { token, body: {
-      planType: '周计划', name: '冒烟撤销拦截计划', status: '未执行',
-      startDate: '2026-11-11 08:00:00', endDate: '2026-11-15 10:00:00',
-      content: '11日：电杆组立3根；12日：电缆敷设1200米；13日：导线架设2.5km；14日：环网柜安装1台；15日：清理现场',
-      survey: surveySeed
-    } }), 'POST 撤销拦截计划').id;
-    const sp = needOk(await api('POST', '/api/workPlans/' + aId + '/split', { token, body: { days: [
-      { date: '2026-11-11', content: '电杆组立3根' },
-      { date: '2026-11-12', content: '电缆敷设1200米' },
-      { date: '2026-11-13', content: '导线架设2.5km' },
-      { date: '2026-11-14', content: '环网柜安装1台' },
-      { date: '2026-11-15', content: '清理现场' }
-    ] } }), 'split 5 天');
-    need(sp.children.length === 4, '应拆出 4 条子计划：' + brief(sp.children));
-    const [c1, c2, c3, c4] = sp.children.map(c => c.id);
-
-    needOk(await api('PUT', '/api/workPlans/' + c1, { token, body: { status: '已执行' } }), '子计划改状态');
-    needOk(await api('PUT', '/api/workPlans/' + c2, { token, body: { content: '拆分后改过的工作内容' } }), '子计划改内容');
-    needOk(await api('PUT', '/api/workPlans/' + c3 + '/quantities', { token, body: { wlPole: '8' } }), '子计划改工程量');
-    needOk(await api('PUT', '/api/workPlans/' + c4 + '/survey', { token, body: { surveyUnit: '冒烟勘察单位' } }), '子计划改勘察');
-
-    const blocked = await api('POST', '/api/workPlans/' + aId + '/unsplit', { token });
-    need(blocked.status === 409 && Array.isArray(blocked.data.blocks) && blocked.data.blocks.length === 4,
-      '四条子计划应各报一条拦截：' + blocked.status + ' ' + brief(blocked.data));
-    const all = blocked.data.blocks.join('\n');
-    need(/状态为「已执行」/.test(all), '缺少「状态非未执行」拦截：' + all);
-    need(/拆分后被编辑过/.test(all), '缺少「拆分后被编辑」拦截：' + all);
-    need(/修改过工程量/.test(all), '缺少「修改过工程量」拦截：' + all);
-    need(/勘察记录被编辑过/.test(all), '缺少「勘察被编辑」拦截：' + all);
-
-    // B：未改动的两天计划 → 撤销应恢复快照并逻辑删除子计划
-    const bId = needOk(await api('POST', '/api/workPlans', { token, body: {
-      planType: '周计划', name: '冒烟可撤销计划', status: '未执行',
-      startDate: '2026-12-01 08:00:00', endDate: '2026-12-02 10:00:00',
-      content: '1日：电杆组立3根；2日：电缆敷设1200米', wlPole: '7', survey: surveySeed
-    } }), 'POST 可撤销计划').id;
-    const sp2 = needOk(await api('POST', '/api/workPlans/' + bId + '/split', { token, body: { days: [
-      { date: '2026-12-01', content: '电杆组立3根', quantities: { wlPole: 3 } },
-      { date: '2026-12-02', content: '电缆敷设1200米', quantities: { wlCable: 1.2 } }
-    ] } }), 'split 2 天');
-    const childId = sp2.children[0].id;
-    const un = needOk(await api('POST', '/api/workPlans/' + bId + '/unsplit', { token }), 'unsplit');
-    need(un.ok === true && un.removed === 1, '撤销应删除 1 条子计划：' + brief(un));
-    const back = needOk(await api('GET', '/api/workPlans/' + bId, { token }), '撤销后父计划');
-    need(back.endDate === '2026-12-02 10:00:00' && back.content === '1日：电杆组立3根；2日：电缆敷设1200米' && back.wlPole === '7',
-      '撤销后应恢复拆分前起止/内容/工程量：' + brief({ e: back.endDate, c: back.content, w: back.wlPole }));
-    need(!back.splitBatchId && !back.splitSnapshot, '撤销后应清除批次与快照');
-    const gone = await api('GET', '/api/workPlans/' + childId, { token });
-    need(gone.status === 404, '撤销后子计划应不可见（逻辑删除）：' + gone.status);
-    const listed = (await listOk('/api/workPlans', token)).map(x => x.id);
-    need(listed.indexOf(bId) > -1 && listed.indexOf(childId) < 0, '列表应只剩父计划');
-
-    // C：拆分时父计划没有勘察 → 子计划另建勘察后，撤销应报「已有独立勘察记录」
-    const cId = needOk(await api('POST', '/api/workPlans', { token, body: {
-      planType: '周计划', name: '冒烟无勘察计划', status: '未执行',
-      startDate: '2026-12-05 08:00:00', endDate: '2026-12-06 10:00:00',
-      content: '5日：电杆组立3根；6日：电缆敷设1200米'
-    } }), 'POST 无勘察计划').id;
-    const sp3 = needOk(await api('POST', '/api/workPlans/' + cId + '/split', { token, body: { days: [
-      { date: '2026-12-05', content: '电杆组立3根' },
-      { date: '2026-12-06', content: '电缆敷设1200米' }
-    ] } }), 'split 无勘察');
-    const noSv = needOk(await api('GET', '/api/workPlans/' + sp3.children[0].id, { token }), '子计划（无勘察）');
-    need(!noSv.survey, '父计划无勘察时子计划不应凭空生成勘察：' + JSON.stringify(noSv.survey || null));
-    needOk(await api('PUT', '/api/workPlans/' + sp3.children[0].id + '/survey',
-      { token, body: { surveyUnit: '冒烟单位', surveyDate: '2026-11-10' } }), '子计划新建勘察');
-    const b3 = await api('POST', '/api/workPlans/' + cId + '/unsplit', { token });
-    need(b3.status === 409 && (b3.data.blocks || []).some(x => /已有独立勘察记录/.test(x)),
-      '子计划另建勘察后撤销应报「已有独立勘察记录」：' + b3.status + ' ' + brief(b3.data));
-    return '四类拦截各 1 条（状态/编辑/工程量/勘察）+ 另建勘察 1 条 + 正常撤销恢复快照、删 1 条子计划并逻辑删除';
+  await step('plans', '撤销拆分已关闭：410 SPLIT_IRREVERSIBLE，历史快照与父子关系不被恢复/删除', async () => {
+    const p = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟撤销关闭计划', status: '未执行',
+      startDate: '2026-11-11 08:00:00', endDate: '2026-11-12 10:00:00', content: '11日：立杆3根；12日：放线'
+    } }), 'POST 撤销关闭计划');
+    const pv = needOk(await api('POST', '/api/workPlans/' + p.id + '/split/preview', { token, body: {} }), 'preview');
+    const sp = needOk(await api('POST', '/api/workPlans/' + p.id + '/split', { token, body: {
+      previewVersion: pv.previewVersion,
+      days: pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }))
+    } }), 'split');
+    const before = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), 'split 后详情');
+    const r = await api('POST', '/api/workPlans/' + p.id + '/unsplit', { token });
+    need(r.status === 410 && r.data.error === 'SPLIT_IRREVERSIBLE',
+      '撤销应 410 SPLIT_IRREVERSIBLE：' + r.status + ' ' + brief(r.data));
+    const after = needOk(await api('GET', '/api/workPlans/' + p.id, { token }), '撤销后详情');
+    need(after.splitBatchId === before.splitBatchId, '撤销失败不得清除批次');
+    need(after.endDate === before.endDate, '撤销失败不得恢复父计划起止（旧快照回滚走不通）：' + after.endDate);
+    need(!after.splitSnapshot, 'Step 7 起不再写快照，撤销也不得凭空生成');
+    const kids = (await listOk('/api/workPlans', token)).filter(x => !x.deleted && x.parentPlanId === p.id);
+    need(kids.length === sp.createdPlanIds.length, '子计划不得被删除：' + kids.length + ' vs ' + sp.createdPlanIds.length);
+    // 再次调用仍 410（无幂等恢复口）
+    const r2 = await api('POST', '/api/workPlans/' + p.id + '/unsplit', { token });
+    need(r2.status === 410, '重复调用撤销仍应 410：' + r2.status);
+    for (const cid of sp.createdPlanIds) await api('DELETE', '/api/workPlans/' + cid, { token });
+    await api('DELETE', '/api/workPlans/' + p.id, { token });
+    return '撤销 410 SPLIT_IRREVERSIBLE / 批次与起止未恢复 / 无快照生成 / 子计划未删 / 重复调用仍 410';
   });
 
   await step('结构', '周计划拆分前端接线与列表样式：脚本顺序/组件注册/入口守卫/徽标/改期拦截/窄屏卡片/操作列平铺/莫兰迪五色/全黑字', async () => {
@@ -3644,7 +3630,7 @@ async function runSmoke() {
     need(/planType !== '周计划'[\s\S]{0,120}status !== '未执行'[\s\S]{0,160}parentPlanId \|\| row\.splitBatchId/.test(p),
       'canSplit 应排除非周计划/非未执行/子计划/已拆分');
     need(/v-if="canSplit\(row\)"[^>]*>拆分<\/el-button>/.test(p), '「拆分」应按 canSplit 直接平铺显示');
-    need(/v-if="row\.splitBatchId"[^>]*>撤销拆分<\/el-button>/.test(p), '「撤销拆分」应只对已拆分父计划显示');
+    need(!/撤销拆分/.test(p), 'Step 7 起应移除全部撤销拆分入口');
     need(!/plan-act-more/.test(p) && !/<el-dropdown/.test(p), '操作列应全部平铺，不再收进「更多」下拉');
     need(/TICKET_TONE[\s\S]{0,600}tk-a5/.test(p), 'plans.js 应定义五种工作票 → 行底色映射');
     ['tk-a1', 'tk-a2', 'tk-a3', 'tk-a4', 'tk-a5'].forEach(c =>
@@ -3675,19 +3661,19 @@ async function runSmoke() {
       '票种色条应移到操作列左缘，序号列不再有色条');
     need(['#BEC5D2', '#CEDEE5', '#E7E8EC', '#F3EDEF', '#FFF2F2'].every(c => html.includes(c)),
       '色条颜色应为同色系 45% 原色（与底色同源、只比底色深）');
-    need(/<span v-if="canSplit\(row\) \|\| row\.splitBatchId" class="plan-act-line">/.test(p)
+    need(/<span v-if="canSplit\(row\)" class="plan-act-line">/.test(p)
       && /v-if="canSplit\(row\)"[^>]*>拆分<\/el-button>/.test(p),
-      '「拆分/撤销拆分」应单独占操作列第三行（参考图布局）');
+      '「拆分」应单独占操作列第三行（撤销入口已移除）');
     need(/label="作业计划名称" min-width="240"/.test(p) && /label="操作" width="170"/.test(p)
       && /label="工作负责人联系电话" width="126"/.test(p),
       '列宽按参考图重分配：名称加宽、其余收紧、总宽不溢出');
     need(/th\.el-table__cell > \.cell,[\s\S]{0,120}padding-left:6px/.test(html),
       '单元格左右内边距应收紧到 6px，保证 12 列表头与日期不被省略');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
-    need(/该计划已拆分，修改起止时间需先撤销拆分/.test(p), '已拆分父计划改期应被拦截');
+    need(!/修改起止时间需先撤销拆分/.test(p), '已拆分计划改期限制应已移除（改期走专用 PUT 规则）');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
-    need(/qtyTouched/.test(d) && /rebuildContent/.test(d), '重新解析应保留用户改过的工程量');
-    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/改期拦截/窄屏卡片/工程量覆盖保留/操作列平铺/莫兰迪五色/统统黑字';
+    need(/currentDaysPayload/.test(d) && /previewVersion/.test(d), '重新预览应发送当前 days 并带 previewVersion 凭据');
+    return '顺序/组件注册/入口守卫/徽标/弹窗挂载/无撤销入口/改期放开/窄屏卡片/预览凭据/操作列平铺/莫兰迪五色/统统黑字';
   });
 
   await step('结构', '材料台账·出库管理四框：默认值/选项内容/三框联动过滤工程候选', async () => {
