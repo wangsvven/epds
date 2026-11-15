@@ -127,7 +127,10 @@ async function step(group, name, fn) {
 }
 
 function need(cond, msg) { if (!cond) throw new Error(msg); }
-function brief(data) { return JSON.stringify(data).slice(0, 220); }
+function brief(data) {
+  const s = JSON.stringify(data);
+  return String(s === undefined ? data : s).slice(0, 220);
+}
 function needOk(r, label) {
   need(r.status >= 200 && r.status < 300, (label || '') + ' 期望 2xx，实际 ' + r.status + ' ' + brief(r.data));
   return r.data;
@@ -3603,10 +3606,10 @@ async function runSmoke() {
       '响应 ID 数组应按 id 升序：' + brief(sp7.createdPlanIds));
     const kids = kidsRaw.slice().sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1
       : String(a.startDate) > String(b.startDate) ? 1 : 0));
-    need(kids.map(k => k.startDate.slice(0, 10)).join(',') === '2026-11-02,2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-07',
+    need(kids.map(k => String(k.startDate).slice(0, 10)).join(',') === '2026-11-02,2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-07',
       '子计划应逐日齐全：' + brief(kids.map(k => k.startDate)));
-    need(kids.every(k => k.name === '冒烟七天计划（' + Number(k.startDate.slice(5, 7)) + '月' + Number(k.startDate.slice(8, 10)) + '日）'),
-      '每条子记录名称日期须与自身 startDate 一致（日期完整性）：' + brief(kids.map(k => [k.startDate.slice(0, 10), k.name])));
+    need(kids.every(k => k.name === '冒烟七天计划（' + Number(String(k.startDate).slice(5, 7)) + '月' + Number(String(k.startDate).slice(8, 10)) + '日）'),
+      '每条子记录名称日期须与自身 startDate 一致（日期完整性）：' + brief(kids.map(k => [String(k.startDate).slice(0, 10), k.name])));
     need(kids[0].content === '电缆敷设1200米' && kids[5].content === '清理现场',
       '子计划内容应去掉日期前缀并逐日对应：' + brief(kids.map(k => k.content)));
     need(kids.map(k => k.name).join('|') === '冒烟七天计划（11月2日）|冒烟七天计划（11月3日）|冒烟七天计划（11月4日）|冒烟七天计划（11月5日）|冒烟七天计划（11月6日）|冒烟七天计划（11月7日）',
