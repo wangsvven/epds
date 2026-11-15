@@ -87,6 +87,7 @@
 
   // 配电新格式预填：存活记录中「同年月 + 该票种一位码」的新格式号取 max+1。
   // - 旧 11 位不计入（正则锚定 10 位新格式，服务端 parseDistWorkTicketNo 同口径）
+  // - 非字符串票号（数字 / 数组 / 对象 / null 等）直接跳过不计入，不做 String() 强转（2026-11-15 修正）
   // - 不补中间空号；软删记录不占号（GET 不返回，且 deleted 显式排除）
   // - 流水超 999 → 返回 null（耗尽）：由调用方明确提示，不生成 1000、不扩位、不跨月借号；
   //   预填只是手改起点，最终由服务端校验兜底（auto 服务端重算 / manual 服务端校验）
@@ -98,7 +99,11 @@
     let max = DIST_SERIAL_MIN - 1;   // 800：无占用时下一个号即 801（与服务端 allocateWorkTicketNo 同基线）
     (plans || []).forEach(p => {
       if (!p || p.deleted) return;
-      const m = noOf(p, 'workTicketNo').match(re);
+      // 2026-11-15 修正：号池逐条先判类型——非字符串票号（数字 / 数组 / 对象 / null 等）跳过不计入。
+      // 与 server/core/plan-ticket-no.js 的 parseDistWorkTicketNo（非字符串 → INVALID_INPUT、不进新流水）同口径；
+      // 不做 String() 强转，避免数字票号被误当新格式号占号或误判耗尽。
+      if (typeof p.workTicketNo !== 'string') return;
+      const m = p.workTicketNo.trim().match(re);
       if (m) max = Math.max(max, Number(m[1]));
     });
     const next = max + 1;

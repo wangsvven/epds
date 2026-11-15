@@ -20,6 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Module = require('module');
+const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
 const APP_PATH = require.resolve(path.join(ROOT, 'server/core/app.js'));
@@ -673,6 +674,220 @@ t('M3 用预填函数生成的号走 manual → 200 且落库逐字同号（校�
   assert.equal(r.res.statusCode, 200);
   assert.equal(r.last.workTicketNo, pre);
   assert.equal(state.saveCalls, 1);
+});
+
+/* ========== Step 4 修正（2026-11-15）：N 配电号池读取——非字符串票号不计入 ========== */
+g('N 配电号池读取：非字符串票号跳过不计入（与 Step 2 同口径）');
+t('N1 数字票号不计入：不占号、不抛异常；同值字符串仍照常计入（805→806）', () => {
+  const numeric = Number(PN('6', 801));
+  assert.doesNotThrow(() => planNo.nextDistTicketNo([{ workTicketNo: numeric }], YM, T1));
+  assert.equal(planNo.nextDistTicketNo([{ workTicketNo: numeric }], YM, T1), PN('6', 801));
+  assert.equal(planNo.nextDistTicketNo([{ workTicketNo: PN('6', 801) }], YM, T1), PN('6', 802));
+});
+t('N2 数字 999 不误判耗尽：仍取 801（修正前 String 强转会把 2026xx6999 当占号 → null）', () => {
+  assert.equal(planNo.nextDistTicketNo([{ workTicketNo: Number(PN('6', 999)) }], YM, T1), PN('6', 801));
+});
+t('N3 数组 / 对象 / null / 布尔 / undefined 票号逐项跳过且不抛异常', () => {
+  [[PN('6', 805)], { a: 1 }, null, true, undefined].forEach(v => {
+    assert.doesNotThrow(() => planNo.nextDistTicketNo([{ workTicketNo: v }], YM, T1), String(v));
+    assert.equal(planNo.nextDistTicketNo([{ workTicketNo: v }], YM, T1), PN('6', 801), String(v));
+  });
+});
+t('N4 前后端对照（数字票号）：前端 801；后端 parse 失败 INVALID_INPUT、allocate 801——结论一致', () => {
+  const numeric = Number(PN('6', 801));
+  const front = planNo.nextDistTicketNo([{ workTicketNo: numeric }], YM, T1);
+  const parsed = PTM.parseDistWorkTicketNo(numeric);
+  const alloc = PTM.allocateWorkTicketNo({ ticketType: T1, yearMonth: YM, records: [{ workTicketNo: numeric }] });
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.error, 'INVALID_INPUT');
+  assert.equal(alloc.ok, true);
+  assert.equal(alloc.workTicketNo, PN('6', 801));
+  assert.equal(front, alloc.workTicketNo);
+});
+t('N5 前后端对照（数组票号）：前端 801；后端 parse 失败、allocate 801——结论一致', () => {
+  const arr = [PN('6', 804)];
+  const front = planNo.nextDistTicketNo([{ workTicketNo: arr }], YM, T1);
+  assert.equal(PTM.parseDistWorkTicketNo(arr).ok, false);
+  const alloc = PTM.allocateWorkTicketNo({ ticketType: T1, yearMonth: YM, records: [{ workTicketNo: arr }] });
+  assert.equal(alloc.ok, true);
+  assert.equal(front, alloc.workTicketNo);
+});
+t('N6 畸形值集合逐项对照：前端「是否计入」与后端 parse「通过/失败」一一对应', () => {
+  [123, [PN('6', 801)], {}, null, true].forEach(v => {
+    const frontCounted = planNo.nextDistTicketNo([{ workTicketNo: v }], YM, T1) !== PN('6', 801);
+    assert.equal(frontCounted, PTM.parseDistWorkTicketNo(v).ok, JSON.stringify(v));
+  });
+});
+t('N7 线路 / 勘察预填算法逐字未变（本次只改配电号池读取）', () => {
+  assert.equal(planNo.nextTicketNo([{ workTicketNo: YM + '67' + '002', ticketType: L1 }], YM, L1), YM + '67' + '003');
+  assert.equal(planNo.nextTicketNo([], YM, '未映射的类型'), YM);
+  assert.equal(planNo.nextSurveyNo([{ surveyNo: YM + '004' }], YM), YM + '005');
+  assert.equal(planNo.nextSurveyNo([], YM), YM + '001');
+});
+
+/* ========== Step 4 修正：O views/plans.js 行为测试（真实 setup() 函数 + 桩网络/UI） ========== */
+/* 做法：vm 上下文按浏览器顺序加载真实 utils.js / plan-no.js / plan-staff.js / views/plans.js，
+ * 只桩掉 Vue（极简响应式）、ElementPlus（消息/弹窗）、api（记录请求载荷）、ServerTime（固定 2026-11-15）。
+ * 断言对象是真实 setup() 返回的 openAdd / submit / copyPlan / onTicketTypeChange / onTicketNoInput 的行为，
+ * 不是源码正则。vm 上下文内无 http / 无端口 / 无真实库。 */
+const YM_FRONT = '202611';   // 桩 ServerTime = 2026-11-15 09:30（本机时区）
+const FORM_MIN = {
+  name: 'ZT-Step4修正-行为', startDate: '2026-11-20 08:00:00', endDate: '2026-11-20 18:00:00',
+  team: '施工一班', staffText: '张三|13800000000', teamLeader: '李四'
+};
+const COPY_ROW = {
+  id: 'wp-old', name: 'ZT复制源', planType: '周计划', ticketType: T1,
+  workTicketNo: PN('6', 801), surveyNo: YM + '001', status: '未执行',
+  startDate: '2026-11-20 08:00:00', endDate: '2026-11-20 18:00:00',
+  team: '施工一班', staffText: '张三|13800000000', teamLeader: '李四',
+  createdAt: '2026-11-01T00:00:00.000Z'
+};
+function plansHarness() {
+  const calls = { post: [], put: [], get: [], error: [], warning: [], success: [] };
+  const sb = { console, setTimeout, clearTimeout, encodeURIComponent };
+  vm.createContext(sb);
+  vm.runInContext('globalThis.window = globalThis;', sb);
+  sb.addEventListener = () => {}; sb.removeEventListener = () => {};
+  sb.document = {
+    querySelectorAll: () => [], getElementById: () => null,
+    createElement: () => ({ click() {}, remove() {}, style: {} }), body: { appendChild() {} }
+  };
+  sb.Vue = {
+    ref: v => ({ value: v }),
+    reactive: o => o,
+    computed: fn => ({ get value() { return fn(); } }),
+    onMounted: () => {}, onUnmounted: () => {}, nextTick: fn => (fn ? fn() : undefined), watch: () => {}
+  };
+  sb.ServerTime = { now: () => new Date(2026, 10, 15, 9, 30, 0), ymd: () => '2026-11-15' };
+  sb.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  sb.api = {
+    async get(u) { calls.get.push(u); return []; },
+    async post(u, b) { calls.post.push({ url: u, body: b }); if (sb.__postError) throw sb.__postError; return Object.assign({ id: 'wp-new' }, b); },
+    async put(u, b) { calls.put.push({ url: u, body: b }); return Object.assign({}, b); },
+    async del() { return {}; }, async upload() { return {}; }, async download() { return {}; }
+  };
+  sb.ElementPlus = {
+    ElMessage: {
+      success: m => calls.success.push(m), error: m => calls.error.push(m),
+      warning: m => calls.warning.push(m), info: m => (calls.info = m)
+    },
+    ElMessageBox: {
+      confirm: () => Promise.resolve(), alert: () => Promise.resolve(), prompt: () => Promise.resolve({ value: '' })
+    }
+  };
+  ['public/js/utils.js', 'public/js/plan-no.js', 'public/js/plan-staff.js'].forEach(rel => {
+    vm.runInContext(fs.readFileSync(path.join(ROOT, rel), 'utf8'), sb, { filename: rel });
+  });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/js/views/plans.js'), 'utf8') + '\n;globalThis.__PlansView = PlansView;',
+    sb, { filename: 'views/plans.js' });
+  return { view: sb.__PlansView.setup(), calls, sb };
+}
+
+g('O views/plans.js 行为：mode 上报 / 编辑不变 / 错误后保留表单（真实函数调用）');
+t('O1 新建未手改 → 真实 submit 载荷 ticketNoMode=auto，预填号为配电新格式', async () => {
+  const h = plansHarness();
+  await h.view.openAdd();
+  Object.assign(h.view.dlg.form, FORM_MIN);
+  await h.view.submit();
+  assert.equal(h.calls.post.length, 1);
+  assert.equal(h.calls.post[0].url, '/api/workPlans');
+  assert.equal(h.calls.post[0].body.ticketNoMode, 'auto');
+  assert.equal(h.calls.put.length, 0);
+  assert.match(h.calls.post[0].body.workTicketNo, new RegExp('^' + YM_FRONT + '6\\d{3}$'));
+  assert.equal(h.calls.post[0].body.surveyNo, YM_FRONT + '001');
+});
+t('O2 新建手改票号（真实输入处理器置脏）→ 载荷 ticketNoMode=manual 且保留手填号', async () => {
+  const h = plansHarness();
+  await h.view.openAdd();
+  Object.assign(h.view.dlg.form, FORM_MIN);
+  h.view.dlg.form.workTicketNo = PN('6', 805);
+  h.view.onTicketNoInput();
+  await h.view.submit();
+  assert.equal(h.calls.post[0].body.ticketNoMode, 'manual');
+  assert.equal(h.calls.post[0].body.workTicketNo, PN('6', 805));
+});
+t('O3 月生周预填直提 → 真实 submit 载荷 ticketNoMode=auto（openAdd 同通道）', async () => {
+  const h = plansHarness();
+  await h.view.makeWeekFromMonth({
+    project: 'P-1', projectName: 'ZT月计划工程', team: '施工一班', leader: '李四', voltage: '10kV',
+    workType: '配农网工程', maintContent: '检修内容', maintDevice: '10kV线路',
+    outageStart: '2026-11-21 08:00', outageEnd: '2026-11-21 18:00'
+  });
+  const f = h.view.dlg.form;
+  assert.equal(f.planType, '周计划');
+  f.teamLeader = '李四'; f.staffText = '张三|13800000000';
+  await h.view.submit();
+  assert.equal(h.calls.post.length, 1);
+  assert.equal(h.calls.post[0].body.ticketNoMode, 'auto');
+});
+t('O4 月生周预填后手改再提 → ticketNoMode=manual', async () => {
+  const h = plansHarness();
+  await h.view.makeWeekFromMonth({
+    project: 'P-1', projectName: 'ZT月计划工程', team: '施工一班', leader: '李四', voltage: '10kV',
+    workType: '配农网工程', maintContent: '检修内容', maintDevice: '10kV线路',
+    outageStart: '2026-11-21 08:00', outageEnd: '2026-11-21 18:00'
+  });
+  const f = h.view.dlg.form;
+  f.teamLeader = '李四'; f.staffText = '张三|13800000000';
+  f.workTicketNo = PN('6', 807);
+  h.view.onTicketNoInput();
+  await h.view.submit();
+  assert.equal(h.calls.post[0].body.ticketNoMode, 'manual');
+  assert.equal(h.calls.post[0].body.workTicketNo, PN('6', 807));
+});
+t('O5 复制入口（真实 copyPlan）→ 载荷 ticketNoMode=auto，不走表单', async () => {
+  const h = plansHarness();
+  h.view.list.value = [COPY_ROW];
+  await h.view.copyPlan(COPY_ROW);
+  assert.equal(h.calls.post.length, 1);
+  const body = h.calls.post[0].body;
+  assert.equal(body.ticketNoMode, 'auto');
+  assert.equal(body.name, 'ZT复制源（副本）');
+  assert.equal(body.id, undefined);
+  assert.equal(h.view.dlg.visible, false);
+  assert.equal(h.calls.put.length, 0);
+});
+t('O6 编辑态：切票种不改写双号；真实 submit 走 PUT 且载荷不含 ticketNoMode', async () => {
+  const h = plansHarness();
+  h.view.list.value = [COPY_ROW];
+  h.view.dlg.editingId = COPY_ROW.id;
+  h.view.dlg.form = Object.assign({}, COPY_ROW);
+  h.view.dlg.editSnapshot = {
+    staffText: COPY_ROW.staffText, chargePerson: '', chargePersonPhone: '',
+    startDate: COPY_ROW.startDate, endDate: COPY_ROW.endDate
+  };
+  h.view.onTicketTypeChange(L1);                      // 编辑态切换票种
+  assert.equal(h.view.dlg.form.workTicketNo, PN('6', 801));
+  assert.equal(h.view.dlg.form.surveyNo, COPY_ROW.surveyNo);
+  h.view.dlg.form.ticketType = L1;
+  await h.view.submit();
+  assert.equal(h.calls.post.length, 0);
+  assert.equal(h.calls.put.length, 1);
+  const body = h.calls.put[0].body;
+  assert.ok(!('ticketNoMode' in body), '编辑 PUT 载荷不得含 ticketNoMode');
+  assert.equal(body.workTicketNo, PN('6', 801));
+  assert.equal(body.surveyNo, COPY_ROW.surveyNo);
+});
+t('O7 提交收到服务端错误（撞号 / 耗尽）后：表单内容保留、不关闭，提示为服务端明确文案', async () => {
+  const cases = [
+    ['DUPLICATE', '工作票号已被其它存活记录占用：' + PN('6', 801)],
+    ['EXHAUSTED', YM_LABEL + ' 月「' + T1 + '」工作票号 801–999 已用完，停止取号']
+  ];
+  for (const [code, message] of cases) {
+    const h = plansHarness();
+    await h.view.openAdd();
+    Object.assign(h.view.dlg.form, FORM_MIN);
+    const keepNo = h.view.dlg.form.workTicketNo;
+    h.sb.__postError = Object.assign(new Error(code), { status: 400, data: { ok: false, error: code, message } });
+    await h.view.submit();
+    assert.equal(h.view.dlg.visible, true, code + ' 后表单不得关闭');
+    assert.equal(h.view.dlg.form.name, FORM_MIN.name, code + ' 后名称应保留');
+    assert.equal(h.view.dlg.form.workTicketNo, keepNo, code + ' 后票号应保留');
+    assert.equal(h.view.dlg.form.startDate, FORM_MIN.startDate, code + ' 后开始时间应保留');
+    assert.equal(h.view.dlg.form.teamLeader, FORM_MIN.teamLeader, code + ' 后班组长应保留');
+    assert.equal(h.calls.error[0], message, code + ' 应显示服务端明确文案');
+    assert.equal(h.calls.put.length, 0);
+  }
 });
 
 /* ---------- 执行与汇总 ---------- */
