@@ -67,6 +67,7 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     }
     const errors = [];
     const parsed = [];
+    const rowNos = [];   // 与 parsed 同步：记录每个解析行在文件中的行号，供 Step 5B 报错定位
     // 按表头名称取列（不再写死列号）：原周报格式有两套——导出 48 列、内置导入模板 54 列（模板在「作业班组」后多一列「班组长」），
     // 从第 33 列起整体错开一位，只有按名称取才不会错位。子表头（当日计划工作量 / 备注）的列名在图片行 2，覆盖行 1。
     // 老格式（A=作业计划名称 B=计划类型 …）不认这两行表头，走后面的老分支。
@@ -76,6 +77,9 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       if (t) HEAD[t] = i;
     }));
     const NEW_LAYOUT = HEAD['作业计划名称'] !== undefined && HEAD['计划开始时间'] !== undefined;
+    // Step 5B 号码承接：现行模板与导出均无「工作票号」列，故按表头名「可选读取」——
+    // 文件里有该列才逐行校验；没有该列则整份视为「无号」全部豁免（不补号、不改模板、不以空值冒充已读取）。
+    const HAS_NO_COL = HEAD['工作票号'] !== undefined || HEAD['工作票编号'] !== undefined;
     const cellText = (r, i) => String(r[i] == null ? '' : r[i]).trim();
     const cellList = (r, i) => (cellText(r, i) ? cellText(r, i).split(/[；;]/).map(s => s.trim()).filter(Boolean) : []);
     const col = (r, name) => (HEAD[name] === undefined ? '' : cellText(r, HEAD[name]));
@@ -113,6 +117,8 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
         if (!start) { errors.push('第' + rowNo + '行：计划开始时间「' + (String(startRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (!end) { errors.push('第' + rowNo + '行：计划结束时间「' + (String(endRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (end < start) { errors.push('第' + rowNo + '行：计划结束时间早于开始时间'); return; }
+        // 可选票号列：有列才取值，空单元格不写入记录（不塞空字符串冒充已读取）
+        const noCell = HAS_NO_COL ? (col(r, '工作票号') || col(r, '工作票编号')) : '';
         parsed.push(planItem({
           name: pName,
           planType: PLAN_TYPES.includes(wantType) ? wantType : '周计划',
@@ -142,8 +148,10 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
           wlPole: col(r, '杆塔（基）'), wlLine1035: col(r, '10kV/35kV线路（km/单线）'), wlCable: col(r, '电缆（千米）'),
           wlRing: col(r, '环网柜（个）'), wlVacuum: col(r, '真空开关（个）'), wlTransformer: col(r, '变压器（个）'),
           wlLine04: col(r, '0.4/0.22kV线路（km/单线）'),
-          outageRange: col(r, '停电范围'), outageHours: col(r, '时户数')
+          outageRange: col(r, '停电范围'), outageHours: col(r, '时户数'),
+          ...(noCell ? { workTicketNo: noCell } : {})
         }));
+        rowNos.push(rowNo);
         return;
       }
       const pName = cellText(r, 0);
@@ -160,11 +168,45 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
         name: pName, planType: pType, project: r[2], team: r[3], leader: r[4],
         startDate: start, endDate: end, ticketType: r[7], voltage: r[8], station: r[9], chargePerson: r[10]
       }));
+      rowNos.push(rowNo);   // 老格式无表头、无票号列 → 不参与 Step 5B 校验
     });
     if (errors.length) {
       return res.status(400).json({ error: '导入失败，共 ' + errors.length + ' 处问题：' + errors.slice(0, 5).join('；') + (errors.length > 5 ? '（仅显示前 5 处）' : '') });
     }
     if (!parsed.length) return res.status(400).json({ error: '模板中没有可导入的数据行' });
+    /* ---------- Step 5B：配电工作票号整批校验（须在业务判重之前，顺序不可颠倒） ----------
+     * 适用面：仅配电票种（非配电/线路不扩围）；无号月计划先行豁免（不补号、不套校验）。
+     * 规则：格式 / 号段 / 票种码 / 存活撞号 / 批内重复，全部走 core/plan-ticket-no 的
+     * assertDistWorkTicketNoAvailable（Step 2 已审阅模块），本文件不另写一套。
+     * 任一不合法 → 整批拒绝、不调用 saveDB、不静默改号，按既有导入报错形态返回；
+     * 绝不允许「先按业务键跳过非法行再校验」。
+     * 文件无票号列时不进入本段（整份视为无号，全部豁免）。
+     */
+    if (HAS_NO_COL) {
+      const noErrors = [];
+      const batchNos = [];
+      parsed.forEach((p, i) => {
+        const rowNo = rowNos[i] || (i + 2);
+        const type = normTicketString(p.ticketType);
+        if (!isDistPowerTicketType(type)) return;              // 非配电（含线路）：不扩围、不校验
+        const no = normTicketString(p.workTicketNo);
+        if (!no && p.planType === '月计划') return;            // 无号月计划先豁免：不补号、不套校验
+        if (!no) {
+          noErrors.push('第' + rowNo + '行：配电计划缺少工作票号（须为 YYYYMM + 类型码 6/7/9 + 801–999）');
+          return;
+        }
+        const checked = assertDistWorkTicketNoAvailable({
+          workTicketNo: no, ticketType: type, records: DB.workPlans, batchNos
+        });
+        if (!checked.ok) { noErrors.push('第' + rowNo + '行：' + checked.message); return; }
+        batchNos.push(no);                                     // 批内已用号占位，后续同号即 DUPLICATE
+      });
+      if (noErrors.length) {
+        return res.status(400).json({
+          error: '导入失败，共 ' + noErrors.length + ' 处问题：' + noErrors.slice(0, 5).join('；') + (noErrors.length > 5 ? '（仅显示前 5 处）' : '')
+        });
+      }
+    }
     // 判重：planType + project + name + startDate；范围 = 库中同键未删除计划 + 本文件内先出现的行。
     // 现行导入对话框无逐行勾选能力，命中重复的行一律跳过（不覆盖、不改动已有记录）。
     const planKey = p => [p.planType, p.project, p.name, p.startDate]
@@ -179,7 +221,12 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       fresh.push(p);
     });
     fresh.forEach(p => DB.workPlans.unshift(p));
-    saveDB();
+    try {
+      saveDB();                          // 全批一次保存
+    } catch (e) {
+      DB.workPlans.splice(0, fresh.length);   // unshift 进来的整段移除，还原到导入前（不重试、不声称磁盘原子）
+      return res.status(500).json({ ok: false, error: 'SAVE_FAILED', message: '保存失败，已回滚内存记录：' + String((e && e.message) || e) });
+    }
     res.json({ ok: true, added: fresh.length, skipped: skippedRows.length, skippedRows });
   } catch (e) { res.status(500).json({ error: '导入失败：' + e.message }); }
 });
