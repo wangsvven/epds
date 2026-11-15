@@ -234,11 +234,10 @@ function daysDigestOf(list) {
 function splitChildrenOf(p, batchId) {
   return (DB.workPlans || [])
     .filter(x => x && x.parentPlanId === p.id && x.splitBatchId === batchId)
-    // 顺序只看不可变字段（创建时间 → id）：子记录的日期/内容可被后续编辑改动，
-    // 若参与排序，首次响应与重放的 createdPlanIds 就会因改稿而错位。
-    .sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1
-      : String(a.createdAt) > String(b.createdAt) ? 1
-        : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+    // 顺序只认 id（唯一不可变字段：createdAt/updatedAt/日期/内容都能被后续编辑或 PUT 改动）。
+    // 首次确认与重放共用本函数；id 由 genId 随机生成，故该顺序与日期无对应关系，
+    // 调用方（含冒烟）不得用返回顺序推断日期，须按日期自行定位或排序副本。
+    .sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
 }
 
 app.post('/api/workPlans/:id/split', (req, res) => {

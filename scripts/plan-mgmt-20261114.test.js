@@ -2134,21 +2134,22 @@ t('V2 重放身份限定：子记录即便带同版本也不按重放处理（40
   assert.equal(r.res.payload.error, 'ALREADY_SPLIT');
   assert.equal(state.saveCalls, 0);
 });
-t('V3 重放顺序稳定：同批子记录仅按不可变的 createdAt → id 排序，重复调用一致', () => {
+t('V3 重放顺序稳定：同批子记录仅按不可变 id 排序，重复调用一致（与 createdAt 无关）', () => {
   const seed = () => [spPlan()];
   const pv = prevCall({}, seed()).res.payload;
   const body = confirmPayload(pv);
   const c = splitCall(splitCommitH, SP_ID, body, seed());
   const kid = DB.workPlans.find(x => x.parentPlanId === SP_ID);
+  // 追加一条 id 排在既有子记录之前、createdAt 却更晚的同批记录：
+  // 只有「仅按 id」排序才会把它排到最前（旧规则 createdAt 优先会排最后）
   DB.workPlans.push({
-    id: 'zzz', parentPlanId: SP_ID, splitBatchId: c.res.payload.splitBatchId,
+    id: 'aaa', parentPlanId: SP_ID, splitBatchId: c.res.payload.splitBatchId,
     startDate: kid.startDate, createdAt: kid.createdAt + 'Z', deleted: false
   });
   const r1 = splitCall(splitCommitH, SP_ID, body, null, true);
   const r2 = splitCall(splitCommitH, SP_ID, body, null, true);
   assert.deepEqual(r1.res.payload.createdPlanIds, r2.res.payload.createdPlanIds);
-  assert.equal(r1.res.payload.createdPlanIds[r1.res.payload.createdPlanIds.length - 1], 'zzz',
-    'createdAt 较大的同起始记录应排在后面');
+  assert.equal(r1.res.payload.createdPlanIds[0], 'aaa', '仅按 id 排序：id 最小者在最前（不看 createdAt）');
 });
 t('V4 前端防串稿：后发预览先完成时，慢的旧响应不得覆盖新结果', async () => {
   let resolveFirst;
@@ -2234,6 +2235,59 @@ t('W3 重放顺序稳定：两个子记录改期并改内容后重放，createdP
   assert.deepEqual(r.res.payload.createdPlanIds, ids, '重放 ID 数组与首次逐项一致（不依赖日期/内容）');
   const r2 = splitCall(splitCommitH, SP_ID, body, null, true);
   assert.deepEqual(r2.res.payload.createdPlanIds, ids, '多次重放顺序恒定');
+});
+
+t('W4 真实 PUT 改 createdAt 后重放顺序不变（顺序只认 id）', () => {
+  const D3 = SP_CM + '-22';
+  const seed = () => [spPlan({
+    endDate: D3 + ' 18:00:00',
+    content: '20日：电杆组立3根\n21日：电缆敷设1200米\n22日：导线架设2.5km'
+  })];
+  const pv = prevCall({}, seed()).res.payload;
+  const body = confirmPayload(pv);
+  const c = splitCall(splitCommitH, SP_ID, body, seed());
+  const ids = c.res.payload.createdPlanIds;
+  assert.equal(ids.length, 2);
+  // 用真实专用 PUT 改子记录 createdAt（走分类器 + 合并 + saveDB），不是直接改内存
+  const snap = DB.workPlans.slice();
+  const target = ids[0];
+  const put = putCall(target, { createdAt: '1999-01-01T00:00:00.000Z' }, snap);
+  assert.equal(put.res.statusCode, 200, JSON.stringify(put.res.payload));
+  assert.equal(put.res.payload.createdAt, '1999-01-01T00:00:00.000Z', 'createdAt 应已被 PUT 改写');
+  const r = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.replay, true);
+  assert.deepEqual(r.res.payload.createdPlanIds, ids, 'createdAt 改动不得影响重放顺序');
+});
+t('W5 非递增 ID 夹具：顺序按 id、日期不被顺序推断（日期完整性）', () => {
+  const D3 = SP_CM + '-22';
+  const seed = () => [spPlan({
+    endDate: D3 + ' 18:00:00',
+    content: '20日：电杆组立3根\n21日：电缆敷设1200米\n22日：导线架设2.5km'
+  })];
+  const pv = prevCall({}, seed()).res.payload;
+  const body = confirmPayload(pv);
+  const c = splitCall(splitCommitH, SP_ID, body, seed());
+  assert.equal(c.res.statusCode, 200);
+  const ids = c.res.payload.createdPlanIds;
+  const kids = ids.map(id => DB.workPlans.find(x => x.id === id));
+  // 按日期定位（不靠返回顺序）：早 = 日期较小者，晚 = 另一个
+  const early = kids.slice().sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1 : 1))[0];
+  const late = kids.find(k => k.id !== early.id);
+  // 反例夹具：把「较早那天」的子记录改成更大的 id，使 id 序与日期序相反
+  early.id = 'wp-zzz-fake';
+  late.id = 'wp-aaa-fake';
+  const r = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(r.res.statusCode, 200);
+  assert.deepEqual(r.res.payload.createdPlanIds, ['wp-aaa-fake', 'wp-zzz-fake'], '顺序严格按 id');
+  const a = DB.workPlans.find(x => x.id === 'wp-aaa-fake');
+  const z = DB.workPlans.find(x => x.id === 'wp-zzz-fake');
+  // 日期完整性：记录与日期的对应关系未被顺序改动打乱（不是拿 ID 顺序当日期序）
+  assert.equal(String(z.startDate).slice(0, 10), String(early.startDate).slice(0, 10), '原较早那天仍是较小日期');
+  assert.ok(String(a.startDate) > String(z.startDate), 'id 较小者反而是更晚的日期（顺序与日期无关）');
+  assert.equal(String(z.startDate).slice(11), String(a.startDate).slice(11), '两天时刻沿用父计划，逐字一致');
+  assert.equal(z.content, '电缆敷设1200米');
+  assert.equal(a.content, '导线架设2.5km');
 });
 
 /* ---------- 执行与汇总 ---------- */

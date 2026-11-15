@@ -3513,7 +3513,15 @@ async function runSmoke() {
     need(p.splitCommitVersion === pv.previewVersion, '首日应写入本次 previewVersion：' + p.splitCommitVersion);
     need(!p.survey, '无勘察计划拆分后仍无勘察对象：' + brief(p.survey));
 
-    const c1 = needOk(await api('GET', '/api/workPlans/' + sp.createdPlanIds[0], { token }), '子计划1详情');
+    // 子记录顺序只按 id（与日期无关）：按日期排序定位第一天子记录，不从 createdPlanIds[0] 推日期
+    const allKids = (await listOk('/api/workPlans', token)).filter(x => !x.deleted && x.parentPlanId === parent.id);
+    need(allKids.length === sp.createdPlanIds.length, '子记录条数应与响应一致：' + allKids.length + ' vs ' + sp.createdPlanIds.length);
+    need(sp.createdPlanIds.join(',') === allKids.map(k => k.id).slice().sort().join(','),
+      '响应 ID 数组应按 id 升序（顺序规则，不掺日期）：' + brief(sp.createdPlanIds));
+    allKids.forEach(k => need(k.name === '冒烟拆分三日计划（' + Number(String(k.startDate).slice(5, 7)) + '月' + Number(String(k.startDate).slice(8, 10)) + '日）',
+      '子记录名称日期须与自身 startDate 一致：' + brief({ n: k.name, s: k.startDate })));
+    const c1Id = allKids.slice().sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1 : String(a.startDate) > String(b.startDate) ? 1 : 0))[0].id;
+    const c1 = needOk(await api('GET', '/api/workPlans/' + c1Id, { token }), '子计划1详情');
     need(c1.name === '冒烟拆分三日计划（11月12日）', '子计划名应为原名 + （M月D日）：' + c1.name);
     need(c1.startDate === '2026-11-12 08:00:00' && c1.endDate === '2026-11-12 10:00:00',
       '子计划起止应为当天 + 父计划时刻：' + c1.startDate + ' ~ ' + c1.endDate);
@@ -3588,14 +3596,26 @@ async function runSmoke() {
     need(pv7.ok === true && pv7.days.length === 7, '七天应切出 7 行：' + brief(pv7.errors));
     const sp7 = needOk(await api('POST', '/api/workPlans/' + seven + '/split', { token, body: bodyOf(pv7) }), 'split 7 天');
     need(sp7.createdPlanIds.length === 6, '七天应生成 6 条子计划：' + sp7.createdPlanIds.length);
-    const kids = [];
-    for (const id of sp7.createdPlanIds) kids.push(needOk(await api('GET', '/api/workPlans/' + id, { token }), '七天子计划'));
+    const kidsRaw = [];
+    for (const id of sp7.createdPlanIds) kidsRaw.push(needOk(await api('GET', '/api/workPlans/' + id, { token }), '七天子计划'));
+    // 顺序只按 id（genId 随机，与日期无对应）：日期一律按排序副本验证，不从返回顺序推断
+    need(sp7.createdPlanIds.join(',') === kidsRaw.map(k => k.id).slice().sort().join(','),
+      '响应 ID 数组应按 id 升序：' + brief(sp7.createdPlanIds));
+    const kids = kidsRaw.slice().sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1
+      : String(a.startDate) > String(b.startDate) ? 1 : 0));
     need(kids.map(k => k.startDate.slice(0, 10)).join(',') === '2026-11-02,2026-11-03,2026-11-04,2026-11-05,2026-11-06,2026-11-07',
-      '子计划应逐日递增：' + brief(kids.map(k => k.startDate)));
+      '子计划应逐日齐全：' + brief(kids.map(k => k.startDate)));
+    need(kids.every(k => k.name === '冒烟七天计划（' + Number(k.startDate.slice(5, 7)) + '月' + Number(k.startDate.slice(8, 10)) + '日）'),
+      '每条子记录名称日期须与自身 startDate 一致（日期完整性）：' + brief(kids.map(k => [k.startDate.slice(0, 10), k.name])));
     need(kids[0].content === '电缆敷设1200米' && kids[5].content === '清理现场',
       '子计划内容应去掉日期前缀并逐日对应：' + brief(kids.map(k => k.content)));
     need(kids.map(k => k.name).join('|') === '冒烟七天计划（11月2日）|冒烟七天计划（11月3日）|冒烟七天计划（11月4日）|冒烟七天计划（11月5日）|冒烟七天计划（11月6日）|冒烟七天计划（11月7日）',
       '七天子计划命名错：' + brief(kids.map(k => k.name)));
+    // 首次与重放 ID 数组逐项一致（独立断言，不依赖日期）
+    const again7 = await api('POST', '/api/workPlans/' + seven + '/split', { token, body: bodyOf(pv7) });
+    need(again7.status === 200 && again7.data.replay === true, '七天同请求重放应 200 replay：' + again7.status);
+    need((again7.data.createdPlanIds || []).join(',') === sp7.createdPlanIds.join(','),
+      '七天首次与重放 ID 数组须逐项一致：' + brief({ a: sp7.createdPlanIds, b: again7.data.createdPlanIds }));
 
     // ② 两天每天一行 → 父 1 + 子 1，票种/班组/负责人/作业人员/地址/双编号逐项沿用
     const two = await mk({ planType: '周计划', name: '冒烟字段沿用计划', status: '未执行',
