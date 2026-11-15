@@ -84,6 +84,19 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
     const cellList = (r, i) => (cellText(r, i) ? cellText(r, i).split(/[；;]/).map(s => s.trim()).filter(Boolean) : []);
     const col = (r, name) => (HEAD[name] === undefined ? '' : cellText(r, HEAD[name]));
     const colList = (r, name) => (HEAD[name] === undefined ? [] : cellList(r, HEAD[name]));
+    /* Step 5B 票号提取（新旧两种布局共用同一份逻辑，结果统一交给后面的整批校验）：
+     * - 取值：「工作票号」为主、兼容别名「工作票编号」；两列皆空 → 空串（老格式无表头时即空串）。
+     * - 冲突：两列同时有值且不一致 → 记入 errors 并返回 null（调用方直接 return），绝不静默择一。
+     * - 不改任何其它字段的映射；不在此处做格式/号段/撞号判定（那是整批校验的事）。 */
+    function takeTicketNo(r, rowNo) {
+      const noMain = col(r, '工作票号');
+      const noAlias = col(r, '工作票编号');
+      if (noMain && noAlias && noMain !== noAlias) {
+        errors.push('第' + rowNo + '行：「工作票号」与「工作票编号」两列同时填写且不一致（' + noMain + ' / ' + noAlias + '），请只保留一列');
+        return null;
+      }
+      return noMain || noAlias;
+    }
     // 时间列：接受 YYYY-MM-DD、YYYY-MM-DD HH（小时）、也兼容带分秒的 YYYY-MM-DD HH:mm[:ss]；
     // Excel 里把单元格设成日期/时间格式时读到的是序列号，这里一并换算。入库统一补全为 YYYY-MM-DD HH:mm:ss
     const DT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?$/;
@@ -117,15 +130,9 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
         if (!start) { errors.push('第' + rowNo + '行：计划开始时间「' + (String(startRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (!end) { errors.push('第' + rowNo + '行：计划结束时间「' + (String(endRaw || '').trim() || '空') + '」格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH'); return; }
         if (end < start) { errors.push('第' + rowNo + '行：计划结束时间早于开始时间'); return; }
-        // 第 49 列「工作票号」+ 别名「工作票编号」：单列有值即用；两列皆有值时必须一致，
-        // 冲突即报错（整批拒绝、零保存），绝不静默择一；空单元格不写入记录
-        const noMain = col(r, '工作票号');
-        const noAlias = col(r, '工作票编号');
-        if (noMain && noAlias && noMain !== noAlias) {
-          errors.push('第' + rowNo + '行：「工作票号」与「工作票编号」两列同时填写且不一致（' + noMain + ' / ' + noAlias + '），请只保留一列');
-          return;
-        }
-        const noCell = noMain || noAlias;
+        // 两种布局共用同一份票号提取 + 别名冲突判定（冲突已记入 errors 并整批拒绝）
+        const noCell = takeTicketNo(r, rowNo);
+        if (noCell === null) return;
         parsed.push(planItem({
           name: pName,
           planType: PLAN_TYPES.includes(wantType) ? wantType : '周计划',
@@ -171,11 +178,16 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
       if (!start || !/^\d{4}-\d{2}-\d{2}$/.test(start)) { errors.push('第' + rowNo + '行：计划开始日期「' + (start || '空') + '」格式应为 YYYY-MM-DD'); return; }
       if (!end || !/^\d{4}-\d{2}-\d{2}$/.test(end)) { errors.push('第' + rowNo + '行：计划结束日期「' + (end || '空') + '」格式应为 YYYY-MM-DD'); return; }
       if (end < start) { errors.push('第' + rowNo + '行：计划结束日期早于开始日期'); return; }
+      // 老格式（无表头）：字段映射逐字不动；票号同样走上面的共用提取——
+      // 无该列时取值为空，配电票种缺号仍会在整批校验里被拒绝（旧布局同样参与校验，不再豁免）。
+      const noCellOld = takeTicketNo(r, rowNo);
+      if (noCellOld === null) return;
       parsed.push(planItem({
         name: pName, planType: pType, project: r[2], team: r[3], leader: r[4],
-        startDate: start, endDate: end, ticketType: r[7], voltage: r[8], station: r[9], chargePerson: r[10]
+        startDate: start, endDate: end, ticketType: r[7], voltage: r[8], station: r[9], chargePerson: r[10],
+        ...(noCellOld ? { workTicketNo: noCellOld } : {})
       }));
-      rowNos.push(rowNo);   // 老格式无表头、无票号列 → 不参与 Step 5B 校验
+      rowNos.push(rowNo);
     });
     if (errors.length) {
       return res.status(400).json({ error: '导入失败，共 ' + errors.length + ' 处问题：' + errors.slice(0, 5).join('；') + (errors.length > 5 ? '（仅显示前 5 处）' : '') });
@@ -188,7 +200,8 @@ app.post('/api/workPlans/import', upload.single('file'), (req, res) => {
      * assertDistWorkTicketNoAvailable（Step 2 已审阅模块），本文件不另写一套。
      * 任一不合法 → 整批拒绝、不调用 saveDB、不静默改号，按既有导入报错形态返回；
      * 绝不允许「先按业务键跳过非法行再校验」。
-     * 无票号列（历史 48 列模板）时取值为空：解析照旧，但配电周计划缺号在此被整批拒绝。
+     * 无票号列（历史 48 列模板 / 老格式无表头）时取值为空：解析照旧，但配电周计划缺号在此被整批拒绝。
+     * 输入面统一：新旧两种布局都经 takeTicketNo() 产出同一份「号码 + 别名冲突」结果，再进本段校验。
      */
     const noErrors = [];
     const batchNos = [];

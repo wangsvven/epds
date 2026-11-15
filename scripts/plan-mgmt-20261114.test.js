@@ -1449,6 +1449,63 @@ t('Q22 别名列并存：两列同值通过；两列冲突 → 400 报出两值�
   assert.equal(state.saveCalls, 0);
 });
 
+/* 旧格式（无「作业计划名称/计划开始时间」表头 → 走老分支）：字段按位置映射，票号走同一提取 */
+const OLD_HEAD = ['名称', '类型', '项目', '班组', '负责人', '开始', '结束', '票种', '电压', '变电站', '负责人2'];
+function oldCsv(head, name, no, planType, noAlias) {
+  const row = [name, planType || '周计划', 'P-OLD', '班组A', '张三', '2026-11-20', '2026-11-21', T1, '10kV', '站A', '李四'];
+  const extras = head.length - 11;
+  if (extras >= 1) row.push(no == null ? '' : String(no));
+  if (extras >= 2) row.push(noAlias == null ? '' : String(noAlias));
+  return csv([head.join(','), row.join(',')]);
+}
+t('Q23 旧布局 + 配电票种 + 无票号 → 仍进整批校验：400 缺号、零保存（不再「不参与校验」）', () => {
+  const r = importCall(oldCsv(OLD_HEAD, 'ZT旧布局缺号', ''), []);
+  assert.equal(r.res.statusCode, 400);
+  assert.match(r.res.payload.error, /缺少工作票号/);
+  assert.equal(r.count, 0);
+  assert.equal(state.saveCalls, 0);
+});
+t('Q24 旧布局带「工作票号」表头 → 共用提取生效：空库导入成功、号码逐字保留、原字段映射不变', () => {
+  const r = importCall(oldCsv(OLD_HEAD.concat(['工作票号']), 'ZT旧布局带号', NO801), []);
+  assert.equal(r.res.statusCode, 200, '旧布局也应承接同一提取并通过校验：' + JSON.stringify(r.res.payload));
+  assert.equal(r.res.payload.added, 1);
+  assert.equal(r.rows[0].workTicketNo, NO801);
+  assert.equal(r.rows[0].project, 'P-OLD', '其它字段映射不改');
+  assert.equal(r.rows[0].team, '班组A');
+  assert.equal(r.rows[0].planType, '周计划');
+});
+t('Q25 旧布局：同号回灌 → 400 DUPLICATE 零保存；带空白号 → 保存值 = 校验值', () => {
+  const head = OLD_HEAD.concat(['工作票号']);
+  const seed = [seedRec(NO801, { id: 'wp-q25', planType: '周计划', name: 'ZT旧布局既有', project: 'P-OLD' })];
+  const dup = importCall(oldCsv(head, 'ZT旧布局回灌', NO801), seed);
+  assert.equal(dup.res.statusCode, 400);
+  assert.match(dup.res.payload.error, /已被其它存活记录占用/);
+  assert.equal(state.saveCalls, 0);
+  assert.equal(dup.count, 1);
+  const ok = importCall(oldCsv(head, 'ZT旧布局空白', '   ' + NO801 + '   '), []);
+  assert.equal(ok.res.statusCode, 200);
+  assert.equal(ok.rows[0].workTicketNo, NO801, '落库值应为去空白后的合规号');
+});
+
+t('Q26 旧布局月计划主动填非法号 → 400 整批拒绝、零保存、库不变', () => {
+  const buf = oldCsv(OLD_HEAD.concat(['工作票号']), 'ZT旧布局月计划非法号', OLD11, '月计划');
+  const r = importCall(buf, [], '月计划');
+  assert.equal(r.res.statusCode, 400, '月计划主动写配电号仍须校验');
+  assert.match(r.res.payload.error, /格式不合法/);
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.count, 0);
+});
+t('Q27 旧布局月计划双列票号冲突 → 400、零保存、库不变，且报出行号与两个值', () => {
+  const buf = oldCsv(OLD_HEAD.concat(['工作票号', '工作票编号']), 'ZT旧布局月计划双列冲突', NO801, '月计划', NO802);
+  const r = importCall(buf, [], '月计划');
+  assert.equal(r.res.statusCode, 400);
+  assert.match(r.res.payload.error, /第2行/, '应报出行号');
+  assert.match(r.res.payload.error, /工作票编号/, '应指明冲突列');
+  assert.ok(r.res.payload.error.indexOf(NO801) > -1 && r.res.payload.error.indexOf(NO802) > -1, '应同时报出两个值');
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.count, 0);
+});
+
 const XLSX = require('xlsx');
 const exportHandler = (routes.find(r => r.method === 'GET' && r.path === '/api/workPlans/export') || {}).handler;
 async function exportCall(seed, query) {
