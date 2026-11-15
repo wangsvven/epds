@@ -58,6 +58,8 @@ const PlanSplitDlg = {
     const planName = ref('');
     const planRange = ref('');
     const narrow = ref(false);
+    // Step 6 临时开关：确认按钮禁用、submit 不调旧确认接口 /split；Step 7 接管时置回 false
+    const CONFIRM_DISABLED = true;
 
     const QTY_LABELS = [
       ['wlPole', '杆塔(基)'], ['wlLine1035', '10kV(km)'], ['wlCable', '电缆(km)'],
@@ -118,7 +120,11 @@ const PlanSplitDlg = {
       try {
         // 初始预览发 {}（按源计划内容解析）；重新预览由 reparse 传 { days: 当前编辑稿 }
         const res = await api.post('/api/workPlans/' + props.plan.id + '/split/preview', payload || {});
-        errors.value = Array.isArray(res.errors) ? res.errors : [];
+        const list = Array.isArray(res.errors) ? res.errors.slice() : [];
+        if (res.ok === false && !list.length) list.push('预览未通过，请检查每日内容');
+        errors.value = list;
+        // 失败（200 ok:false）只更新错误，保留用户的当前编辑稿，不被返回的空 days 覆盖
+        if (res.ok === false) return;
         const prev = {};
         days.value.forEach(d => { prev[d.date] = d; });
         days.value = (res.days || []).map(d => {
@@ -130,8 +136,10 @@ const PlanSplitDlg = {
         });
       } catch (e) {
         const d = e.data || {};
-        errors.value = [d.message || CODE_TEXT[d.error] || e.message || '预览失败'];
-        days.value = [];
+        // 400 带 errors[] 时逐条展示；门禁/耗尽只有 message，则显示该条
+        const list = Array.isArray(d.errors) ? d.errors.slice() : [];
+        errors.value = list.length ? list : [d.message || CODE_TEXT[d.error] || e.message || '预览失败'];
+        // 失败一律不清空 days：保留用户已编辑的内容与工量，便于就地修正后重试
       } finally { loading.value = false; }
     }
 
@@ -151,6 +159,11 @@ const PlanSplitDlg = {
     async function reparseRow() { await reparse(); }
 
     async function submit() {
+      // Step 6 临时：仅预览，确认落库属 Step 7；本函数绝不调用旧确认接口 /split
+      if (CONFIRM_DISABLED) {
+        ElementPlus.ElMessage.warning('拆分确认暂未开放：当前仅支持预览，确认与落库将在后续步骤开放');
+        return;
+      }
       if (!canSubmit.value) return;
       submitting.value = true;
       try {
@@ -177,7 +190,7 @@ const PlanSplitDlg = {
 
     return {
       visible, loading, submitting, errors, days, planName, planRange, QTY_LABELS, narrow,
-      canSubmit, mdLabel, weekday, timeOf, setQty, reparse, reparseRow, submit
+      canSubmit, CONFIRM_DISABLED, mdLabel, weekday, timeOf, setQty, reparse, reparseRow, submit
     };
   },
   template: `
@@ -258,7 +271,7 @@ const PlanSplitDlg = {
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
       <el-button :disabled="loading" @click="reparse">重新预览全部</el-button>
-      <el-button type="primary" :loading="submitting" :disabled="!canSubmit" @click="submit">确认拆分</el-button>
+      <el-button type="primary" :loading="submitting" :disabled="!canSubmit || CONFIRM_DISABLED" :title="CONFIRM_DISABLED ? '拆分确认将在后续步骤开放' : ''" @click="submit">确认拆分{{ CONFIRM_DISABLED ? '（暂未开放）' : '' }}</el-button>
     </template>
   </el-dialog>`
 };

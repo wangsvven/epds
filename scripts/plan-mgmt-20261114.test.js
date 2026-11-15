@@ -1703,8 +1703,20 @@ t('R19 版本遮盖：源 content / 源工量 / 任一日内容 / 票种 变化 
   const days2 = spDays(); days2[1].content = '电缆敷设1300米';
   const vDay = prevCall({ days: days2 }, [spPlan()]).res.payload.previewVersion;
   assert.notEqual(vDay, base, '任一日内容变 → 版本须变');
-  const vType = prevCall({ days }, [spPlan({ ticketType: T1, workTicketNo: N('6', 801), content: 'x' })]).res.payload.previewVersion;
-  assert.notEqual(vType, base, '源 content 改 x 亦变（覆盖性校验）');
+  const vType = prevCall({ days }, [spPlan({ ticketType: T2, workTicketNo: N('7', 801) })]).res.payload.previewVersion;
+  assert.notEqual(vType, base, '票种真改（T1→T2）→ 版本须变');
+  // 单元级隔离：days 与拟号完全相同，仅 ticketType 不同 → 版本仍须变（证明源摘要单独绑定）
+  const fixedDays = [
+    { date: SP_D1, content: '甲', quantities: {}, workTicketNo: N('6', 801), surveyNo: 's1' },
+    { date: SP_D2, content: '乙', quantities: {}, workTicketNo: N('6', 802), surveyNo: 's1' }
+  ];
+  const common = {
+    id: SP_ID, startDate: SP_D1 + ' 08:00:00', endDate: SP_D2 + ' 18:00:00', content: 'c',
+    ticketType: T1, surveyNo: 's1', workTicketNo: N('6', 801), surveyDecision: 'allow', days: fixedDays
+  };
+  const u1 = PSM.computeSplitPreviewVersion(common);
+  const u2 = PSM.computeSplitPreviewVersion(Object.assign({}, common, { ticketType: T2 }));
+  assert.notEqual(u1, u2, '仅 ticketType 变（days/拟号逐字相同）→ 版本须变');
 });
 t('R21 某月某票种 801–999 占满 → 400 EXHAUSTED（指明月与票种）、零保存', () => {
   const fill = [];
@@ -1752,8 +1764,10 @@ t('R20 前端改稿保留：重新预览发送当前 days（而非旧 content）
 });
 
 // Step 6 前端沙箱：真实 views/plan-split.js + 桩 Vue/api/ElementPlus（不触网、不挂载 DOM）
-function splitViewHarness() {
-  const calls = { post: [] };
+// opts.throwError → api.post 抛该错误；opts.response → 返回该响应体
+function splitViewHarness(opts) {
+  const o = opts || {};
+  const calls = { post: [], warn: [] };
   const sb = { console, setTimeout, clearTimeout, JSON };
   vm.createContext(sb);
   vm.runInContext('globalThis.window = globalThis;', sb);
@@ -1765,15 +1779,98 @@ function splitViewHarness() {
   sb.api = {
     async post(u, b) {
       calls.post.push({ u, b });
+      if (o.throwError) throw o.throwError;
+      if (o.response) return o.response;
       return { ok: true, previewVersion: 'v1:stub', sourcePlanId: 'wp-sp1', firstDayPlanId: 'wp-sp1', days: (b && b.days) || [] };
     }
   };
-  sb.ElementPlus = { ElMessage: { success() {}, error() {}, warning() {}, info() {} } };
+  sb.ElementPlus = { ElMessage: { success() {}, error() {}, warning(m) { calls.warn.push(m); }, info() {} } };
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/js/views/plan-split.js'), 'utf8')
     + '\n;globalThis.__PS = PlanSplitDlg;', sb, { filename: 'views/plan-split.js' });
   const view = sb.__PS.setup({ modelValue: true, plan: { id: 'wp-sp1' } }, { emit() {} });
   return { view, calls };
 }
+
+/* ========== Step 6 修正：S 失败路径 / 排序 / decision / 确认禁用 ========== */
+g('S Step 6 修正（失败保留改稿 / 日期归一 / decision 键 / 确认按钮禁用）');
+const editedDays = () => ([
+  { date: SP_D1, content: '用户改过的第一天', quantities: { wlPole: '7' } },
+  { date: SP_D2, content: '电缆敷设1200米', quantities: {} }
+]);
+t('S1 预览 400 + errors[]：逐条展示具体错误，保留用户编辑稿', async () => {
+  const err = Object.assign(new Error('拆分校验未通过'), {
+    status: 400, data: { error: '拆分校验未通过', errors: ['日期 ' + SP_D2 + ' 内容为空'] }
+  });
+  const h = splitViewHarness({ throwError: err });
+  h.view.days.value = editedDays();
+  await h.view.reparse();
+  assert.deepEqual(h.view.errors.value, ['日期 ' + SP_D2 + ' 内容为空'], '应展示服务端 errors 条目');
+  assert.equal(h.view.days.value.length, 2, '不得清空编辑稿');
+  assert.equal(h.view.days.value[0].content, '用户改过的第一天');
+  assert.equal(h.view.days.value[0].quantities.wlPole, '7', '工量改动不得丢失');
+});
+t('S2 预览 200 + ok:false：展示 errors 且保留编辑稿（不被空 days 覆盖）', async () => {
+  const h = splitViewHarness({ response: { ok: false, errors: ['未识别到每日日期标题，请使用"03日：…"格式'], days: [] } });
+  h.view.days.value = editedDays();
+  await h.view.reparse();
+  assert.equal(h.view.errors.value.length, 1);
+  assert.match(h.view.errors.value[0], /未识别到每日日期标题/);
+  assert.equal(h.view.days.value.length, 2);
+  assert.equal(h.view.days.value[1].content, '电缆敷设1200米');
+});
+t('S3 预览 409 门禁：展示服务端 message，保留编辑稿', async () => {
+  const err = Object.assign(new Error('SURVEY_EXISTS'), {
+    status: 409, data: { ok: false, error: 'SURVEY_EXISTS', message: '该计划已有勘察记录，不能拆分；如需调整请先处理勘察记录' }
+  });
+  const h = splitViewHarness({ throwError: err });
+  h.view.days.value = editedDays();
+  await h.view.reparse();
+  assert.match(h.view.errors.value[0], /已有勘察记录/);
+  assert.equal(h.view.days.value.length, 2);
+});
+t('S4 确认按钮临时禁用：模板禁用 + submit 不调用旧确认接口 /split', async () => {
+  const src = fs.readFileSync(path.join(ROOT, 'public/js/views/plan-split.js'), 'utf8');
+  assert.match(src, /CONFIRM_DISABLED/, '应有临时禁用开关');
+  assert.match(src, /:disabled="!canSubmit \|\| CONFIRM_DISABLED"/, '确认按钮须绑定禁用');
+  const h = splitViewHarness();
+  h.view.days.value = editedDays();
+  assert.equal(h.view.CONFIRM_DISABLED, true);
+  await h.view.submit();
+  assert.equal(h.calls.post.filter(c => /\/split$/.test(c.u)).length, 0, '不得调用旧确认接口');
+  assert.equal(h.calls.warn.length, 1, '应提示确认暂未开放');
+});
+t('S5 日期乱序输入 → 统一升序后再标首日与拟号', () => {
+  const content = SP_D2 + '：电缆敷设1200米\n' + SP_D1 + '：电杆组立3根';
+  const r = prevCall({ content }, [spPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.deepEqual(r.res.payload.days.map(d => d.date), [SP_D1, SP_D2], '应按日期升序');
+  assert.equal(r.res.payload.days[0].isFirstDay, true);
+  assert.equal(r.res.payload.days[0].workTicketNo, N('6', 801), '首日保留源原号');
+  assert.equal(r.res.payload.days[1].workTicketNo, N('6', 802), '拟号按日期顺序分配');
+});
+t('S6 顺序归一：同一批内容乱序/正序书写 → 产出同一 previewVersion', () => {
+  const reversed = SP_D2 + '：电缆敷设1200米\n' + SP_D1 + '：电杆组立3根';
+  const ordered = SP_D1 + '：电杆组立3根\n' + SP_D2 + '：电缆敷设1200米';
+  const a = prevCall({ content: reversed }, [spPlan()]);
+  const b = prevCall({ content: ordered }, [spPlan()]);
+  assert.deepEqual(a.res.payload.days.map(d => d.date), b.res.payload.days.map(d => d.date));
+  assert.equal(a.res.payload.previewVersion, b.res.payload.previewVersion, '归一化顺序后摘要应一致');
+});
+t('S7 勘察分类键为 decision（allow / block_surveyed / block_anomalous），不残留 status', () => {
+  assert.deepEqual(PSM.classifySplitSurvey(undefined), { decision: 'allow' });
+  assert.equal(PSM.classifySplitSurvey({ surveyNo: 'x' }).decision, 'block_surveyed');
+  [{}, null, false, 0, '', [], 'x'].forEach(v => {
+    const c = PSM.classifySplitSurvey(v);
+    assert.equal(c.decision, 'block_anomalous', JSON.stringify(v));
+    assert.ok(!('status' in c), '不得再返回 status 键');
+  });
+});
+t('S8 单日计划仍按现行前置拒绝（至少两日的门禁入口未变）', () => {
+  const r = prevCall({}, [spPlan({ endDate: SP_D1 + ' 18:00:00' })]);
+  assert.equal(r.res.statusCode, 400);
+  assert.match(String(r.res.payload.error), /单日计划无需拆分/);
+  assert.equal(state.saveCalls, 0);
+});
 
 /* ---------- 执行与汇总 ---------- */
 async function run() {

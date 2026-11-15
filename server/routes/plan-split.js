@@ -82,14 +82,14 @@ function surveyTypeLabel(v) {
   return typeof v;
 }
 function classifySplitSurvey(survey) {
-  if (survey === undefined) return { status: 'allow' };
+  if (survey === undefined) return { decision: 'allow' };
   if (survey !== null && typeof survey === 'object' && !Array.isArray(survey)) {
     const proto = Object.getPrototypeOf(survey);
     const plain = proto === Object.prototype || proto === null;
-    if (plain && Object.keys(survey).length > 0) return { status: 'block_surveyed' };
-    return { status: 'block_anomalous', message: '勘察字段为空对象或非普通对象，无法判断是否已勘察，请先核对该计划的勘察记录' };
+    if (plain && Object.keys(survey).length > 0) return { decision: 'block_surveyed' };
+    return { decision: 'block_anomalous', message: '勘察字段为空对象或非普通对象，无法判断是否已勘察，请先核对该计划的勘察记录' };
   }
-  return { status: 'block_anomalous', message: '勘察字段类型异常（' + surveyTypeLabel(survey) + '），无法判断是否已勘察，请先核对该计划的勘察记录' };
+  return { decision: 'block_anomalous', message: '勘察字段类型异常（' + surveyTypeLabel(survey) + '），无法判断是否已勘察，请先核对该计划的勘察记录' };
 }
 
 /* 稳定序列化：对象键排序、数组保序，保证同输入同串（三段摘要共用） */
@@ -117,7 +117,7 @@ function computeSplitPreviewVersion(input) {
     ticketType: String(b.ticketType == null ? '' : b.ticketType),
     surveyNo: String(b.surveyNo == null ? '' : b.surveyNo),
     workTicketNo: String(b.workTicketNo == null ? '' : b.workTicketNo),
-    surveyClass: String(b.surveyClass == null ? '' : b.surveyClass),
+    surveyDecision: String(b.surveyDecision == null ? '' : b.surveyDecision),
     splitBatchId: String(b.splitBatchId == null ? '' : b.splitBatchId),
     parentPlanId: String(b.parentPlanId == null ? '' : b.parentPlanId)
   };
@@ -166,10 +166,10 @@ app.post('/api/workPlans/:id/split/preview', (req, res) => {
     return res.status(409).json({ ok: false, error: 'ALREADY_SPLIT', message: '该计划已拆分或为拆分产生的子计划，不能再次拆分' });
   }
   const sc = classifySplitSurvey(p.survey);
-  if (sc.status === 'block_surveyed') {
+  if (sc.decision === 'block_surveyed') {
     return res.status(409).json({ ok: false, error: 'SURVEY_EXISTS', message: '该计划已有勘察记录，不能拆分；如需调整请先处理勘察记录' });
   }
-  if (sc.status === 'block_anomalous') {
+  if (sc.decision === 'block_anomalous') {
     return res.status(409).json({ ok: false, error: 'SURVEY_ANOMALOUS', message: sc.message });
   }
   // 既有拆分前置条件（与执行拆分一致，本步不新建状态机）
@@ -197,6 +197,10 @@ app.post('/api/workPlans/:id/split/preview', (req, res) => {
     norm = { ok: true, days: r.days.map(d => ({ date: d.date, content: d.content, items: d.items, quantities: d.quantities })) };
   }
 
+  // 三条路径统一：先按日期升序归一（文本解析可能按出现顺序乱序），再标首日 / 拟号 / 摘要
+  norm.days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (norm.days.length < 2) return res.status(400).json({ error: '单日计划无需拆分' });
+
   const srcNo = String(p.workTicketNo == null ? '' : p.workTicketNo);
   const srcSurveyNo = String(p.surveyNo == null ? '' : p.surveyNo);
   const dist = isDistPowerTicketType(p.ticketType);
@@ -223,7 +227,7 @@ app.post('/api/workPlans/:id/split/preview', (req, res) => {
   const previewVersion = computeSplitPreviewVersion({
     id: p.id, startDate: p.startDate, endDate: p.endDate, content: p.content, quantities: p,
     ticketType: p.ticketType, surveyNo: p.surveyNo, workTicketNo: p.workTicketNo,
-    surveyClass: sc.status, splitBatchId: p.splitBatchId, parentPlanId: p.parentPlanId, days
+    surveyDecision: sc.decision, splitBatchId: p.splitBatchId, parentPlanId: p.parentPlanId, days
   });
   res.json({ ok: true, previewVersion, sourcePlanId: p.id, firstDayPlanId: p.id, days });
 });
