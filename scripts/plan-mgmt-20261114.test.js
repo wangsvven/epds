@@ -780,7 +780,9 @@ function plansHarness() {
   sb.Vue = {
     ref: v => ({ value: v }),
     reactive: o => o,
-    computed: fn => ({ get value() { return fn(); } }),
+    computed: fn => (typeof fn === 'function'
+      ? { get value() { return fn(); } }
+      : { get value() { return fn.get(); }, set value(v) { if (fn.set) fn.set(v); } }),
     onMounted: () => {}, onUnmounted: () => {}, nextTick: fn => (fn ? fn() : undefined), watch: () => {}
   };
   sb.ServerTime = { now: () => new Date(2026, 10, 15, 9, 30, 0), ymd: () => '2026-11-15' };
@@ -1781,7 +1783,9 @@ function splitViewHarness(opts) {
   vm.runInContext('globalThis.window = globalThis;', sb);
   sb.Vue = {
     ref: v => ({ value: v }),
-    computed: fn => ({ get value() { return fn(); } }),
+    computed: fn => (typeof fn === 'function'
+      ? { get value() { return fn(); } }
+      : { get value() { return fn.get(); }, set value(v) { if (fn.set) fn.set(v); } }),
     watch: () => {}, onMounted: () => {}, onUnmounted: () => {}, nextTick: fn => (fn ? fn() : undefined)
   };
   sb.api = {
@@ -1795,8 +1799,9 @@ function splitViewHarness(opts) {
   sb.ElementPlus = { ElMessage: { success() {}, error() {}, warning(m) { calls.warn.push(m); }, info() {} } };
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/js/views/plan-split.js'), 'utf8')
     + '\n;globalThis.__PS = PlanSplitDlg;', sb, { filename: 'views/plan-split.js' });
-  const view = sb.__PS.setup({ modelValue: true, plan: { id: 'wp-sp1' } }, { emit() {} });
-  return { view, calls };
+  const emits = [];
+  const view = sb.__PS.setup({ modelValue: true, plan: { id: 'wp-sp1' } }, { emit: (n, p) => emits.push({ n, p }) });
+  return { view, calls, emits };
 }
 
 /* ========== Step 6 修正：S 失败路径 / 排序 / decision / 确认禁用 ========== */
@@ -1836,16 +1841,24 @@ t('S3 预览 409 门禁：展示服务端 message，保留编辑稿', async () =
   assert.match(h.view.errors.value[0], /已有勘察记录/);
   assert.equal(h.view.days.value.length, 2);
 });
-t('S4 确认按钮临时禁用：模板禁用 + submit 不调用旧确认接口 /split', async () => {
+t('S4 确认闭环：有效预览才可提交、载荷带版本、改稿即失效、成功走新字段', async () => {
   const src = fs.readFileSync(path.join(ROOT, 'public/js/views/plan-split.js'), 'utf8');
-  assert.match(src, /CONFIRM_DISABLED/, '应有临时禁用开关');
-  assert.match(src, /:disabled="!canSubmit \|\| CONFIRM_DISABLED"/, '确认按钮须绑定禁用');
+  assert.doesNotMatch(src, /CONFIRM_DISABLED/, '临时禁用开关应已移除');
   const h = splitViewHarness();
   h.view.days.value = editedDays();
-  assert.equal(h.view.CONFIRM_DISABLED, true);
+  await h.view.reparse();
+  assert.equal(h.view.previewVersion.value, 'v1:stub', '预览成功应记录凭据');
+  assert.equal(h.view.canSubmit.value, true, '有有效预览才可提交');
+  h.view.setQty(h.view.days.value[0], 'wlPole', '9');
+  assert.equal(h.view.previewVersion.value, '', '改工量后旧凭据失效');
+  assert.equal(h.view.canSubmit.value, false, '失效后不可提交');
+  await h.view.reparse();
   await h.view.submit();
-  assert.equal(h.calls.post.filter(c => /\/split$/.test(c.u)).length, 0, '不得调用旧确认接口');
-  assert.equal(h.calls.warn.length, 1, '应提示确认暂未开放');
+  const last = h.calls.post[h.calls.post.length - 1];
+  assert.match(last.u, /\/split$/, '应调用确认接口');
+  assert.equal(last.b.previewVersion, 'v1:stub', '载荷须带 previewVersion');
+  assert.ok(Array.isArray(last.b.days) && last.b.days.length === 2, '载荷须带完整 days');
+  assert.ok(h.emits.some(e => e.n === 'update:modelValue' && e.p === false), '成功后应发出关闭事件');
 });
 t('S5 日期乱序输入 → 统一升序后再标首日与拟号', () => {
   const content = SP_D2 + '：电缆敷设1200米\n' + SP_D1 + '：电杆组立3根';
@@ -2038,6 +2051,68 @@ t('T14 unsplit 明确拒绝：410 SPLIT_IRREVERSIBLE，快照/掩码/子记录�
   assert.deepEqual(after.splitSnapshot, { endDate: '2026-11-30 10:00:00' });
   assert.equal(DB.workPlans.find(x => x.id === 'k1').deleted, false);
   assert.equal(state.saveCalls, 0);
+});
+
+/* ========== Step 7B：U 前端确认闭环 / 撤销入口 / 复制清理 ========== */
+g('U 前端（Step 7B：确认载荷与响应 / 无撤销入口 / 改期放开 / 复制四键清理）');
+t('U1 复制清理四键：splitBatchId/splitSnapshot/parentPlanId/splitCommitVersion 不随复制带走', async () => {
+  const h = plansHarness();
+  const row = {
+    id: 'wp-u1', name: 'ZT复制源', planType: '周计划', ticketType: T1, workTicketNo: N('6', 801),
+    surveyNo: YM + '009', startDate: '2026-11-20 08:00:00', endDate: '2026-11-21 18:00:00',
+    splitBatchId: 'sp-1', splitSnapshot: { endDate: '2026-11-30 10:00:00' }, parentPlanId: 'wp-p',
+    splitCommitVersion: 'v1:a:b:c', survey: {}, status: '未执行'
+  };
+  h.view.list.value = [row];
+  await h.view.copyPlan(row);
+  const body = h.calls.post[0].body;
+  ['splitBatchId', 'splitSnapshot', 'parentPlanId', 'splitCommitVersion'].forEach(k => {
+    assert.ok(!(k in body), '复制载荷不得带 ' + k);
+  });
+  assert.equal(JSON.stringify(body.survey), '{}', 'survey 原样保留（空对象不被删除）');
+  assert.equal(body.ticketNoMode, 'auto', '保留 Step 4 的 auto 取号');
+  assert.equal(body.name, 'ZT复制源（副本）');
+  assert.equal(body.id, undefined);
+});
+t('U2 前端无撤销入口、改期不再拦「先撤销」，专用 PUT 规则未改', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'public/js/views/plans.js'), 'utf8');
+  assert.doesNotMatch(src, /unsplit|撤销拆分/, '不得残留撤销入口');
+  assert.doesNotMatch(src, /修改起止时间需先撤销拆分/, '改期限制应已移除');
+  assert.match(src, /api\.put\('\/api\/workPlans\/' \+ dlg\.editingId/, '编辑仍走专用 PUT');
+});
+t('U3 确认成功按新响应字段处理：done 事件带 splitBatchId / firstDayPlanId / createdPlanIds', async () => {
+  const h = splitViewHarness({
+    response: { ok: true, replay: false, batchId: 'sp9', firstDayPlanId: 'wp-sp1', createdPlanIds: ['c1', 'c2'], days: editedDays() }
+  });
+  h.view.days.value = editedDays();
+  h.view.previewVersion.value = 'v1:x';
+  await h.view.submit();
+  const done = h.emits.filter(e => e.n === 'done');
+  assert.equal(done.length, 1, '应发出一次 done');
+  assert.deepEqual(done[0].p.createdPlanIds, ['c1', 'c2']);
+  assert.equal(done[0].p.count, 2);
+  assert.equal(done[0].p.batchId, 'sp9');
+  assert.equal(done[0].p.firstDayPlanId, 'wp-sp1');
+  assert.ok(h.emits.some(e => e.n === 'update:modelValue' && e.p === false), '应发出关闭事件');
+});
+t('U4 确认返回 PREVIEW_STALE → 显示服务端文案、凭据失效、改稿保留', async () => {
+  const err = Object.assign(new Error('PREVIEW_STALE'), {
+    status: 409, data: { ok: false, error: 'PREVIEW_STALE', message: '预览已过期（源计划或每日内容/工量已变化），请重新预览后再确认' }
+  });
+  const h = splitViewHarness({ throwError: err });
+  h.view.days.value = editedDays();
+  h.view.previewVersion.value = 'v1:x';
+  await h.view.submit();
+  assert.match(h.view.errors.value[0], /预览已过期/);
+  assert.equal(h.view.previewVersion.value, '', '过期后凭据必须失效');
+  assert.equal(h.view.days.value.length, 2, '改稿不得丢失');
+});
+t('U5 无有效预览时 submit 不发请求（守卫 + 提示）', async () => {
+  const h = splitViewHarness();
+  h.view.days.value = editedDays();
+  await h.view.submit();
+  assert.equal(h.calls.post.length, 0, '不得在无预览情况下调用确认接口');
+  assert.equal(h.calls.warn.length, 1);
 });
 
 /* ---------- 执行与汇总 ---------- */

@@ -58,8 +58,7 @@ const PlanSplitDlg = {
     const planName = ref('');
     const planRange = ref('');
     const narrow = ref(false);
-    // Step 6 临时开关：确认按钮禁用、submit 不调旧确认接口 /split；Step 7 接管时置回 false
-    const CONFIRM_DISABLED = true;
+    const previewVersion = ref('');   // 有效预览凭据；内容/工量改动或预览失败即失效
 
     const QTY_LABELS = [
       ['wlPole', '杆塔(基)'], ['wlLine1035', '10kV(km)'], ['wlCable', '电缆(km)'],
@@ -70,7 +69,7 @@ const PlanSplitDlg = {
       get: () => props.modelValue,
       set: v => emit('update:modelValue', v)
     });
-    const canSubmit = computed(() => !errors.value.length && days.value.length > 1 && !loading.value && !submitting.value);
+    const canSubmit = computed(() => !errors.value.length && days.value.length > 1 && !!previewVersion.value && !loading.value && !submitting.value);
 
     function syncNarrow() { narrow.value = window.innerWidth <= 768; }
     onMounted(() => { syncNarrow(); window.addEventListener('resize', syncNarrow); });
@@ -86,12 +85,14 @@ const PlanSplitDlg = {
       return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][new Date(t).getUTCDay()];
     }
     function timeOf(v) { return String(v || '').slice(11, 16); }
+    function invalidatePreview() { previewVersion.value = ''; }
     function setQty(row, k, v) {
       const q = Object.assign({}, row.quantities || {});
       const s = String(v == null ? '' : v).trim();
       if (s === '') delete q[k]; else q[k] = s;
       row.quantities = q;
       row.qtyTouched = true;
+      invalidatePreview();   // 工量改动 → 旧预览凭据失效
     }
     // 当前编辑稿（日期/内容/7 项工量）：重新预览必须发这个，不得发旧 content 丢掉改动
     function currentDaysPayload() {
@@ -124,7 +125,7 @@ const PlanSplitDlg = {
         if (res.ok === false && !list.length) list.push('预览未通过，请检查每日内容');
         errors.value = list;
         // 失败（200 ok:false）只更新错误，保留用户的当前编辑稿，不被返回的空 days 覆盖
-        if (res.ok === false) return;
+        if (res.ok === false) { previewVersion.value = ''; return; }
         const prev = {};
         days.value.forEach(d => { prev[d.date] = d; });
         days.value = (res.days || []).map(d => {
@@ -134,11 +135,13 @@ const PlanSplitDlg = {
           if (old && old.qtyTouched) row.quantities = Object.assign({}, d.quantities, old.quantities);
           return row;
         });
+        previewVersion.value = res.previewVersion || '';
       } catch (e) {
         const d = e.data || {};
         // 400 带 errors[] 时逐条展示；门禁/耗尽只有 message，则显示该条
         const list = Array.isArray(d.errors) ? d.errors.slice() : [];
         errors.value = list.length ? list : [d.message || CODE_TEXT[d.error] || e.message || '预览失败'];
+        previewVersion.value = '';   // 失败即无有效预览
         // 失败一律不清空 days：保留用户已编辑的内容与工量，便于就地修正后重试
       } finally { loading.value = false; }
     }
@@ -159,38 +162,34 @@ const PlanSplitDlg = {
     async function reparseRow() { await reparse(); }
 
     async function submit() {
-      // Step 6 临时：仅预览，确认落库属 Step 7；本函数绝不调用旧确认接口 /split
-      if (CONFIRM_DISABLED) {
-        ElementPlus.ElMessage.warning('拆分确认暂未开放：当前仅支持预览，确认与落库将在后续步骤开放');
+      if (!previewVersion.value) {
+        ElementPlus.ElMessage.warning('请先预览，确认内容与预览一致后才能拆分');
         return;
       }
       if (!canSubmit.value) return;
       submitting.value = true;
       try {
-        const payload = days.value.map(d => {
-          const q = {};
-          Object.keys(d.quantities || {}).forEach(k => {
-            const s = String(d.quantities[k]).trim();
-            if (s === '') q[k] = '';
-            else if (!isNaN(Number(s))) q[k] = Number(s);
-          });
-          return { date: d.date, content: String(d.content || '').trim(), quantities: q };
+        const res = await api.post('/api/workPlans/' + props.plan.id + '/split', {
+          previewVersion: previewVersion.value,
+          days: currentDaysPayload()
         });
-        const res = await api.post('/api/workPlans/' + props.plan.id + '/split', { days: payload });
-        const n = (res.children || []).length;
-        ElementPlus.ElMessage.success('已生成 ' + n + ' 条日计划');
+        const ids = Array.isArray(res.createdPlanIds) ? res.createdPlanIds : [];
+        ElementPlus.ElMessage.success(res.replay ? '该拆分此前已确认，未重复生成' : '已生成 ' + ids.length + ' 条日计划');
         visible.value = false;
-        emit('done', { count: n, batchId: res.batchId });
+        emit('done', { count: ids.length, batchId: res.batchId, firstDayPlanId: res.firstDayPlanId, createdPlanIds: ids, replay: !!res.replay });
       } catch (e) {
         const d = e.data || {};
-        errors.value = Array.isArray(d.errors) ? d.errors : [e.message || '拆分失败'];
-        ElementPlus.ElMessage.error(e.message || '拆分失败');
+        const list = Array.isArray(d.errors) ? d.errors.slice() : [];
+        errors.value = list.length ? list : [d.message || CODE_TEXT[d.error] || e.message || '拆分失败'];
+        // 过期或已拆：旧预览凭据立即失效，必须重新预览
+        if (d.error === 'PREVIEW_STALE' || d.error === 'ALREADY_SPLIT') previewVersion.value = '';
+        ElementPlus.ElMessage.error(errors.value[0]);
       } finally { submitting.value = false; }
     }
 
     return {
       visible, loading, submitting, errors, days, planName, planRange, QTY_LABELS, narrow,
-      canSubmit, CONFIRM_DISABLED, mdLabel, weekday, timeOf, setQty, reparse, reparseRow, submit
+      canSubmit, previewVersion, invalidatePreview, mdLabel, weekday, timeOf, setQty, reparse, reparseRow, submit
     };
   },
   template: `
@@ -231,7 +230,7 @@ const PlanSplitDlg = {
         </el-table-column>
         <el-table-column label="当天内容（可编辑）" min-width="256">
           <template #default="{row}">
-            <el-input v-model="row.content" type="textarea" :autosize="{minRows:2,maxRows:6}" placeholder="当天工作内容" />
+            <el-input v-model="row.content" type="textarea" :autosize="{minRows:2,maxRows:6}" placeholder="当天工作内容" @input="invalidatePreview" />
           </template>
         </el-table-column>
         <el-table-column label="解析结果" min-width="250">
@@ -258,7 +257,7 @@ const PlanSplitDlg = {
             <span class="psp-time">{{ timeOf(row.start) }} ~ {{ timeOf(row.end) }}</span>
             <el-button link type="primary" size="small" class="psp-card-reparse" :disabled="loading" @click="reparseRow">重新预览</el-button>
           </div>
-          <el-input v-model="row.content" type="textarea" :autosize="{minRows:2,maxRows:6}" placeholder="当天工作内容" />
+          <el-input v-model="row.content" type="textarea" :autosize="{minRows:2,maxRows:6}" placeholder="当天工作内容" @input="invalidatePreview" />
           <div class="psp-wd">票号 {{ row.workTicketNo || '—' }}{{ row.isFirstDay ? '（首日·原号）' : '（预览拟号）' }} · 勘察 {{ row.surveyNo || '—' }}</div>
           <split-items-chips :items="row.items" />
           <split-qty-grid :row="row" :labels="QTY_LABELS" @qty="(k, v) => setQty(row, k, v)" />
@@ -266,12 +265,12 @@ const PlanSplitDlg = {
       </div>
     </div>
 
-    <div class="psp-tip">拆分后父计划收缩为第一天（名称不变），其余每天生成一条子计划；勘察编号与工作票编号父子共用，生成文档按各自日期另行生成。</div>
+    <div class="psp-tip"><span v-if="days.length && !previewVersion" class="psp-wd">内容或工量已改动，请重新预览后再确认。</span>拆分后父计划收缩为第一天（名称不变），其余每天生成一条子计划；勘察编号与工作票编号父子共用，生成文档按各自日期另行生成。</div>
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
       <el-button :disabled="loading" @click="reparse">重新预览全部</el-button>
-      <el-button type="primary" :loading="submitting" :disabled="!canSubmit || CONFIRM_DISABLED" :title="CONFIRM_DISABLED ? '拆分确认将在后续步骤开放' : ''" @click="submit">确认拆分{{ CONFIRM_DISABLED ? '（暂未开放）' : '' }}</el-button>
+      <el-button type="primary" :loading="submitting" :disabled="!canSubmit" @click="submit">确认拆分</el-button>
     </template>
   </el-dialog>`
 };
