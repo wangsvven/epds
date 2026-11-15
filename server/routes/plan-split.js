@@ -12,8 +12,10 @@
 const app = require('../core/app');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO } = require('../core/util');
+const crypto = require('crypto');
+const { isDistPowerTicketType, allocateWorkTicketNos } = require('../core/plan-ticket-no');
 const {
-  parseDailyContent, dayList, dayRange, mdLabel, mergeQuantities, QTY_FIELDS
+  parseDailyContent, parseDayItems, dayList, dayRange, mdLabel, mergeQuantities, QTY_FIELDS
 } = require('../core/plan-split');
 
 /* 拆分快照字段：撤销时原样恢复 */
@@ -69,19 +71,161 @@ function precheckSplit(p, res) {
   return true;
 }
 
-/* ---------- 预览：只解析校验，不落库 ---------- */
+/* ---------- Step 6：勘察判别 / 版本摘要 / 规范化（只读，不落库、不占号） ---------- */
+
+/* §2.3 勘察判别：仅「字段缺失或 undefined」可拆；非空普通对象 → 已勘察；其余存在情形一律异常。
+ * 不使用 !survey（会误放行 null / false / 0 / 空串），不以时间戳或编号非空代替勘察判定，
+ * 也不改动勘察 UI 自身的「已勘察」判定。 */
+function surveyTypeLabel(v) {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return '数组';
+  return typeof v;
+}
+function classifySplitSurvey(survey) {
+  if (survey === undefined) return { status: 'allow' };
+  if (survey !== null && typeof survey === 'object' && !Array.isArray(survey)) {
+    const proto = Object.getPrototypeOf(survey);
+    const plain = proto === Object.prototype || proto === null;
+    if (plain && Object.keys(survey).length > 0) return { status: 'block_surveyed' };
+    return { status: 'block_anomalous', message: '勘察字段为空对象或非普通对象，无法判断是否已勘察，请先核对该计划的勘察记录' };
+  }
+  return { status: 'block_anomalous', message: '勘察字段类型异常（' + surveyTypeLabel(survey) + '），无法判断是否已勘察，请先核对该计划的勘察记录' };
+}
+
+/* 稳定序列化：对象键排序、数组保序，保证同输入同串（三段摘要共用） */
+function stableStringify(v) {
+  if (v === undefined) return 'null';
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+}
+function digestOf(v) { return crypto.createHash('sha256').update(stableStringify(v)).digest('hex'); }
+function qtyTuple(q) {
+  return QTY_FIELDS.map(k => String((q || {})[k] == null ? '' : (q || {})[k]));
+}
+
+/* §2.3 预览版本：v1:<源摘要>:<规范化days摘要>:<拟号摘要>
+ * 源值与最终 days 分别绑定（不得只绑 days）；不使用 updatedAt（勘察 PUT 不刷新它）。 */
+function computeSplitPreviewVersion(input) {
+  const b = input || {};
+  const src = {
+    id: String(b.id == null ? '' : b.id),
+    startDate: String(b.startDate == null ? '' : b.startDate),
+    endDate: String(b.endDate == null ? '' : b.endDate),
+    content: String(b.content == null ? '' : b.content),
+    quantities: qtyTuple(b.quantities),
+    ticketType: String(b.ticketType == null ? '' : b.ticketType),
+    surveyNo: String(b.surveyNo == null ? '' : b.surveyNo),
+    workTicketNo: String(b.workTicketNo == null ? '' : b.workTicketNo),
+    surveyClass: String(b.surveyClass == null ? '' : b.surveyClass),
+    splitBatchId: String(b.splitBatchId == null ? '' : b.splitBatchId),
+    parentPlanId: String(b.parentPlanId == null ? '' : b.parentPlanId)
+  };
+  const daysNorm = (b.days || []).map(d => ({
+    date: String(d.date == null ? '' : d.date),
+    content: String(d.content == null ? '' : d.content),
+    quantities: qtyTuple(d.quantities)
+  }));
+  const nosNorm = (b.days || []).map(d => ({
+    date: String(d.date == null ? '' : d.date),
+    workTicketNo: String(d.workTicketNo == null ? '' : d.workTicketNo),
+    surveyNo: String(d.surveyNo == null ? '' : d.surveyNo)
+  }));
+  return 'v1:' + digestOf(src) + ':' + digestOf(daysNorm) + ':' + digestOf(nosNorm);
+}
+
+/* 提交稿 days 规范化：沿用执行拆分时的既有校验（日期格式 / 越界 / 重复 / 内容为空 / 缺日 / 工量合并） */
+function normalizeSubmittedDays(input, expected) {
+  const errors = [];
+  const byDate = {};
+  input.forEach((d, i) => {
+    const date = dateOf(d && d.date);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { errors.push('第 ' + (i + 1) + ' 行日期格式不正确'); return; }
+    if (expected.indexOf(date) < 0) { errors.push('日期 ' + date + ' 不在计划日期范围内'); return; }
+    if (byDate[date]) { errors.push('日期 ' + date + ' 重复'); return; }
+    const content = String((d && d.content) == null ? '' : d.content).trim();
+    if (!content) { errors.push('日期 ' + date + ' 内容为空'); return; }
+    byDate[date] = { date, content, quantities: mergeQuantities({}, (d && d.quantities) || {}) };
+  });
+  expected.forEach(date => { if (!byDate[date]) errors.push('工作内容缺少计划日期：' + date); });
+  if (errors.length) return { ok: false, errors };
+  const days = expected.map(d => byDate[d]);
+  // 条目照内容重建（与文本解析同一套 core 规则），供预览展示
+  let prevItems = [];
+  days.forEach(d => { const items = parseDayItems(d.content, prevItems); d.items = items; prevItems = items; });
+  return { ok: true, days };
+}
+
+/* ---------- 预览：只解析校验与拟号，不落库、不占号、不保存预览态 ---------- */
 app.post('/api/workPlans/:id/split/preview', (req, res) => {
   const p = findPlan(req.params.id);
-  if (!precheckSplit(p, res)) return;
+  if (!p) return res.status(404).json({ error: '未找到计划' });
+  if (p.planType !== '周计划') return res.status(400).json({ error: '仅周计划支持拆分' });
+  // 已拆门禁（原记录 / 子记录）先于勘察门禁：子记录带克隆勘察，须先报 ALREADY_SPLIT
+  if (p.parentPlanId || p.splitBatchId) {
+    return res.status(409).json({ ok: false, error: 'ALREADY_SPLIT', message: '该计划已拆分或为拆分产生的子计划，不能再次拆分' });
+  }
+  const sc = classifySplitSurvey(p.survey);
+  if (sc.status === 'block_surveyed') {
+    return res.status(409).json({ ok: false, error: 'SURVEY_EXISTS', message: '该计划已有勘察记录，不能拆分；如需调整请先处理勘察记录' });
+  }
+  if (sc.status === 'block_anomalous') {
+    return res.status(409).json({ ok: false, error: 'SURVEY_ANOMALOUS', message: sc.message });
+  }
+  // 既有拆分前置条件（与执行拆分一致，本步不新建状态机）
+  if (p.status !== '未执行') return res.status(400).json({ error: '仅「未执行」状态的周计划支持拆分操作' });
+  if (!isCrossDay(p)) return res.status(400).json({ error: '单日计划无需拆分' });
 
   const b = req.body || {};
-  const content = (b.content === undefined || b.content === null) ? String(p.content || '') : String(b.content);
-  const r = parseDailyContent(content, p.startDate, p.endDate);
-  const days = r.days.map(d => {
+  const has = k => Object.prototype.hasOwnProperty.call(b, k) && b[k] !== undefined;
+  if (has('content') && has('days')) {
+    return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'content 与 days 不能同时提供' });
+  }
+  const expected = dayList(p.startDate, p.endDate);
+  let norm;
+  if (has('days')) {
+    // 显式 days 即以此为准：null / 非数组不得静默退回源内容解析
+    if (!Array.isArray(b.days)) {
+      return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'days 必须是数组（如仅按文本预览请改用 content）' });
+    }
+    norm = normalizeSubmittedDays(b.days, expected);
+    if (!norm.ok) return res.status(400).json({ error: '拆分校验未通过', errors: norm.errors });
+  } else {
+    const content = has('content') ? String(b.content) : String(p.content || '');
+    const r = parseDailyContent(content, p.startDate, p.endDate);
+    if (!r.ok) return res.json({ ok: false, errors: r.errors, days: [] });
+    norm = { ok: true, days: r.days.map(d => ({ date: d.date, content: d.content, items: d.items, quantities: d.quantities })) };
+  }
+
+  const srcNo = String(p.workTicketNo == null ? '' : p.workTicketNo);
+  const srcSurveyNo = String(p.surveyNo == null ? '' : p.surveyNo);
+  const dist = isDistPowerTicketType(p.ticketType);
+  // 预演拟号：仅配电非首日；号池不排除源记录（首日保留的源号仍算占用）
+  let planned = [];
+  if (dist && norm.days.length > 1) {
+    const allocated = allocateWorkTicketNos({
+      items: norm.days.slice(1).map(d => ({ ticketType: p.ticketType, yearMonth: String(d.date).slice(0, 7).replace('-', '') })),
+      records: DB.workPlans
+    });
+    if (!allocated.ok) return res.status(400).json({ ok: false, error: allocated.error, message: allocated.message });
+    planned = allocated.workTicketNos;
+  }
+  const days = norm.days.map((d, i) => {
     const rg = dayRange(d.date, p.startDate, p.endDate);
-    return { date: d.date, start: rg.start, end: rg.end, content: d.content, items: d.items, quantities: d.quantities };
+    return {
+      date: d.date, start: rg.start, end: rg.end,
+      content: d.content, items: d.items, quantities: d.quantities,
+      isFirstDay: i === 0,
+      workTicketNo: i === 0 ? srcNo : (dist ? planned[i - 1] : srcNo),   // 首日=源原号原样；线路非首日沿既有口径
+      surveyNo: srcSurveyNo                                              // 各日均为源原勘察号，不为子记录新取
+    };
   });
-  res.json({ ok: r.ok, errors: r.errors, days });
+  const previewVersion = computeSplitPreviewVersion({
+    id: p.id, startDate: p.startDate, endDate: p.endDate, content: p.content, quantities: p,
+    ticketType: p.ticketType, surveyNo: p.surveyNo, workTicketNo: p.workTicketNo,
+    surveyClass: sc.status, splitBatchId: p.splitBatchId, parentPlanId: p.parentPlanId, days
+  });
+  res.json({ ok: true, previewVersion, sourcePlanId: p.id, firstDayPlanId: p.id, days });
 });
 
 /* ---------- 执行拆分：校验通过后一次 saveDB 落库 ---------- */
@@ -192,3 +336,7 @@ app.post('/api/workPlans/:id/unsplit', (req, res) => {
   saveDB();
   res.json({ ok: true, removed: children.length });
 });
+
+/* 供隔离测试直接调用（纯函数，不触库）；路由行为不变 */
+module.exports = { classifySplitSurvey, computeSplitPreviewVersion };
+

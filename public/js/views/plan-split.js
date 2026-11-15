@@ -91,17 +91,33 @@ const PlanSplitDlg = {
       row.quantities = q;
       row.qtyTouched = true;
     }
-    // 用当前行内容重组整篇文档：标题用「M月D日：」，与解析器的显式日期口径一致
-    function rebuildContent() {
-      return days.value.map(d => mdLabel(d.date) + '：' + String(d.content || '')).join('\n');
+    // 当前编辑稿（日期/内容/7 项工量）：重新预览必须发这个，不得发旧 content 丢掉改动
+    function currentDaysPayload() {
+      return days.value.map(d => {
+        const q = {};
+        Object.keys(d.quantities || {}).forEach(k => {
+          const s = String(d.quantities[k]).trim();
+          if (s === '') q[k] = '';
+          else if (!isNaN(Number(s))) q[k] = Number(s);
+        });
+        return { date: d.date, content: String(d.content || '').trim(), quantities: q };
+      });
     }
+    // 门禁/耗尽错误码的服务端已带中文 message；兜底用本地文案，避免只弹英文码
+    const CODE_TEXT = {
+      SURVEY_EXISTS: '该计划已有勘察记录，不能拆分',
+      SURVEY_ANOMALOUS: '勘察字段异常，无法判断是否已勘察',
+      ALREADY_SPLIT: '该计划已拆分或为子计划，不能再次拆分',
+      EXHAUSTED: '当月该票种工作票号已用完，无法拆分',
+      INVALID_INPUT: '请求不合法：content 与 days 不能同时提供'
+    };
 
-    async function preview(content) {
+    async function preview(payload) {
       if (!props.plan) return;
       loading.value = true;
       try {
-        const body = (content === undefined) ? {} : { content: content };
-        const res = await api.post('/api/workPlans/' + props.plan.id + '/split/preview', body);
+        // 初始预览发 {}（按源计划内容解析）；重新预览由 reparse 传 { days: 当前编辑稿 }
+        const res = await api.post('/api/workPlans/' + props.plan.id + '/split/preview', payload || {});
         errors.value = Array.isArray(res.errors) ? res.errors : [];
         const prev = {};
         days.value.forEach(d => { prev[d.date] = d; });
@@ -113,7 +129,8 @@ const PlanSplitDlg = {
           return row;
         });
       } catch (e) {
-        errors.value = [e.message || '预览失败'];
+        const d = e.data || {};
+        errors.value = [d.message || CODE_TEXT[d.error] || e.message || '预览失败'];
         days.value = [];
       } finally { loading.value = false; }
     }
@@ -130,7 +147,7 @@ const PlanSplitDlg = {
       preview();
     });
 
-    async function reparse() { await preview(rebuildContent()); }
+    async function reparse() { await preview({ days: currentDaysPayload() }); }
     async function reparseRow() { await reparse(); }
 
     async function submit() {
@@ -193,6 +210,12 @@ const PlanSplitDlg = {
             <div v-if="String(row.end).slice(0,10) !== String(row.start).slice(0,10)" class="psp-wd">次日结束</div>
           </template>
         </el-table-column>
+        <el-table-column label="拟票号 / 勘察号" width="170">
+          <template #default="{row}">
+            <div class="psp-date">{{ row.workTicketNo || '—' }}</div>
+            <div class="psp-wd">{{ row.isFirstDay ? '首日·原号' : '预览拟号' }} · 勘察 {{ row.surveyNo || '—' }}</div>
+          </template>
+        </el-table-column>
         <el-table-column label="当天内容（可编辑）" min-width="256">
           <template #default="{row}">
             <el-input v-model="row.content" type="textarea" :autosize="{minRows:2,maxRows:6}" placeholder="当天工作内容" />
@@ -208,7 +231,7 @@ const PlanSplitDlg = {
         </el-table-column>
         <el-table-column label="操作" width="86" align="center">
           <template #default>
-            <el-button link type="primary" size="small" :disabled="loading" @click="reparseRow">重新解析</el-button>
+            <el-button link type="primary" size="small" :disabled="loading" @click="reparseRow">重新预览</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -220,9 +243,10 @@ const PlanSplitDlg = {
             <b>{{ mdLabel(row.date) }}</b>
             <span class="psp-wd">{{ weekday(row.date) }}</span>
             <span class="psp-time">{{ timeOf(row.start) }} ~ {{ timeOf(row.end) }}</span>
-            <el-button link type="primary" size="small" class="psp-card-reparse" :disabled="loading" @click="reparseRow">重新解析</el-button>
+            <el-button link type="primary" size="small" class="psp-card-reparse" :disabled="loading" @click="reparseRow">重新预览</el-button>
           </div>
           <el-input v-model="row.content" type="textarea" :autosize="{minRows:2,maxRows:6}" placeholder="当天工作内容" />
+          <div class="psp-wd">票号 {{ row.workTicketNo || '—' }}{{ row.isFirstDay ? '（首日·原号）' : '（预览拟号）' }} · 勘察 {{ row.surveyNo || '—' }}</div>
           <split-items-chips :items="row.items" />
           <split-qty-grid :row="row" :labels="QTY_LABELS" @qty="(k, v) => setQty(row, k, v)" />
         </div>
@@ -233,7 +257,7 @@ const PlanSplitDlg = {
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button :disabled="loading" @click="reparse">重新解析全部</el-button>
+      <el-button :disabled="loading" @click="reparse">重新预览全部</el-button>
       <el-button type="primary" :loading="submitting" :disabled="!canSubmit" @click="submit">确认拆分</el-button>
     </template>
   </el-dialog>`

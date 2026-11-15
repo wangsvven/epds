@@ -26,6 +26,7 @@ const ROOT = path.join(__dirname, '..');
 const APP_PATH = require.resolve(path.join(ROOT, 'server/core/app.js'));
 const DB_PATH = require.resolve(path.join(ROOT, 'server/core/db.js'));
 const PLANS_PATH = require.resolve(path.join(ROOT, 'server/routes/plans.js'));
+const SPLIT_ROUTES_PATH = require.resolve(path.join(ROOT, 'server/routes/plan-split.js'));
 const REAL_DB = path.join(ROOT, 'data', 'db.json');
 const md5 = p => crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex');
 const REAL_DB_MD5_BEFORE = md5(REAL_DB);
@@ -72,6 +73,8 @@ Module._load = function (request, parent, isMain) {
 delete require.cache[PLANS_PATH];
 try {
   require(PLANS_PATH);
+  // Step 6：同一隔离沙箱内加载拆分路由（真实注册；不监听端口、不触真实库）
+  require(SPLIT_ROUTES_PATH);
 } finally {
   Module._load = origLoad;
 }
@@ -1520,6 +1523,256 @@ async function exportCall(seed, query) {
   };
   await exportHandler(req, res, () => { throw new Error('unexpected next()'); });
   return res;
+}
+
+// Step 6：拆分路由（同一隔离沙箱注册）
+const splitPreviewH = (routes.find(r => r.method === 'POST' && r.path === '/api/workPlans/:id/split/preview') || {}).handler;
+const splitCommitH = (routes.find(r => r.method === 'POST' && r.path === '/api/workPlans/:id/split') || {}).handler;
+const splitUndoH = (routes.find(r => r.method === 'POST' && r.path === '/api/workPlans/:id/unsplit') || {}).handler;
+const PSM = require(SPLIT_ROUTES_PATH);
+
+/* ========== Step 6：R 拆分预览（勘察门禁 / 互斥 / 拟号 / 版本 / 不落库） ========== */
+g('R 拆分预览（Step 6：勘察门禁 / 互斥三路径 / 拟号 / 版本摘要 / 不落库）');
+const SP_Y = Number(YM.slice(0, 4)), SP_M = Number(YM.slice(4, 6));
+const SP_CM = YM.slice(0, 4) + '-' + YM.slice(4, 6);
+const SP_NM = (SP_M === 12 ? SP_Y + 1 : SP_Y) + '-' + String(SP_M === 12 ? 1 : SP_M + 1).padStart(2, '0');
+const SP_D1 = SP_CM + '-20';
+const SP_D2 = SP_CM + '-21';
+const SP_ID = 'wp-sp1';
+const spPlan = extra => Object.assign({
+  id: SP_ID, planType: '周计划', status: '未执行',
+  startDate: SP_D1 + ' 08:00:00', endDate: SP_D2 + ' 18:00:00',
+  content: '20日：电杆组立3根\n21日：电缆敷设1200米',
+  ticketType: T1, workTicketNo: N('6', 801), surveyNo: '202611003', deleted: false
+}, extra || {});
+const spDays = () => ([
+  { date: SP_D1, content: '电杆组立3根', quantities: {} },
+  { date: SP_D2, content: '电缆敷设1200米', quantities: {} }
+]);
+function splitCall(handler, id, body, seed, noReset) {
+  if (!noReset) reset(seed);
+  const req = { body, params: { id }, query: {}, headers: {} };
+  const res = {
+    statusCode: 200, payload: undefined,
+    status(n) { this.statusCode = n; return this; }, json(v) { this.payload = v; return this; },
+    send(v) { this.payload = v; return this; }, setHeader() {}
+  };
+  let thrown = null;
+  try { handler(req, res, () => { throw new Error('unexpected next()'); }); }
+  catch (e) { thrown = e; }
+  return { res, thrown };
+}
+const prevCall = (body, seed) => splitCall(splitPreviewH, SP_ID, body, seed);
+
+t('R1 三个拆分端点均注册（preview → split → unsplit 顺序）', () => {
+  assert.equal(typeof splitPreviewH, 'function');
+  assert.equal(typeof splitCommitH, 'function');
+  assert.equal(typeof splitUndoH, 'function');
+  const iP = routes.findIndex(r => r.path === '/api/workPlans/:id/split/preview');
+  const iS = routes.findIndex(r => r.path === '/api/workPlans/:id/split');
+  const iU = routes.findIndex(r => r.path === '/api/workPlans/:id/unsplit');
+  assert.ok(iP > -1 && iS > iP && iU > iS);
+});
+t('R2 content 与 days 同时提供 → 400 INVALID_INPUT、零保存', () => {
+  const r = prevCall({ content: '20日：x', days: spDays() }, [spPlan()]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'INVALID_INPUT');
+  assert.equal(state.saveCalls, 0);
+});
+t('R3 仅 days → 以提交的日期/内容/工量为准', () => {
+  const days = spDays();
+  days[0].quantities = { wlPole: '7' };
+  const r = prevCall({ days }, [spPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.days.length, 2);
+  assert.equal(r.res.payload.days[0].content, '电杆组立3根');
+  assert.equal(r.res.payload.days[0].quantities.wlPole, 7);
+  assert.equal(state.saveCalls, 0);
+});
+t('R4 仅 content → 按文本解析（既有规则）', () => {
+  const r = prevCall({ content: '20日：电杆组立3根\n21日：电杆组立4根' }, [spPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.days.length, 2);
+  assert.equal(r.res.payload.days[1].content, '电杆组立4根');
+});
+t('R5 两者皆无 → 按源计划既有内容解析', () => {
+  const r = prevCall({}, [spPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.days.length, 2);
+  assert.equal(r.res.payload.days[0].content, '电杆组立3根');
+});
+t('R6 days 为 null / 非数组 → 400 INVALID_INPUT，不得退回源内容解析', () => {
+  [null, 'x', {}, 3].forEach(v => {
+    const r = prevCall({ days: v }, [spPlan()]);
+    assert.equal(r.res.statusCode, 400, 'days=' + JSON.stringify(v) + ' 应 400');
+    assert.equal(r.res.payload.error, 'INVALID_INPUT');
+    assert.equal(state.saveCalls, 0);
+  });
+});
+t('R7 缺日 → 400 拆分校验未通过（沿用既有校验）', () => {
+  const r = prevCall({ days: [spDays()[0]] }, [spPlan()]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, '拆分校验未通过');
+  assert.ok(r.res.payload.errors.some(e => /缺少计划日期/.test(e)));
+  assert.equal(state.saveCalls, 0);
+});
+t('R8 重复日 → 400；R9 越界 → 400', () => {
+  const dup = spDays().concat([{ date: SP_D1, content: '重复', quantities: {} }]);
+  const r8 = prevCall({ days: dup }, [spPlan()]);
+  assert.equal(r8.res.statusCode, 400);
+  assert.ok(r8.res.payload.errors.some(e => /重复/.test(e)));
+  const out = spDays().concat([{ date: '2030-01-01', content: '越界', quantities: {} }]);
+  const r9 = prevCall({ days: out }, [spPlan()]);
+  assert.equal(r9.res.statusCode, 400);
+  assert.ok(r9.res.payload.errors.some(e => /不在计划日期范围内/.test(e)));
+  assert.equal(state.saveCalls, 0);
+});
+t('R10 survey 为非空对象 → 409 SURVEY_EXISTS、零保存', () => {
+  const r = prevCall({}, [spPlan({ survey: { surveyNo: '202611003', team: '甲' } })]);
+  assert.equal(r.res.statusCode, 409);
+  assert.equal(r.res.payload.error, 'SURVEY_EXISTS');
+  assert.equal(state.saveCalls, 0);
+});
+t('R11 survey 为 {} / null / false / 0 / 空串 / 数组 / 字符串 → SURVEY_ANOMALOUS', () => {
+  [{}, null, false, 0, '', [], 'x'].forEach(v => {
+    const r = prevCall({}, [spPlan({ survey: v })]);
+    assert.equal(r.res.statusCode, 409, 'survey=' + JSON.stringify(v) + ' 应 409');
+    assert.equal(r.res.payload.error, 'SURVEY_ANOMALOUS', 'survey=' + JSON.stringify(v));
+    assert.equal(state.saveCalls, 0);
+  });
+});
+t('R12 survey 缺失或 undefined → 允许预览', () => {
+  assert.equal(prevCall({}, [spPlan()]).res.statusCode, 200);
+  assert.equal(prevCall({}, [spPlan({ survey: undefined })]).res.statusCode, 200);
+});
+t('R13 已拆原记录 / 子记录 → 409 ALREADY_SPLIT、零保存', () => {
+  const a = prevCall({}, [spPlan({ splitBatchId: 'sp1' })]);
+  assert.equal(a.res.statusCode, 409);
+  assert.equal(a.res.payload.error, 'ALREADY_SPLIT');
+  const b = prevCall({}, [spPlan({ parentPlanId: 'wp-parent', splitBatchId: 'sp1', survey: { a: 1 } })]);
+  assert.equal(b.res.statusCode, 409);
+  assert.equal(b.res.payload.error, 'ALREADY_SPLIT', '子记录优先报已拆，而非勘察门禁');
+  assert.equal(state.saveCalls, 0);
+});
+t('R14 首日保留源原号（旧格式原样）；非首日配电取新号', () => {
+  const r = prevCall({}, [spPlan({ workTicketNo: OLD11 })]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.days[0].workTicketNo, OLD11, '旧格式也原样保留，不强制改号');
+  assert.equal(r.res.payload.days[1].workTicketNo, N('6', 801), '旧号不计入号池，后日从 801 起');
+});
+t('R15 源号仍占号：源 6801 时后日拟号为 6802（不把 6801 再拟给后日）', () => {
+  const r = prevCall({}, [spPlan({ workTicketNo: N('6', 801) })]);
+  assert.equal(r.res.payload.days[0].workTicketNo, N('6', 801));
+  assert.equal(r.res.payload.days[1].workTicketNo, N('6', 802));
+});
+t('R16 跨月：非首日按各自日期所在月独立计池', () => {
+  const lastDay = new Date(Date.UTC(SP_Y, SP_M, 0)).getUTCDate();
+  const dMid = SP_CM + '-' + String(lastDay - 1).padStart(2, '0');
+  const dLast = SP_CM + '-' + String(lastDay).padStart(2, '0');
+  const dNext = SP_NM + '-01';
+  const p = spPlan({ startDate: dMid + ' 08:00:00', endDate: dNext + ' 18:00:00', workTicketNo: N('6', 801) });
+  const days = [{ date: dMid, content: '甲', quantities: {} }, { date: dLast, content: '乙', quantities: {} }, { date: dNext, content: '丙', quantities: {} }];
+  const r = prevCall({ days }, [p]);
+  assert.equal(r.res.statusCode, 200, JSON.stringify(r.res.payload));
+  assert.equal(r.res.payload.days[1].workTicketNo.slice(0, 6), YM, '当月日取当月池');
+  assert.equal(r.res.payload.days[1].workTicketNo, N('6', 802));
+  assert.equal(r.res.payload.days[2].workTicketNo.slice(0, 6), SP_NM.replace('-', ''), '次月日取次月池');
+  assert.equal(r.res.payload.days[2].workTicketNo.slice(6), '6801');
+});
+t('R17 各日 surveyNo 均为源计划原勘察号（不为子记录新取）', () => {
+  const r = prevCall({}, [spPlan({ surveyNo: '202611007' })]);
+  assert.deepEqual(r.res.payload.days.map(d => d.surveyNo), ['202611007', '202611007']);
+});
+t('R18 确定性 + 不占号：两次预览拟号与版本一致、库不变、零 saveDB', () => {
+  const seed = [spPlan()];
+  const a = prevCall({}, seed);
+  const n1 = DB.workPlans.length;
+  const b = prevCall({}, seed);
+  assert.equal(a.res.payload.previewVersion, b.res.payload.previewVersion);
+  assert.deepEqual(a.res.payload.days.map(d => d.workTicketNo), b.res.payload.days.map(d => d.workTicketNo));
+  assert.equal(DB.workPlans.length, n1, '预览不得写库/占号');
+  assert.equal(state.saveCalls, 0);
+});
+t('R19 版本遮盖：源 content / 源工量 / 任一日内容 / 票种 变化 → previewVersion 必变', () => {
+  const days = spDays();
+  const base = prevCall({ days }, [spPlan()]).res.payload.previewVersion;
+  const vContent = prevCall({ days }, [spPlan({ content: '20日：源内容改了\n21日：电缆敷设1200米' })]).res.payload.previewVersion;
+  assert.notEqual(vContent, base, 'days 不变但源 content 变 → 版本须变（源值单独绑定）');
+  const vQty = prevCall({ days }, [spPlan({ wlPole: '9' })]).res.payload.previewVersion;
+  assert.notEqual(vQty, base, '源工量变 → 版本须变');
+  const days2 = spDays(); days2[1].content = '电缆敷设1300米';
+  const vDay = prevCall({ days: days2 }, [spPlan()]).res.payload.previewVersion;
+  assert.notEqual(vDay, base, '任一日内容变 → 版本须变');
+  const vType = prevCall({ days }, [spPlan({ ticketType: T1, workTicketNo: N('6', 801), content: 'x' })]).res.payload.previewVersion;
+  assert.notEqual(vType, base, '源 content 改 x 亦变（覆盖性校验）');
+});
+t('R21 某月某票种 801–999 占满 → 400 EXHAUSTED（指明月与票种）、零保存', () => {
+  const fill = [];
+  for (let s = 801; s <= 999; s++) fill.push({ id: 'f' + s, planType: '周计划', ticketType: T1, workTicketNo: N('6', s), deleted: false });
+  const r = prevCall({}, [spPlan({ workTicketNo: N('6', 801) })].concat(fill));
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'EXHAUSTED');
+  assert.ok(r.res.payload.message.indexOf(YM_LABEL) > -1, '应指明月份：' + r.res.payload.message);
+  assert.ok(r.res.payload.message.indexOf(T1) > -1, '应指明票种');
+  assert.equal(state.saveCalls, 0);
+});
+t('R22 回归：确认拆分与撤销端点行为未动（子计划沿用父号/勘察号）', () => {
+  const r = splitCall(splitCommitH, SP_ID, { days: spDays() }, [spPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.children.length, 1);
+  const child = DB.workPlans.find(x => x.id === r.res.payload.children[0].id);
+  assert.equal(child.workTicketNo, N('6', 801), '确认仍沿用父号（本步未改落库）');
+  assert.equal(child.surveyNo, '202611003');
+  assert.equal(state.saveCalls, 1);
+  const u = splitCall(splitUndoH, SP_ID, {}, null, true);
+  assert.equal(u.res.statusCode, 200);
+  assert.equal(u.res.payload.removed, 1);
+});
+t('R23 边界：未实现/未假引用 assertCanSplit 与 splitCommitVersion；未改 core/plan-split.js', () => {
+  const src = fs.readFileSync(SPLIT_ROUTES_PATH, 'utf8');
+  assert.doesNotMatch(src, /assertCanSplit/);
+  assert.doesNotMatch(src, /splitCommitVersion/);
+  const coreSrc = fs.readFileSync(path.join(ROOT, 'server/core/plan-split.js'), 'utf8');
+  assert.doesNotMatch(coreSrc, /splitBatchId|classifySplitSurvey|previewVersion/, '本步未改 core helper');
+});
+t('R20 前端改稿保留：重新预览发送当前 days（而非旧 content），改稿不丢', async () => {
+  const h = splitViewHarness();
+  h.view.days.value = [
+    { date: SP_D1, content: '用户改过的第一天', quantities: { wlPole: '7' } },
+    { date: SP_D2, content: '电缆敷设1200米', quantities: {} }
+  ];
+  await h.view.reparse();
+  assert.equal(h.calls.post.length, 1);
+  const body = h.calls.post[0].b;
+  assert.ok(Array.isArray(body.days), '必须发送 days');
+  assert.equal(body.content, undefined, '不得再发送旧 content');
+  assert.equal(body.days[0].content, '用户改过的第一天');
+  assert.equal(body.days[0].quantities.wlPole, 7);
+  assert.equal(body.days.length, 2);
+});
+
+// Step 6 前端沙箱：真实 views/plan-split.js + 桩 Vue/api/ElementPlus（不触网、不挂载 DOM）
+function splitViewHarness() {
+  const calls = { post: [] };
+  const sb = { console, setTimeout, clearTimeout, JSON };
+  vm.createContext(sb);
+  vm.runInContext('globalThis.window = globalThis;', sb);
+  sb.Vue = {
+    ref: v => ({ value: v }),
+    computed: fn => ({ get value() { return fn(); } }),
+    watch: () => {}, onMounted: () => {}, onUnmounted: () => {}, nextTick: fn => (fn ? fn() : undefined)
+  };
+  sb.api = {
+    async post(u, b) {
+      calls.post.push({ u, b });
+      return { ok: true, previewVersion: 'v1:stub', sourcePlanId: 'wp-sp1', firstDayPlanId: 'wp-sp1', days: (b && b.days) || [] };
+    }
+  };
+  sb.ElementPlus = { ElMessage: { success() {}, error() {}, warning() {}, info() {} } };
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/js/views/plan-split.js'), 'utf8')
+    + '\n;globalThis.__PS = PlanSplitDlg;', sb, { filename: 'views/plan-split.js' });
+  const view = sb.__PS.setup({ modelValue: true, plan: { id: 'wp-sp1' } }, { emit() {} });
+  return { view, calls };
 }
 
 /* ---------- 执行与汇总 ---------- */
