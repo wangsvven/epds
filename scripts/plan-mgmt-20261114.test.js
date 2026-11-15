@@ -1728,24 +1728,32 @@ t('R21 某月某票种 801–999 占满 → 400 EXHAUSTED（指明月与票种�
   assert.ok(r.res.payload.message.indexOf(T1) > -1, '应指明票种');
   assert.equal(state.saveCalls, 0);
 });
-t('R22 回归：确认拆分与撤销端点行为未动（子计划沿用父号/勘察号）', () => {
-  const r = splitCall(splitCommitH, SP_ID, { days: spDays() }, [spPlan()]);
-  assert.equal(r.res.statusCode, 200);
-  assert.equal(r.res.payload.children.length, 1);
-  const child = DB.workPlans.find(x => x.id === r.res.payload.children[0].id);
-  assert.equal(child.workTicketNo, N('6', 801), '确认仍沿用父号（本步未改落库）');
-  assert.equal(child.surveyNo, '202611003');
-  assert.equal(state.saveCalls, 1);
-  const u = splitCall(splitUndoH, SP_ID, {}, null, true);
-  assert.equal(u.res.statusCode, 200);
-  assert.equal(u.res.payload.removed, 1);
+const confirmPayload = pv => ({
+  previewVersion: pv.previewVersion,
+  days: (pv.days || []).map(d => ({ date: d.date, content: d.content, quantities: d.quantities }))
 });
-t('R23 边界：未实现/未假引用 assertCanSplit 与 splitCommitVersion；未改 core/plan-split.js', () => {
+t('R22 确认拆分（新语义）：首日旧号保留、后日取新号、勘察不复制、撤销返回 410', () => {
+  const seed = [spPlan({ workTicketNo: OLD11 })];
+  const pv = prevCall({}, seed).res.payload;
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), [spPlan({ workTicketNo: OLD11 })]);
+  assert.equal(c.res.statusCode, 200, JSON.stringify(c.res.payload));
+  const parent = DB.workPlans.find(x => x.id === SP_ID);
+  assert.equal(parent.workTicketNo, OLD11, '首日保留源原号（旧格式也不强制改号）');
+  const child = DB.workPlans.find(x => x.parentPlanId === SP_ID);
+  assert.equal(child.workTicketNo, N('6', 801), '后日按配电新格式取号');
+  assert.equal(child.survey, undefined, '不复制勘察对象');
+  assert.equal(child.surveyNo, parent.surveyNo, '各日共用源勘察号');
+  const u = splitCall(splitUndoH, SP_ID, {}, null, true);
+  assert.equal(u.res.statusCode, 410);
+  assert.equal(u.res.payload.error, 'SPLIT_IRREVERSIBLE');
+});
+t('R23 新实现契约：assertCanSplit 唯一实现、仅首日写 splitCommitVersion、不再写快照、core 未改', () => {
   const src = fs.readFileSync(SPLIT_ROUTES_PATH, 'utf8');
-  assert.doesNotMatch(src, /assertCanSplit/);
-  assert.doesNotMatch(src, /splitCommitVersion/);
+  assert.equal((src.match(/function assertCanSplit/g) || []).length, 1, 'assertCanSplit 应唯一实现');
+  assert.match(src, /splitCommitVersion = version/);
+  assert.doesNotMatch(src, /p\.splitSnapshot\s*=/, '不再写拆分快照');
   const coreSrc = fs.readFileSync(path.join(ROOT, 'server/core/plan-split.js'), 'utf8');
-  assert.doesNotMatch(coreSrc, /splitBatchId|classifySplitSurvey|previewVersion/, '本步未改 core helper');
+  assert.doesNotMatch(coreSrc, /splitCommitVersion|classifySplitSurvey|assertCanSplit/, '本包未改 core helper');
 });
 t('R20 前端改稿保留：重新预览发送当前 days（而非旧 content），改稿不丢', async () => {
   const h = splitViewHarness();
@@ -1869,6 +1877,166 @@ t('S8 单日计划仍按现行前置拒绝（至少两日的门禁入口未变�
   const r = prevCall({}, [spPlan({ endDate: SP_D1 + ' 18:00:00' })]);
   assert.equal(r.res.statusCode, 400);
   assert.match(String(r.res.payload.error), /单日计划无需拆分/);
+  assert.equal(state.saveCalls, 0);
+});
+
+/* ========== Step 7：T 确认拆分（版本复核 / 精确重放 / 取号 / 回滚 / 关闭撤销） ========== */
+g('T 确认拆分（Step 7：版本复核 / 精确重放 / 取号与回滚 / unsplit 410）');
+t('T1 首次确认成功：首日旧号保留、后日新号、勘察不复制、仅首日写 splitCommitVersion', () => {
+  const seed = () => [spPlan({ workTicketNo: OLD11 })];
+  const pv = prevCall({}, seed()).res.payload;
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), seed());
+  assert.equal(c.res.statusCode, 200, JSON.stringify(c.res.payload));
+  const parent = DB.workPlans.find(x => x.id === SP_ID);
+  assert.equal(parent.splitCommitVersion, pv.previewVersion);
+  assert.equal(parent.splitSnapshot, undefined, '不再写拆分快照');
+  const kids = DB.workPlans.filter(x => x.parentPlanId === SP_ID);
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].splitCommitVersion, undefined, '仅首日（父）带版本');
+  assert.equal(kids[0].workTicketNo, N('6', 801));
+  assert.equal(kids[0].survey, undefined);
+  assert.equal(c.res.payload.firstDayPlanId, SP_ID);
+  assert.deepEqual(c.res.payload.createdPlanIds, kids.map(k => k.id));
+  assert.equal(c.res.payload.children, undefined, '不再返回旧 children 字段');
+  assert.equal(state.saveCalls, 1);
+});
+t('T2 源值或 days 改动 → 409 PREVIEW_STALE、零保存', () => {
+  const seed = () => [spPlan()];
+  const pv = prevCall({}, seed()).res.payload;
+  const body = confirmPayload(pv);
+  body.days[1].content = '确认前又改过';
+  const c = splitCall(splitCommitH, SP_ID, body, seed());
+  assert.equal(c.res.statusCode, 409);
+  assert.equal(c.res.payload.error, 'PREVIEW_STALE');
+  assert.equal(state.saveCalls, 0);
+  const body2 = confirmPayload(pv);
+  const c2 = splitCall(splitCommitH, SP_ID, body2, [spPlan({ content: '源内容改了\n第二行' })]);
+  assert.equal(c2.res.statusCode, 409);
+  assert.equal(c2.res.payload.error, 'PREVIEW_STALE');
+  assert.equal(state.saveCalls, 0);
+});
+t('T3 缺 previewVersion / 仅 content → 400 INVALID_INPUT、零保存', () => {
+  const a = splitCall(splitCommitH, SP_ID, { days: spDays() }, [spPlan()]);
+  assert.equal(a.res.statusCode, 400);
+  assert.equal(a.res.payload.error, 'INVALID_INPUT');
+  const b = splitCall(splitCommitH, SP_ID, { content: '20日：x', previewVersion: 'v1:a:b:c' }, [spPlan()]);
+  assert.equal(b.res.statusCode, 400);
+  assert.equal(b.res.payload.error, 'INVALID_INPUT');
+  assert.equal(state.saveCalls, 0);
+});
+t('T4 确认时 days 非法（缺日）→ 400 拆分校验未通过、零保存', () => {
+  const c = splitCall(splitCommitH, SP_ID, { previewVersion: 'v1:a:b:c', days: [spDays()[0]] }, [spPlan()]);
+  assert.equal(c.res.statusCode, 400);
+  assert.equal(c.res.payload.error, '拆分校验未通过');
+  assert.ok(c.res.payload.errors.some(e => /缺少计划日期/.test(e)));
+  assert.equal(state.saveCalls, 0);
+});
+t('T5 精确重放：同版本同 days → 200 replay，同一 batchId/createdPlanIds，不保存', () => {
+  const seed = () => [spPlan()];
+  const pv = prevCall({}, seed()).res.payload;
+  const body = confirmPayload(pv);
+  const c1 = splitCall(splitCommitH, SP_ID, body, seed());
+  assert.equal(c1.res.statusCode, 200);
+  const save1 = state.saveCalls;
+  const c2 = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(c2.res.statusCode, 200);
+  assert.equal(c2.res.payload.replay, true);
+  assert.equal(c2.res.payload.batchId, c1.res.payload.batchId);
+  assert.deepEqual(c2.res.payload.createdPlanIds, c1.res.payload.createdPlanIds);
+  assert.equal(state.saveCalls, save1, '重放不得再次保存');
+});
+t('T6 已拆 + 版本相同但 days 摘要不同 → 409 ALREADY_SPLIT、不保存', () => {
+  const seed = () => [spPlan()];
+  const pv = prevCall({}, seed()).res.payload;
+  splitCall(splitCommitH, SP_ID, confirmPayload(pv), seed());
+  const save1 = state.saveCalls;
+  const body = confirmPayload(pv);
+  body.days[0].content = '篡改内容';
+  const c = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(c.res.statusCode, 409);
+  assert.equal(c.res.payload.error, 'ALREADY_SPLIT');
+  assert.equal(state.saveCalls, save1);
+});
+t('T7 重放列表：含软删子记录、排除无关同父记录、顺序稳定', () => {
+  const seed = () => [spPlan()];
+  const pv = prevCall({}, seed()).res.payload;
+  const body = confirmPayload(pv);
+  const c1 = splitCall(splitCommitH, SP_ID, body, seed());
+  const kidId = c1.res.payload.createdPlanIds[0];
+  const kid = DB.workPlans.find(x => x.id === kidId);
+  kid.deleted = true;                                        // 软删后仍应出现在重放列表
+  DB.workPlans.push({ id: 'unrelated', parentPlanId: SP_ID, splitBatchId: 'other', deleted: false });
+  const c2 = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(c2.res.statusCode, 200);
+  assert.equal(c2.res.payload.replay, true);
+  assert.deepEqual(c2.res.payload.createdPlanIds, [kidId]);
+});
+t('T8 源号占池：源 6801 时后日确认得 6802（不把源号再分给后日）', () => {
+  const seed = () => [spPlan({ workTicketNo: N('6', 801) })];
+  const pv = prevCall({}, seed()).res.payload;
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), seed());
+  assert.equal(c.res.statusCode, 200);
+  const kids = DB.workPlans.filter(x => x.parentPlanId === SP_ID);
+  assert.equal(kids[0].workTicketNo, N('6', 802));
+});
+t('T9 跨月确认：非首日按各自月份取号', () => {
+  const lastDay = new Date(Date.UTC(SP_Y, SP_M, 0)).getUTCDate();
+  const dMid = SP_CM + '-' + String(lastDay - 1).padStart(2, '0');
+  const dLast = SP_CM + '-' + String(lastDay).padStart(2, '0');
+  const dNext = SP_NM + '-01';
+  const mk = () => spPlan({ startDate: dMid + ' 08:00:00', endDate: dNext + ' 18:00:00', workTicketNo: N('6', 801) });
+  const days = [{ date: dMid, content: '甲', quantities: {} }, { date: dLast, content: '乙', quantities: {} }, { date: dNext, content: '丙', quantities: {} }];
+  const pv = prevCall({ days }, [mk()]).res.payload;
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), [mk()]);
+  assert.equal(c.res.statusCode, 200, JSON.stringify(c.res.payload));
+  const kids = DB.workPlans.filter(x => x.parentPlanId === SP_ID).sort((a, b) => (a.startDate < b.startDate ? -1 : 1));
+  assert.equal(kids[0].workTicketNo, N('6', 802));
+  assert.equal(kids[1].workTicketNo.slice(0, 6), SP_NM.replace('-', ''));
+  assert.equal(kids[1].workTicketNo.slice(6), '6801');
+});
+t('T10 任一日耗尽 → 400 EXHAUSTED、整次零保存', () => {
+  const fill = [];
+  for (let s = 801; s <= 999; s++) fill.push({ id: 'f' + s, planType: '周计划', ticketType: T1, workTicketNo: N('6', s), deleted: false });
+  const seed = [spPlan({ workTicketNo: N('6', 801) })].concat(fill);
+  const c = splitCall(splitCommitH, SP_ID, { previewVersion: 'v1:a:b:c', days: spDays() }, seed);
+  assert.equal(c.res.statusCode, 400);
+  assert.equal(c.res.payload.error, 'EXHAUSTED');
+  assert.ok(c.res.payload.message.indexOf(YM_LABEL) > -1);
+  assert.equal(state.saveCalls, 0);
+});
+t('T11 saveDB 抛错 → 500 SAVE_FAILED，父记录还原、无子记录残留、仅一次保存尝试', () => {
+  const seed = () => [spPlan({ workTicketNo: N('6', 801) })];
+  const pv = prevCall({}, seed()).res.payload;
+  reset(seed());
+  state.throwNext = true;
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), null, true);
+  assert.equal(c.res.statusCode, 500);
+  assert.equal(c.res.payload.error, 'SAVE_FAILED');
+  assert.equal(state.saveCalls, 1, '失败后不得重试');
+  const parent = DB.workPlans.find(x => x.id === SP_ID);
+  assert.equal(parent.splitBatchId, undefined, '父记录拆分标记须还原');
+  assert.equal(parent.endDate, SP_D2 + ' 18:00:00', '父记录结束时间须还原');
+  assert.equal(DB.workPlans.filter(x => x.parentPlanId === SP_ID).length, 0, '不得残留子记录');
+});
+t('T13 确认同样受勘察门禁：非空 survey → SURVEY_EXISTS；{} → SURVEY_ANOMALOUS，零保存', () => {
+  const a = splitCall(splitCommitH, SP_ID, { previewVersion: 'v1:a:b:c', days: spDays() }, [spPlan({ survey: { a: 1 } })]);
+  assert.equal(a.res.statusCode, 409);
+  assert.equal(a.res.payload.error, 'SURVEY_EXISTS');
+  const b = splitCall(splitCommitH, SP_ID, { previewVersion: 'v1:a:b:c', days: spDays() }, [spPlan({ survey: {} })]);
+  assert.equal(b.res.statusCode, 409);
+  assert.equal(b.res.payload.error, 'SURVEY_ANOMALOUS');
+  assert.equal(state.saveCalls, 0);
+});
+t('T14 unsplit 明确拒绝：410 SPLIT_IRREVERSIBLE，快照/掩码/子记录均未动', () => {
+  const parent = spPlan({ splitBatchId: 'sp-old', splitCommitVersion: 'v1:a:b:c', splitSnapshot: { endDate: '2026-11-30 10:00:00' } });
+  const kid = { id: 'k1', parentPlanId: SP_ID, splitBatchId: 'sp-old', deleted: false };
+  const u = splitCall(splitUndoH, SP_ID, {}, [parent, kid]);
+  assert.equal(u.res.statusCode, 410);
+  assert.equal(u.res.payload.error, 'SPLIT_IRREVERSIBLE');
+  const after = DB.workPlans.find(x => x.id === SP_ID);
+  assert.equal(after.splitBatchId, 'sp-old');
+  assert.deepEqual(after.splitSnapshot, { endDate: '2026-11-30 10:00:00' });
+  assert.equal(DB.workPlans.find(x => x.id === 'k1').deleted, false);
   assert.equal(state.saveCalls, 0);
 });
 

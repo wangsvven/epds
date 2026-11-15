@@ -1,27 +1,26 @@
 /* ========== routes/plan-split ==========
- * 周计划拆分：预览 / 执行 / 撤销 三个接口。
+ * 周计划拆分：预览 / 确认 两个接口（撤销端点自 Step 7 起关闭返回 410）。
  * 注册顺序：必须在 routes/plans.js 的 workPlans 通用 CRUD 之前（server.js 中先 require 本文件）。
  *
- * 口径（用户 2026-11-10 定版）：
- *   - 子计划沿用父计划的勘察编号与工作票编号，不生成子编号；
+ * 口径（Step 6 预览 + Step 7 确认，沿用 2026-11-10 定版并按其演进）：
+ *   - 首日保留源计划工作票号原样（含历史旧号/缺号，不强制改号）；配电非首日按各自所在月新取号，
+ *     线路等非配电沿既有口径；各日共用源勘察编号，不为子记录新取号、不复制勘察对象；
  *   - 子计划状态 = 未执行；父计划不改名，收缩为第一天，子计划名 = 原名 +「（M月D日）」；
- *   - 父计划有勘察记录时给每个子计划各复制一份（生成文档/图纸/压缩包不复制）；
- *   - 撤销受子计划状态、拆分后编辑（updatedAt ≠ createdAt，含工程量时间戳）、
- *     以及勘察是否为本批克隆/是否被编辑三条约束。
+ *   - 确认须带 previewVersion + 完整 days；同版本同 days 的重复提交按精确重放返回同一结果；
+ *     仅新成功拆分时在首日写 splitCommitVersion（不写 splitSnapshot，快照仅历史记录保留）；
+ *   - 撤销拆分不可用（SPLIT_IRREVERSIBLE），不改动历史快照与父子关系。
  */
 const app = require('../core/app');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO } = require('../core/util');
 const crypto = require('crypto');
-const { isDistPowerTicketType, allocateWorkTicketNos } = require('../core/plan-ticket-no');
+const { isDistPowerTicketType, allocateWorkTicketNos, assertDistWorkTicketNoAvailable } = require('../core/plan-ticket-no');
 const {
   parseDailyContent, parseDayItems, dayList, dayRange, mdLabel, mergeQuantities, QTY_FIELDS
 } = require('../core/plan-split');
 
-/* 拆分快照字段：撤销时原样恢复 */
-const SNAP_FIELDS = ['startDate', 'endDate', 'content', 'shadowContent'].concat(QTY_FIELDS);
 /* 子计划不继承的字段（生成物随计划走，不复制；工程量时间戳属父计划） */
-const CHILD_DROP_FIELDS = ['splitSnapshot', 'generatedFiles', 'drawings', 'materialPackage', 'package',
+const CHILD_DROP_FIELDS = ['splitCommitVersion', 'splitSnapshot', 'generatedFiles', 'drawings', 'materialPackage', 'package',
   'quantitiesUpdatedAt', 'quantitiesUpdatedBy'];
 
 function findPlan(id) {
@@ -32,11 +31,6 @@ function findPlan(id) {
 function dateOf(v) { return String(v == null ? '' : v).slice(0, 10); }
 function isCrossDay(p) { return dateOf(p.endDate) > dateOf(p.startDate); }
 function clone(v) { return JSON.parse(JSON.stringify(v)); }
-function pick(o, keys) {
-  const r = {};
-  keys.forEach(k => { if (o[k] !== undefined) r[k] = o[k]; });
-  return r;
-}
 function qtyToText(v) {
   if (v === '' || v === null || v === undefined) return '';
   const n = Number(v);
@@ -47,28 +41,26 @@ function applyQty(target, q) {
   QTY_FIELDS.forEach(k => { target[k] = qtyToText(q ? q[k] : ''); });
 }
 
-/* 勘察克隆：深拷贝本体、重发危险点 id、打批次标记、时间戳刷新；父记录不动 */
-function cloneSurvey(src, batchId, now) {
-  const s = clone(src);
-  s.splitBatchId = batchId;
-  s.createdAt = now;
-  s.updatedAt = now;
-  if (Array.isArray(s.hazardPoints)) {
-    s.hazardPoints = s.hazardPoints.map(h => Object.assign({}, h, { id: genId('hz') }));
-  }
-  return s;
-}
 
-/* preview / split 的前置：存在 → 周计划 → 非子计划 → 未拆分 → 未执行 → 跨天
- * 注：「已拆分」的父计划因收缩成第一天会先命中「单日」，故批次判断必须早于跨天判断。 */
-function precheckSplit(p, res) {
-  if (!p) { res.status(404).json({ error: '未找到计划' }); return false; }
-  if (p.planType !== '周计划') { res.status(400).json({ error: '仅周计划支持拆分' }); return false; }
-  if (p.parentPlanId) { res.status(400).json({ error: '子计划不能再次拆分' }); return false; }
-  if (p.splitBatchId) { res.status(409).json({ error: '该计划已拆分，如需调整请先撤销拆分' }); return false; }
-  if (p.status !== '未执行') { res.status(400).json({ error: '仅「未执行」状态的周计划支持拆分操作' }); return false; }
-  if (!isCrossDay(p)) { res.status(400).json({ error: '单日计划无需拆分' }); return false; }
-  return true;
+/* 统一门禁（预览与首次确认共用）：存在 → 周计划 → 已拆(原/子) → 勘察 → 未执行 → 跨天。
+ * 已拆判断早于勘察：子记录带克隆勘察，须先报 ALREADY_SPLIT；也早于跨天（父计划收缩成首日）。
+ * 合法精确重放不走本门禁，由确认端点在此之前识别。 */
+function assertCanSplit(p) {
+  if (!p) return { ok: false, status: 404, error: '未找到计划' };
+  if (p.planType !== '周计划') return { ok: false, status: 400, error: '仅周计划支持拆分' };
+  if (p.parentPlanId || p.splitBatchId) {
+    return { ok: false, status: 409, error: 'ALREADY_SPLIT', message: '该计划已拆分或为拆分产生的子计划，不能再次拆分' };
+  }
+  const sc = classifySplitSurvey(p.survey);
+  if (sc.decision === 'block_surveyed') {
+    return { ok: false, status: 409, error: 'SURVEY_EXISTS', message: '该计划已有勘察记录，不能拆分；如需调整请先处理勘察记录' };
+  }
+  if (sc.decision === 'block_anomalous') {
+    return { ok: false, status: 409, error: 'SURVEY_ANOMALOUS', message: sc.message };
+  }
+  if (p.status !== '未执行') return { ok: false, status: 400, error: '仅「未执行」状态的周计划支持拆分操作' };
+  if (!isCrossDay(p)) return { ok: false, status: 400, error: '单日计划无需拆分' };
+  return { ok: true, decision: sc.decision };
 }
 
 /* ---------- Step 6：勘察判别 / 版本摘要 / 规范化（只读，不落库、不占号） ---------- */
@@ -159,22 +151,10 @@ function normalizeSubmittedDays(input, expected) {
 /* ---------- 预览：只解析校验与拟号，不落库、不占号、不保存预览态 ---------- */
 app.post('/api/workPlans/:id/split/preview', (req, res) => {
   const p = findPlan(req.params.id);
-  if (!p) return res.status(404).json({ error: '未找到计划' });
-  if (p.planType !== '周计划') return res.status(400).json({ error: '仅周计划支持拆分' });
-  // 已拆门禁（原记录 / 子记录）先于勘察门禁：子记录带克隆勘察，须先报 ALREADY_SPLIT
-  if (p.parentPlanId || p.splitBatchId) {
-    return res.status(409).json({ ok: false, error: 'ALREADY_SPLIT', message: '该计划已拆分或为拆分产生的子计划，不能再次拆分' });
+  const gate = assertCanSplit(p);
+  if (!gate.ok) {
+    return res.status(gate.status).json({ ok: false, error: gate.error, ...(gate.message ? { message: gate.message } : {}) });
   }
-  const sc = classifySplitSurvey(p.survey);
-  if (sc.decision === 'block_surveyed') {
-    return res.status(409).json({ ok: false, error: 'SURVEY_EXISTS', message: '该计划已有勘察记录，不能拆分；如需调整请先处理勘察记录' });
-  }
-  if (sc.decision === 'block_anomalous') {
-    return res.status(409).json({ ok: false, error: 'SURVEY_ANOMALOUS', message: sc.message });
-  }
-  // 既有拆分前置条件（与执行拆分一致，本步不新建状态机）
-  if (p.status !== '未执行') return res.status(400).json({ error: '仅「未执行」状态的周计划支持拆分操作' });
-  if (!isCrossDay(p)) return res.status(400).json({ error: '单日计划无需拆分' });
 
   const b = req.body || {};
   const has = k => Object.prototype.hasOwnProperty.call(b, k) && b[k] !== undefined;
@@ -227,54 +207,129 @@ app.post('/api/workPlans/:id/split/preview', (req, res) => {
   const previewVersion = computeSplitPreviewVersion({
     id: p.id, startDate: p.startDate, endDate: p.endDate, content: p.content, quantities: p,
     ticketType: p.ticketType, surveyNo: p.surveyNo, workTicketNo: p.workTicketNo,
-    surveyDecision: sc.decision, splitBatchId: p.splitBatchId, parentPlanId: p.parentPlanId, days
+    surveyDecision: gate.decision, splitBatchId: p.splitBatchId, parentPlanId: p.parentPlanId, days
   });
   res.json({ ok: true, previewVersion, sourcePlanId: p.id, firstDayPlanId: p.id, days });
 });
 
-/* ---------- 执行拆分：校验通过后一次 saveDB 落库 ---------- */
+/* ---------- 确认拆分：版本复核 / 精确重放 / 一次 saveDB 落库 ---------- */
+/* 规范化 days 的摘要段：与 preview 的版本第 2 段同源，供重放核对（不重算原预览） */
+function normalizeDaysForDigest(input) {
+  return (Array.isArray(input) ? input : []).map(d => ({
+    date: dateOf(d && d.date),
+    content: String((d && d.content) == null ? '' : d.content).trim(),
+    quantities: mergeQuantities({}, (d && d.quantities) || {})
+  })).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+function daysDigestOf(list) {
+  return digestOf((list || []).map(d => ({
+    date: String(d.date == null ? '' : d.date),
+    content: String(d.content == null ? '' : d.content),
+    quantities: qtyTuple(d.quantities)
+  })));
+}
+/* 同批子记录：同时约束 parentPlanId + splitBatchId，含软删，顺序稳定（首次与重放一致） */
+function splitChildrenOf(p, batchId) {
+  return (DB.workPlans || [])
+    .filter(x => x && x.parentPlanId === p.id && x.splitBatchId === batchId)
+    .sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1
+      : String(a.startDate) > String(b.startDate) ? 1
+        : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+}
+
 app.post('/api/workPlans/:id/split', (req, res) => {
   const p = findPlan(req.params.id);
-  if (!precheckSplit(p, res)) return;
+  if (!p) return res.status(404).json({ ok: false, error: '未找到计划' });
+  const b = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
 
-  const b = req.body || {};
-  const input = Array.isArray(b.days) ? b.days : [];
+  // 1) 精确重放：先于「已拆再拆拒绝」识别（同版本 + 同规范化 days 摘要）
+  const ver = String(b.previewVersion == null ? '' : b.previewVersion);
+  if (p.splitBatchId && p.splitCommitVersion && ver && ver === p.splitCommitVersion && Array.isArray(b.days)) {
+    const seg = String(p.splitCommitVersion).split(':');
+    if (seg.length === 4 && daysDigestOf(normalizeDaysForDigest(b.days)) === seg[2]) {
+      const kids = splitChildrenOf(p, p.splitBatchId);
+      return res.json({
+        ok: true, replay: true, batchId: p.splitBatchId,
+        firstDayPlanId: p.id, createdPlanIds: kids.map(k => k.id)
+      });
+    }
+  }
+
+  // 2) 门禁：与预览同一实现（勘察 / 已拆 / 未执行 / 跨天）
+  const gate = assertCanSplit(p);
+  if (!gate.ok) {
+    return res.status(gate.status).json({ ok: false, error: gate.error, ...(gate.message ? { message: gate.message } : {}) });
+  }
+
+  // 3) 载荷：必须带 previewVersion 与完整 days，不退回 content 解析
+  if (!ver || !Array.isArray(b.days)) {
+    return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: '确认须携带 previewVersion 与完整 days，请先预览' });
+  }
   const expected = dayList(p.startDate, p.endDate);
-  const errors = [];
-  const byDate = {};
-  input.forEach((d, i) => {
-    const date = dateOf(d && d.date);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { errors.push('第 ' + (i + 1) + ' 行日期格式不正确'); return; }
-    if (expected.indexOf(date) < 0) { errors.push('日期 ' + date + ' 不在计划日期范围内'); return; }
-    if (byDate[date]) { errors.push('日期 ' + date + ' 重复'); return; }
-    const content = String((d && d.content) == null ? '' : d.content).trim();
-    if (!content) { errors.push('日期 ' + date + ' 内容为空'); return; }
-    byDate[date] = { date, content, quantities: mergeQuantities({}, (d && d.quantities) || {}) };
+  const norm = normalizeSubmittedDays(b.days, expected);
+  if (!norm.ok) return res.status(400).json({ error: '拆分校验未通过', errors: norm.errors });
+  norm.days.sort((a, c) => (a.date < c.date ? -1 : a.date > c.date ? 1 : 0));
+  if (norm.days.length < 2) return res.status(400).json({ error: '单日计划无需拆分' });
+
+  // 4) 拟号：仅配电非首日；分配池保留源记录（首日保留的源号仍占号）；excludeIds 只用于撞号断言
+  const srcNo = String(p.workTicketNo == null ? '' : p.workTicketNo);
+  const srcSurveyNo = String(p.surveyNo == null ? '' : p.surveyNo);
+  const dist = isDistPowerTicketType(p.ticketType);
+  let planned = [];
+  if (dist && norm.days.length > 1) {
+    const allocated = allocateWorkTicketNos({
+      items: norm.days.slice(1).map(d => ({ ticketType: p.ticketType, yearMonth: String(d.date).slice(0, 7).replace('-', '') })),
+      records: DB.workPlans
+    });
+    if (!allocated.ok) return res.status(400).json({ ok: false, error: allocated.error, message: allocated.message });
+    planned = allocated.workTicketNos;
+    for (let i = 0; i < planned.length; i++) {
+      const chk = assertDistWorkTicketNoAvailable({
+        workTicketNo: planned[i], ticketType: p.ticketType, records: DB.workPlans, excludeIds: [p.id]
+      });
+      if (!chk.ok) return res.status(400).json(chk);   // 兜底撞号：不应发生，发生即整次拒绝
+    }
+  }
+  const days = norm.days.map((d, i) => {
+    const rg = dayRange(d.date, p.startDate, p.endDate);
+    return {
+      date: d.date, start: rg.start, end: rg.end,
+      content: d.content, items: d.items, quantities: d.quantities,
+      isFirstDay: i === 0,
+      workTicketNo: i === 0 ? srcNo : (dist ? planned[i - 1] : srcNo),
+      surveyNo: srcSurveyNo
+    };
   });
-  expected.forEach(date => { if (!byDate[date]) errors.push('工作内容缺少计划日期：' + date); });
-  if (errors.length) return res.status(400).json({ error: '拆分校验未通过', errors });
 
-  const days = expected.map(d => byDate[d]);
-  if (days.length < 2) return res.status(400).json({ error: '单日计划无需拆分' });
+  // 5) 版本复核：门禁与 days 均合法但版本不符 → 409 PREVIEW_STALE
+  const version = computeSplitPreviewVersion({
+    id: p.id, startDate: p.startDate, endDate: p.endDate, content: p.content, quantities: p,
+    ticketType: p.ticketType, surveyNo: p.surveyNo, workTicketNo: p.workTicketNo,
+    surveyDecision: gate.decision, splitBatchId: p.splitBatchId, parentPlanId: p.parentPlanId, days
+  });
+  if (version !== ver) {
+    return res.status(409).json({ ok: false, error: 'PREVIEW_STALE', message: '预览已过期（源计划或每日内容/工量已变化），请重新预览后再确认' });
+  }
 
+  // 6) 落库：父收缩首日 + 每日子记录；仅新成功拆分写 splitCommitVersion（仅首日=父记录）
   const now = nowISO();
   const batchId = genId('sp');
   const before = clone(p);
+  const lenBefore = DB.workPlans.length;
   const first = days[0];
 
-  // 1) 父计划：落快照 + 批次 + 收缩为第一天
-  p.splitSnapshot = pick(before, SNAP_FIELDS);
   p.splitBatchId = batchId;
+  p.splitCommitVersion = version;
   p.endDate = dayRange(first.date, before.startDate, before.endDate).end;
   p.content = first.content;
   applyQty(p, first.quantities);
   p.updatedAt = now;
 
-  // 2) 其余每天一条子计划：以拆分前记录为模板深拷贝
-  const children = [];
+  const created = [];
   days.slice(1).forEach(d => {
     const child = clone(before);
     CHILD_DROP_FIELDS.forEach(k => { delete child[k]; });
+    delete child.survey;                 // 各日共用源勘察号，不复制勘察对象
     const rg = dayRange(d.date, before.startDate, before.endDate);
     child.id = genId('wp');
     child.name = String(before.name || '') + '（' + mdLabel(d.date) + '）';
@@ -284,61 +339,35 @@ app.post('/api/workPlans/:id/split', (req, res) => {
     applyQty(child, d.quantities);
     child.parentPlanId = p.id;
     child.splitBatchId = batchId;
+    child.workTicketNo = d.workTicketNo;
+    child.surveyNo = srcSurveyNo;
     child.status = '未执行';
     child.createdAt = now;
     child.updatedAt = now;
     child.deleted = false;
-    // 3) 勘察：父计划有勘察才克隆（生成物不复制）
-    if (before.survey && typeof before.survey === 'object') child.survey = cloneSurvey(before.survey, batchId, now);
-    else delete child.survey;
     DB.workPlans.push(child);
-    children.push(child);
+    created.push(child);
   });
 
-  saveDB();
-  res.json({
-    ok: true, batchId, parentId: p.id,
-    children: children.map(c => ({ id: c.id, name: c.name, startDate: c.startDate, endDate: c.endDate }))
-  });
+  try {
+    saveDB();
+  } catch (e) {
+    DB.workPlans.length = lenBefore;              // 移除本次追加的子记录，不留部分写入
+    const idx = DB.workPlans.indexOf(p);
+    if (idx > -1) DB.workPlans[idx] = before;     // 父记录还原到操作前
+    return res.status(500).json({ ok: false, error: 'SAVE_FAILED', message: '保存失败，已回滚内存记录：' + String((e && e.message) || e) });
+  }
+  return res.json({ ok: true, batchId, firstDayPlanId: p.id, createdPlanIds: created.map(c => c.id) });
 });
 
-/* ---------- 撤销拆分 ---------- */
+/* ---------- 撤销拆分：Step 7 起关闭（不读快照、不恢复任何数据） ---------- */
 app.post('/api/workPlans/:id/unsplit', (req, res) => {
   const p = findPlan(req.params.id);
-  if (!p) return res.status(404).json({ error: '未找到计划' });
-  if (p.planType !== '周计划') return res.status(400).json({ error: '仅周计划支持拆分操作' });
-  if (!p.splitBatchId) return res.status(409).json({ error: '该计划未拆分，无需撤销' });
-  if (!p.splitSnapshot) return res.status(409).json({ error: '拆分快照缺失，无法自动恢复，请人工处理' });
-
-  const batchId = p.splitBatchId;
-  const children = (DB.workPlans || []).filter(x => !x.deleted && x.parentPlanId === p.id && x.splitBatchId === batchId);
-  const blocks = [];
-  children.forEach(c => {
-    if (c.status !== '未执行') { blocks.push(c.name + '：状态为「' + (c.status || '空') + '」'); return; }
-    if (c.updatedAt && c.createdAt && c.updatedAt !== c.createdAt) { blocks.push(c.name + '：拆分后被编辑过'); return; }
-    if (c.quantitiesUpdatedAt) { blocks.push(c.name + '：拆分后修改过工程量'); return; }
-    const sv = c.survey;
-    if (sv && typeof sv === 'object') {
-      // 先判「被编辑」再判批次：PUT /survey 会按白名单重建勘察对象（批次标记随之消失），
-      // 若先判批次，任何一次改勘察都会误报成「已有独立勘察记录」。
-      if (sv.createdAt && sv.updatedAt && sv.updatedAt !== sv.createdAt) { blocks.push(c.name + '：勘察记录被编辑过'); return; }
-      if (sv.splitBatchId !== batchId) { blocks.push(c.name + '：已有独立勘察记录'); return; }
-    }
+  if (!p) return res.status(404).json({ ok: false, error: '未找到计划' });
+  return res.status(410).json({
+    ok: false, error: 'SPLIT_IRREVERSIBLE',
+    message: '拆分不可撤销：如需调整请直接编辑各日计划，或重新创建计划'
   });
-  if (blocks.length) {
-    return res.status(409).json({ error: '无法撤销拆分：子计划已被改动，请逐条处理后再试', blocks });
-  }
-
-  const now = nowISO();
-  const snap = p.splitSnapshot;
-  SNAP_FIELDS.forEach(k => { if (snap[k] !== undefined) p[k] = snap[k]; });
-  delete p.splitBatchId;
-  delete p.splitSnapshot;
-  p.updatedAt = now;
-  children.forEach(c => { c.deleted = true; c.updatedAt = now; });
-
-  saveDB();
-  res.json({ ok: true, removed: children.length });
 });
 
 /* 供隔离测试直接调用（纯函数，不触库）；路由行为不变 */
