@@ -17,8 +17,8 @@ const { DB, saveDB } = require('../core/db');
 const { genId, nowISO, bjStr, safeFileName, INLINE_MIME } = require('../core/util');
 const { resolveDocPath, resolveSurveyTemplate } = require('../core/doc-templates');
 const { buildSurveyDocx } = require('../core/survey-doc');
-// Step 3：配电工作票号取号与共享校验（Step 2 纯模块，本文件不另写一套规则）
-const { isDistPowerTicketType, allocateWorkTicketNo, assertDistWorkTicketNoAvailable } = require('../core/plan-ticket-no');
+// Step 3 / 5A：配电工作票号取号、编辑判别与共享校验（Step 2 纯模块，本文件不另写一套规则）
+const { isDistPowerTicketType, allocateWorkTicketNo, assertDistWorkTicketNoAvailable, classifyPlanTicketEdit } = require('../core/plan-ticket-no');
 
 const PLAN_QTY_FIELDS = ['wlPole', 'wlLine1035', 'wlCable', 'wlRing', 'wlVacuum', 'wlTransformer', 'wlLine04'];
 
@@ -792,7 +792,62 @@ app.post('/api/workPlans', (req, res) => {
   return res.status(400).json({ ok: false, error: 'MODE_REQUIRED', message: '配电计划创建须显式上报 ticketNoMode（auto / manual）' });
 });
 
-// 计划相关集合走通用 CRUD（逻辑删除；须晚于本文件所有专用端点注册，含上面的专用创建 POST）
+/* ---------- Step 5A：专用编辑 PUT（须注册在 crud() 之前，接管本集合整记录更新） ----------
+ * 判别一律走 core/plan-ticket-no 的 classifyPlanTicketEdit（Step 2 已审阅模块）：
+ * 以「已存记录 + 原样请求体」调用，**不预删任何键**（含客户端 ticketNoMode / 标签 / 按钮名），
+ * 只认分类器决策——预删键会把「带号编辑」伪装成轻操作，属停止条件。
+ * 保存等价于 core/crud.js:35-44 的通用 PUT：{...cur, ...body, id, updatedAt}、deleted 取已存值、
+ * 404 形态一致、res.json(merged) 响应形态一致；仅 validate 分支额外采用分类器返回的
+ * 规范化 ticketType / workTicketNo（校验什么就保存什么），light / skip 分支不新增任何规范化。
+ * 临界区：本 handler 全程同步无 await，「判别 → 撞号校验 → 写内存 → saveDB」同一临界区；
+ * saveDB 抛错即还原内存记录且不重试；不声称磁盘原子 / 半写安全（本步不改 db.js）。
+ */
+function commitPlanUpdate(res, idx, merged) {
+  const prev = DB.workPlans[idx];
+  DB.workPlans[idx] = merged;
+  try {
+    saveDB();
+  } catch (e) {
+    DB.workPlans[idx] = prev;   // 内存回滚到本次更新前（不声称磁盘原子/半写安全）
+    return res.status(500).json({ ok: false, error: 'SAVE_FAILED', message: '保存失败，已回滚内存记录：' + String((e && e.message) || e) });
+  }
+  return res.json(merged);
+}
+
+app.put('/api/workPlans/:id', (req, res) => {
+  const idx = DB.workPlans.findIndex(x => x.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: '未找到' });
+  const cur = DB.workPlans[idx];
+  if (cur.deleted) return res.status(404).json({ error: '未找到' });
+
+  const decision = classifyPlanTicketEdit({ stored: cur, body: req.body });
+  if (!decision.ok) return res.status(400).json(decision);   // 400 + 模块错误码，不 saveDB、不改内存
+  // 通用 PUT 合并语义（与 core/crud.js 一致：id 取路径参数、刷新 updatedAt、deleted 以已存为准）
+  const merged = { ...cur, ...req.body, id: req.params.id, updatedAt: nowISO() };
+  merged.deleted = cur.deleted;
+  // 契约三字段：请求缺省或显式 undefined（等同未提供）一律沿用已存值——
+  // 不得因 body 里带了 `workTicketNo: undefined` 就把已存号抹掉（light / skip 分支同样适用）
+  const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+  ['planType', 'ticketType', 'workTicketNo'].forEach(k => {
+    if (!Object.prototype.hasOwnProperty.call(body, k) || body[k] === undefined) merged[k] = cur[k];
+  });
+
+  if (decision.action === 'validate') {
+    // 撞号断言排除已存自身；通过后才保存分类器返回的规范化值（禁止保存请求原值）
+    const checked = assertDistWorkTicketNoAvailable({
+      workTicketNo: decision.workTicketNo,
+      ticketType: decision.ticketType,
+      records: DB.workPlans,
+      excludeIds: decision.excludeIds
+    });
+    if (!checked.ok) return res.status(400).json(checked);   // 撞号/格式：400，不 saveDB、不改内存
+    merged.ticketType = decision.ticketType;
+    merged.workTicketNo = decision.workTicketNo;
+  }
+  return commitPlanUpdate(res, idx, merged);
+});
+
+// 计划相关集合走通用 CRUD（逻辑删除；须晚于本文件所有专用端点注册，含上面的专用创建 POST 与专用编辑 PUT）
 // borrowWorks 的 CRUD 已移至 routes/borrow.js，月计划 xlsx 导出已移至 routes/monthPlans.js
 ['plans', 'workPlans'].forEach(c => {
   crud(c, c, { biz: true, soft: true });

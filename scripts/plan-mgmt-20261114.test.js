@@ -1,5 +1,5 @@
 /* ========== scripts/plan-mgmt-20261114.test.js ========== */
-/* 计划管理优化 Step 3 / Step 4 共用的「进程内隔离测试」。
+/* 计划管理优化 Step 3 / Step 4 / Step 5A 共用的「进程内隔离测试」。
  * 直接运行：node scripts/plan-mgmt-20261114.test.js
  *
  * 隔离方式（不监听端口 / 不启动服务 / 不写生产数据）：
@@ -9,7 +9,7 @@
  *  - 其余依赖全部加载仓库真实模块：core/util、core/plan-ticket-no（Step 2）、
  *    core/crud、core/upload(multer)、core/doc-templates、core/survey-doc、xlsx、exceljs。
  *  - require('server/routes/plans.js') 触发真实注册；从收集器取出注册在 crud()
- *    之前的专用 POST /api/workPlans handler，直接以 mock req/res 调用。
+ *    之前的专用 POST /api/workPlans 与专用 PUT /api/workPlans/:id handler，直接以 mock req/res 调用。
  *  - 没有任何 http.createServer / app.listen 调用；真实 data/db.json 只读做 md5 前后比对。
  *
  * 不声称：跨进程全局锁、磁盘原子写 / 半写安全（r6 2.7）。
@@ -79,6 +79,10 @@ try {
 const workPlanPosts = routes.filter(r => r.method === 'POST' && r.path === '/api/workPlans');
 const specialized = workPlanPosts.length ? workPlanPosts[0].handler : null;
 const crudPost = workPlanPosts.length > 1 ? workPlanPosts[1] : null;
+// Step 5A：专用编辑 PUT 与 crud 通用 PUT 同路径，按注册顺序区分（专用在前）
+const planPuts = routes.filter(r => r.method === 'PUT' && r.path === '/api/workPlans/:id');
+const specializedPut = planPuts.length ? planPuts[0].handler : null;
+const crudPut = planPuts.length > 1 ? planPuts[1].handler : null;
 
 function reset(seed) {
   DB.workPlans.length = 0;                       // 保持同一数组引用（handler 闭包持有它）
@@ -110,6 +114,23 @@ function call(body, seed) {
   const r = invoke(body);
   r.seedLen = seedLen;
   return r;
+}
+/* Step 5A：调用专用编辑 PUT（真实 handler，桩 req/res；params.id 走路径参数） */
+function putCall(id, body, seed, opts) {
+  reset(seed);
+  if (opts && opts.throwNext) state.throwNext = true;
+  const req = { body, params: { id }, query: {}, headers: {}, user: { name: 'ZT-5A', username: 'zt' } };
+  const res = {
+    statusCode: 200, payload: undefined,
+    status(n) { this.statusCode = n; return this; },
+    json(v) { this.payload = v; return this; },
+    send(v) { this.payload = v; return this; },
+    setHeader() {}
+  };
+  let thrown = null;
+  try { specializedPut(req, res, () => { throw new Error('unexpected next()'); }); }
+  catch (e) { thrown = e; }
+  return { req, res, thrown, row: DB.workPlans.find(x => x.id === id), rows: DB.workPlans };
 }
 const autoBody = (extra) => Object.assign({
   planType: '周计划', ticketType: T1, ticketNoMode: 'auto',
@@ -470,13 +491,14 @@ t('I1 crud 仍为 plans / workPlans 两集合注册 GET/POST/PUT/DELETE', () => 
     });
   });
 });
-t('I2 未新增专用 PUT /api/workPlans/:id（该路径仍只有通用 crud 那 1 条，Step 5 才挂）', () => {
-  // core/crud.js:29 本就注册 PUT /:id（cur+body 合并语义）。本步只加专用 POST，
-  // 故该路径应恰好 1 条、且为通用 crud handler（含 ...cur 合并、不含 mode 逻辑）。
+t('I2 PUT /api/workPlans/:id 现为 2 条：Step 5A 专用在前、crud 通用在后（通用不得绕过门禁）', () => {
+  // Step 3 时该路径只有 crud 注册的 1 条（本断言原文即注明「Step 5 才挂」）；
+  // Step 5A 已挂专用编辑 PUT，故此处改为：恰好 2 条，专用含判别、crud 仍为 cur+body 合并且不含判别。
   const puts = routes.filter(r => r.method === 'PUT' && r.path === '/api/workPlans/:id');
-  assert.equal(puts.length, 1);
-  assert.match(String(puts[0].handler), /\.\.\.cur|merged/);
-  assert.doesNotMatch(String(puts[0].handler), /MODE_REQUIRED|classifyPlanTicketEdit/);
+  assert.equal(puts.length, 2);
+  assert.match(String(puts[0].handler), /classifyPlanTicketEdit/, '第 1 条应为 Step 5A 专用 handler');
+  assert.match(String(puts[1].handler), /\.\.\.cur|merged/, '第 2 条应为通用 crud 合并语义');
+  assert.doesNotMatch(String(puts[1].handler), /MODE_REQUIRED|classifyPlanTicketEdit/);
 });
 t('I3 plans.js 中声明的全部专用端点仍逐一注册（含勘察、工量、导入、导出）', () => {
   const src = fs.readFileSync(path.join(ROOT, 'server/routes/plans.js'), 'utf8');
@@ -890,9 +912,266 @@ t('O7 提交收到服务端错误（撞号 / 耗尽）后：表单内容保留�
   }
 });
 
+/* ========== Step 5A：P 专用编辑 PUT（真实 handler：判别四分支 / 零保存 / 回滚） ========== */
+g('P 专用编辑 PUT /api/workPlans/:id（Step 5A：判别分支 / 规范化 / 零保存 / 回滚）');
+const S_ID = 'wp-5a-1';
+const seedPlan = extra => Object.assign({
+  id: S_ID, planType: '周计划', ticketType: T1, workTicketNo: OLD11,
+  name: 'ZT-5A-存量', status: '未执行', address: '旧地址', deleted: false,
+  createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z'
+}, extra || {});
+const MONTH22 = {
+  subProject: 'P-1', workType: '配农网工程', specialty: '配电', dept: '运检部', address: '新地址',
+  shadowContent: '', machine: '', riskLevel: '中风险', gridRisk: '四星', riskFactors: '无',
+  majorRisk: '无', controlMeasures: '措施', workUnit: '施工一班', chargePersons: ['张三'],
+  staff: '李四', finishDate: '2026-11-30', planNote: '备注', teams: ['施工一班'],
+  materials: [], buildCity: '市', buildCounty: '县', execCity: '市'
+};
+
+t('P1 注册两份 PUT /api/workPlans/:id：专用在前、crud 在后，且晚于 quantities/survey', () => {
+  assert.equal(planPuts.length, 2);
+  assert.equal(typeof specializedPut, 'function');
+  assert.equal(typeof crudPut, 'function');
+  const iQty = routes.findIndex(r => r.method === 'PUT' && r.path === '/api/workPlans/:id/quantities');
+  const iSurvey = routes.findIndex(r => r.method === 'PUT' && r.path === '/api/workPlans/:id/survey');
+  const iSpec = routes.indexOf(planPuts[0]);
+  const iCrud = routes.indexOf(planPuts[1]);
+  assert.ok(iQty > -1 && iSurvey > -1, '两条更具体的专用 PUT 应存在');
+  assert.ok(iSpec > iQty && iSpec > iSurvey, '专用编辑 PUT 须注册在 quantities / survey 之后');
+  assert.ok(iSpec < iCrud, '专用编辑 PUT 须注册在 crud 之前，通用 PUT 不得绕过门禁');
+});
+t('P2 取到的是专用 handler（判别走 classifyPlanTicketEdit、保存走 commitPlanUpdate 回滚），crud 不含', () => {
+  assert.match(String(specializedPut), /classifyPlanTicketEdit/);
+  assert.match(String(specializedPut), /commitPlanUpdate/);
+  assert.doesNotMatch(String(crudPut), /classifyPlanTicketEdit/);
+  assert.doesNotMatch(String(crudPut), /commitPlanUpdate/);
+  // 回滚分支的 SAVE_FAILED 在被调函数内，行为已在 P22 直接验证
+  const src = fs.readFileSync(path.join(ROOT, 'server/routes/plans.js'), 'utf8');
+  assert.match(src, /error: 'SAVE_FAILED'/);
+});
+t('P3 轻操作 {status}：旧号配电记录保存成功，票号/票种/勘察号逐字不变', () => {
+  const seed = seedPlan({ surveyNo: YM + '001' });
+  const r = putCall(S_ID, { status: '已执行' }, [seed]);
+  assert.equal(r.thrown, null);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.status, '已执行');
+  assert.equal(r.row.workTicketNo, OLD11);
+  assert.equal(r.row.ticketType, T1);
+  assert.equal(r.row.surveyNo, YM + '001');
+  assert.equal(state.saveCalls, 1);
+});
+t('P4 轻操作 {planNote}：缺号配电记录也保存成功（不因缺号失败、不补号）', () => {
+  const seed = seedPlan({ workTicketNo: undefined });
+  delete seed.workTicketNo;
+  const r = putCall(S_ID, { planNote: '备注只改这里' }, [seed]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.planNote, '备注只改这里');
+  assert.equal(r.row.workTicketNo, undefined);
+  assert.equal(state.saveCalls, 1);
+});
+t('P5 轻操作 {status, planNote} 组合：旧号记录仍豁免，两字段同时生效', () => {
+  const r = putCall(S_ID, { status: '已取消', planNote: '组合轻操作' }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.status, '已取消');
+  assert.equal(r.row.planNote, '组合轻操作');
+  assert.equal(r.row.workTicketNo, OLD11);
+  assert.equal(state.saveCalls, 1);
+});
+t('P6 轻操作夹带票号（即使与旧值相同）→ 非轻操作，旧号被拒且零保存', () => {
+  const r = putCall(S_ID, { status: '已执行', workTicketNo: OLD11 }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'INVALID_INPUT');
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.row.status, '未执行');
+});
+t('P7 轻操作夹带客户端标记 ticketNoMode → 不因「预删标记」被豁免（判非轻操作、零保存）', () => {
+  const r = putCall(S_ID, { status: '已执行', ticketNoMode: 'auto' }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.row.status, '未执行');
+});
+t('P8 仅改 address（旧号配电）→ 合并校验不通过：400 且零保存，记录逐字未变', () => {
+  const before = JSON.stringify(seedPlan());
+  const r = putCall(S_ID, { address: '新地址' }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'INVALID_INPUT');
+  assert.equal(state.saveCalls, 0);
+  assert.equal(JSON.stringify(r.row), before);
+});
+t('P9 仅改 content（缺号配电）→ 400「缺少工作票号」，零保存', () => {
+  const seed = seedPlan();
+  delete seed.workTicketNo;
+  const r = putCall(S_ID, { content: '新内容' }, [seed]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'INVALID_INPUT');
+  assert.match(r.res.payload.message, /缺少工作票号/);
+  assert.equal(state.saveCalls, 0);
+});
+t('P10 完整表单改成合规唯一号 → 200，保存号即合规新号，单次保存', () => {
+  const no = N('6', 805);
+  const r = putCall(S_ID, {
+    name: 'ZT-5A-改名', startDate: '2026-11-20 08:00:00', endDate: '2026-11-20 18:00:00',
+    team: '施工一班', staffText: '张三|13800000000', ticketType: T1, workTicketNo: no, address: '新地址'
+  }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.workTicketNo, no);
+  assert.equal(r.row.ticketType, T1);
+  assert.equal(r.row.address, '新地址');
+  assert.equal(state.saveCalls, 1);
+  assert.equal(r.res.payload, r.row, '响应形态与通用 PUT 一致：返回合并后的记录本体');
+});
+t('P11 内存保存路径一致性：校验值与保存值逐字一致（票种/票号两端空白一律 trim 后落库）', () => {
+  const raw = N('6', 806);
+  const r = putCall(S_ID, { ticketType: '  ' + T1 + '  ', workTicketNo: '  ' + raw + '  ' }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.ticketType, T1, '落库票种应为规范化值（无首尾空白）');
+  assert.equal(r.row.workTicketNo, raw, '落库票号应为规范化值，与校验值逐字相同');
+  assert.equal(state.saveCalls, 1);
+});
+t('P12 请求未提供票种/票号 → 沿用已存值（合规记录仅改 address 仍可保存）', () => {
+  const no = N('6', 805);
+  const r = putCall(S_ID, { address: '只改地址' }, [seedPlan({ workTicketNo: no })]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.workTicketNo, no);
+  assert.equal(r.row.ticketType, T1);
+  assert.equal(r.row.address, '只改地址');
+});
+t('P13 请求显式 undefined（等同未提供）→ 同样沿用已存值并保存成功', () => {
+  const no = N('6', 805);
+  const r = putCall(S_ID, { workTicketNo: undefined, ticketType: undefined, address: 'undefined 沿用' },
+    [seedPlan({ workTicketNo: no })]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.workTicketNo, no);
+  assert.equal(r.row.ticketType, T1);
+  assert.equal(r.row.address, 'undefined 沿用');
+});
+t('P14 无号配电周计划未补号 → 400 且零保存（不静默补号）', () => {
+  const seed = seedPlan();
+  delete seed.workTicketNo;
+  const r = putCall(S_ID, { address: '未补号' }, [seed]);
+  assert.equal(r.res.statusCode, 400);
+  assert.match(r.res.payload.message, /缺少工作票号/);
+  assert.equal(state.saveCalls, 0);
+});
+t('P15 月计划 22 键保存（不含两号与 ticketType）→ 不被迫改号、不被拒绝', () => {
+  assert.equal(Object.keys(MONTH22).length, 22);
+  assert.ok(!('workTicketNo' in MONTH22) && !('ticketType' in MONTH22) && !('surveyNo' in MONTH22));
+  const seed = seedPlan({ planType: '月计划', workTicketNo: OLD11, surveyNo: YM + '002' });
+  const r = putCall(S_ID, Object.assign({}, MONTH22), [seed]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.workTicketNo, OLD11);
+  assert.equal(r.row.ticketType, T1);
+  assert.equal(r.row.surveyNo, YM + '002');
+  assert.equal(state.saveCalls, 1);
+});
+t('P16 月计划主动写非法配电号 → 整单拒绝、零保存', () => {
+  const seed = seedPlan({ planType: '月计划', workTicketNo: '' });
+  const r = putCall(S_ID, { ticketType: T1, workTicketNo: OLD11 }, [seed]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'INVALID_INPUT');
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.row.workTicketNo, '');
+});
+t('P17 伪造 planType（已存周计划改为月计划）→ 拒绝、零保存', () => {
+  const r = putCall(S_ID, { planType: '月计划', status: '已执行' }, [seedPlan()]);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'INVALID_INPUT');
+  assert.match(r.res.payload.message, /planType 与已存记录不一致/);
+  assert.equal(state.saveCalls, 0);
+});
+t('P18 改成其它存活记录已占用的号 → 400 DUPLICATE、零保存，自身记录未变', () => {
+  const mine = N('6', 805);
+  const other = N('6', 806);
+  const seed = [seedPlan({ workTicketNo: mine }), seedPlan({ id: 'wp-5a-2', workTicketNo: other })];
+  const r = putCall(S_ID, { workTicketNo: other }, seed);
+  assert.equal(r.res.statusCode, 400);
+  assert.equal(r.res.payload.error, 'DUPLICATE');
+  assert.equal(state.saveCalls, 0);
+  assert.equal(r.row.workTicketNo, mine);
+});
+t('P19 保留自身原号（excludeIds 含已存自身）不算撞号 → 200', () => {
+  const mine = N('6', 805);
+  const r = putCall(S_ID, { workTicketNo: mine, address: '改地址保留原号' }, [seedPlan({ workTicketNo: mine })]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.workTicketNo, mine);
+});
+t('P20 换票种 配电→线路 → skip 分支，不自动改号/清空号（票种改线路、号原样保留）', () => {
+  const no = N('6', 805);
+  const r = putCall(S_ID, { ticketType: L1 }, [seedPlan({ workTicketNo: no })]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.ticketType, L1);
+  assert.equal(r.row.workTicketNo, no);
+  assert.equal(state.saveCalls, 1);
+});
+t('P21 skip 分支不新增规范化：线路号原样落库（不 trim、不改写）', () => {
+  const seed = seedPlan({ ticketType: L1, workTicketNo: OLD11 });
+  const r = putCall(S_ID, { workTicketNo: '  LINE-007  ' }, [seed]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.workTicketNo, '  LINE-007  ');
+});
+t('P22 saveDB 抛错 → 500 SAVE_FAILED、内存记录还原到操作前、不自动重试', () => {
+  const before = JSON.stringify(seedPlan({ workTicketNo: N('6', 805) }));
+  const r = putCall(S_ID, { address: '会写失败' }, [seedPlan({ workTicketNo: N('6', 805) })], { throwNext: true });
+  assert.equal(r.thrown, null, 'saveDB 抛错应由 handler 捕获，不向调用栈外抛');
+  assert.equal(r.res.statusCode, 500);
+  assert.equal(r.res.payload.error, 'SAVE_FAILED');
+  assert.equal(state.saveCalls, 1, '失败后不得自动重试');
+  assert.equal(JSON.stringify(DB.workPlans[0]), before, '内存记录须逐字还原，无部分写入残留');
+  assert.equal(DB.workPlans.length, 1);
+});
+t('P23 404 形态与通用 PUT 一致：不存在 / 已删除均 {error:"未找到"}，零保存', () => {
+  const miss = putCall('nope', { status: '已执行' }, []);
+  assert.equal(miss.res.statusCode, 404);
+  assert.equal(miss.res.payload.error, '未找到');
+  const del = putCall(S_ID, { status: '已执行' }, [seedPlan({ deleted: true })]);
+  assert.equal(del.res.statusCode, 404);
+  assert.equal(del.res.payload.error, '未找到');
+  assert.equal(state.saveCalls, 0);
+});
+t('P24 Step 3 专用 POST 行为不变（仍先于 crud、auto 分支仍取号成功）', () => {
+  const r = call(autoBody());
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.count, 1);
+  assert.equal(r.last.workTicketNo, N('6', 801));
+  assert.equal(state.saveCalls, 1);
+});
+
+t('P25 显式非字符串票号/票种（数字/数组/null）→ 400 INVALID_INPUT、零保存', () => {
+  const cases = [123, ['x'], null];
+  for (const bad of cases) {
+    const r = putCall(S_ID, { address: '改地址', workTicketNo: bad }, [seedPlan({ workTicketNo: N('6', 805) })]);
+    assert.equal(r.res.statusCode, 400, '票号 ' + JSON.stringify(bad) + ' 应 400');
+    assert.equal(r.res.payload.error, 'INVALID_INPUT');
+    assert.equal(state.saveCalls, 0);
+    const r2 = putCall(S_ID, { address: '改地址', ticketType: bad }, [seedPlan({ workTicketNo: N('6', 805) })]);
+    assert.equal(r2.res.statusCode, 400, '票种 ' + JSON.stringify(bad) + ' 应 400');
+    assert.equal(state.saveCalls, 0);
+  }
+});
+t('P26 等价保留：id 取路径参数、createdAt 不变、updatedAt 刷新（不采信 body 里的 id/updatedAt）', () => {
+  const seed = seedPlan({ workTicketNo: N('6', 805) });
+  const r = putCall(S_ID, { id: 'evil-id', updatedAt: '2000-01-01T00:00:00.000Z', status: '已执行' }, [seed]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.id, S_ID, 'id 必须取路径参数');
+  assert.equal(r.row.createdAt, seed.createdAt, 'createdAt 不得被更新');
+  assert.notEqual(r.row.updatedAt, '2000-01-01T00:00:00.000Z', 'updatedAt 应由服务端刷新');
+  assert.match(r.row.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(r.row.deleted, false, 'deleted 以已存为准');
+});
+
+t('P27 skip 分支显式 undefined 票号/票种 → 沿用已存值，不得把已存票号抹成 undefined', () => {
+  const seed = seedPlan({ ticketType: L1, workTicketNo: 'LINE-OLD-001' });
+  const r = putCall(S_ID, { ticketType: undefined, workTicketNo: undefined, address: '改地址' }, [seed]);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.row.ticketType, L1);
+  assert.equal(r.row.workTicketNo, 'LINE-OLD-001');
+  assert.equal(r.row.address, '改地址');
+  assert.ok(Object.prototype.hasOwnProperty.call(r.row, 'workTicketNo'), '字段必须仍在，不得被抹除');
+});
+
 /* ---------- 执行与汇总 ---------- */
 async function run() {
-  console.log('计划管理优化 Step 3 / Step 4 · 进程内隔离测试（不监听端口 / 不启服务 / 不写生产库）');
+  console.log('计划管理优化 Step 3 / 4 / 5A · 进程内隔离测试（不监听端口 / 不启服务 / 不写生产库）');
   console.log('操作当天月份 YYYYMM = ' + YM + '（' + YM_LABEL + '，与 todayBizDate 同源 bjStr）\n');
   for (const x of queue) {
     total += 1;
