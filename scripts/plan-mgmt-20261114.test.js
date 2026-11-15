@@ -2134,7 +2134,7 @@ t('V2 重放身份限定：子记录即便带同版本也不按重放处理（40
   assert.equal(r.res.payload.error, 'ALREADY_SPLIT');
   assert.equal(state.saveCalls, 0);
 });
-t('V3 重放顺序稳定：同批子记录按 startDate → createdAt → id 排序，重复调用一致', () => {
+t('V3 重放顺序稳定：同批子记录仅按不可变的 createdAt → id 排序，重复调用一致', () => {
   const seed = () => [spPlan()];
   const pv = prevCall({}, seed()).res.payload;
   const body = confirmPayload(pv);
@@ -2171,6 +2171,69 @@ t('V4 前端防串稿：后发预览先完成时，慢的旧响应不得覆盖�
   await p1;
   assert.equal(h.view.previewVersion.value, 'v2', '凭据应保留最新请求的版本');
   assert.equal(h.view.days.value[0].content, '新一', '慢响应不得覆盖新结果');
+});
+
+/* ========== Step 7–9 复审二轮：W 在途改稿 / 重放稳定顺序 ========== */
+g('W 复审二轮（在途改稿不落地 / 重放顺序不依赖可编辑字段）');
+t('W1 在途改内容：响应不得覆盖改稿、不得恢复凭据、不可确认', async () => {
+  let resolveFirst;
+  const first = new Promise(r => { resolveFirst = r; });
+  const h = splitViewHarness({ sequence: [first] });
+  h.view.days.value = editedDays();
+  const pending = h.view.reparse();               // 请求已发出（挂起）
+  h.view.days.value[0].content = '在途改的内容';   // 在途改内容
+  h.view.invalidatePreview();
+  resolveFirst({
+    ok: true, previewVersion: 'v1:inflight',
+    days: [{ date: SP_D1, content: '服务端第一天', quantities: {} },
+      { date: SP_D2, content: '服务端第二天', quantities: {} }]
+  });
+  await pending;
+  assert.equal(h.view.days.value[0].content, '在途改的内容', '在途改的内容不得被响应覆盖');
+  assert.equal(h.view.previewVersion.value, '', '在途改稿后不得恢复确认凭据');
+  assert.equal(h.view.canSubmit.value, false, '在途改稿后不可确认');
+});
+t('W2 在途改工量：响应不得覆盖工量、不得恢复凭据、不可确认', async () => {
+  let resolveFirst;
+  const first = new Promise(r => { resolveFirst = r; });
+  const h = splitViewHarness({ sequence: [first] });
+  h.view.days.value = editedDays();
+  const pending = h.view.reparse();
+  h.view.setQty(h.view.days.value[1], 'wlCable', '3');   // 在途改工量
+  resolveFirst({
+    ok: true, previewVersion: 'v1:inflight',
+    days: [{ date: SP_D1, content: '服务端第一天', quantities: { wlPole: '9' } },
+      { date: SP_D2, content: '服务端第二天', quantities: { wlCable: '8' } }]
+  });
+  await pending;
+  assert.equal(String(h.view.days.value[1].quantities.wlCable), '3', '在途改的工量不得被响应覆盖');
+  assert.equal(h.view.previewVersion.value, '', '在途改工量后不得恢复确认凭据');
+  assert.equal(h.view.canSubmit.value, false, '在途改工量后不可确认');
+});
+t('W3 重放顺序稳定：两个子记录改期并改内容后重放，createdPlanIds 与首次逐项一致', () => {
+  const D3 = SP_CM + '-22';
+  const seed = () => [spPlan({
+    endDate: D3 + ' 18:00:00',
+    content: '20日：电杆组立3根\n21日：电缆敷设1200米\n22日：导线架设2.5km'
+  })];
+  const pv = prevCall({}, seed()).res.payload;
+  assert.equal(pv.days.length, 3, '三日计划应切出 3 行');
+  const body = confirmPayload(pv);
+  const c = splitCall(splitCommitH, SP_ID, body, seed());
+  assert.equal(c.res.statusCode, 200);
+  const ids = c.res.payload.createdPlanIds;
+  assert.equal(ids.length, 2, '三日计划应生成 2 条子记录');
+  // 反例构造：把两条子记录改期（顺序对调）并改内容 —— 若排序仍依赖可编辑日期，重放顺序必变
+  const a = DB.workPlans.find(x => x.id === ids[0]);
+  const b = DB.workPlans.find(x => x.id === ids[1]);
+  a.startDate = '2030-01-05 08:00:00'; a.content = '改过的第一条';
+  b.startDate = '2030-01-01 08:00:00'; b.content = '改过的第二条';
+  const r = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(r.res.statusCode, 200);
+  assert.equal(r.res.payload.replay, true);
+  assert.deepEqual(r.res.payload.createdPlanIds, ids, '重放 ID 数组与首次逐项一致（不依赖日期/内容）');
+  const r2 = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.deepEqual(r2.res.payload.createdPlanIds, ids, '多次重放顺序恒定');
 });
 
 /* ---------- 执行与汇总 ---------- */

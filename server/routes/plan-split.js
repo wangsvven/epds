@@ -234,11 +234,11 @@ function daysDigestOf(list) {
 function splitChildrenOf(p, batchId) {
   return (DB.workPlans || [])
     .filter(x => x && x.parentPlanId === p.id && x.splitBatchId === batchId)
-    .sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1
-      : String(a.startDate) > String(b.startDate) ? 1
-        : String(a.createdAt) < String(b.createdAt) ? -1
-          : String(a.createdAt) > String(b.createdAt) ? 1
-            : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+    // 顺序只看不可变字段（创建时间 → id）：子记录的日期/内容可被后续编辑改动，
+    // 若参与排序，首次响应与重放的 createdPlanIds 就会因改稿而错位。
+    .sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1
+      : String(a.createdAt) > String(b.createdAt) ? 1
+        : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
 }
 
 app.post('/api/workPlans/:id/split', (req, res) => {
@@ -334,7 +334,6 @@ app.post('/api/workPlans/:id/split', (req, res) => {
   applyQty(p, first.quantities);
   p.updatedAt = now;
 
-  const created = [];
   days.slice(1).forEach(d => {
     const child = clone(before);
     CHILD_DROP_FIELDS.forEach(k => { delete child[k]; });
@@ -355,7 +354,6 @@ app.post('/api/workPlans/:id/split', (req, res) => {
     child.updatedAt = now;
     child.deleted = false;
     DB.workPlans.push(child);
-    created.push(child);
   });
 
   try {
@@ -366,7 +364,10 @@ app.post('/api/workPlans/:id/split', (req, res) => {
     if (idx > -1) DB.workPlans[idx] = before;     // 父记录还原到操作前
     return res.status(500).json({ ok: false, error: 'SAVE_FAILED', message: '保存失败，已回滚内存记录：' + String((e && e.message) || e) });
   }
-  return res.json({ ok: true, splitBatchId: batchId, firstDayPlanId: p.id, createdPlanIds: created.map(c => c.id) });
+  // 首次响应与重放共用同一排序（splitChildrenOf：仅按不可变的 createdAt → id），
+  // 否则「首次按创建顺序、重放按排序」会因改期改稿而错位。
+  const createdIds = splitChildrenOf(p, batchId).map(k => k.id);
+  return res.json({ ok: true, splitBatchId: batchId, firstDayPlanId: p.id, createdPlanIds: createdIds });
 });
 
 /* ---------- 撤销拆分：Step 7 起关闭（不读快照、不恢复任何数据） ---------- */

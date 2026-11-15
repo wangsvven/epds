@@ -116,14 +116,26 @@ const PlanSplitDlg = {
     };
 
     let previewSeq = 0;   // 预览请求序号：仅最后一次请求的响应可落地（防慢响应覆盖新结果）
+    // 编辑稿指纹（日期 + 内容 + 七项工量）：请求发出前后比对，判断「在途是否改过稿」。
+    // 仅用于客户端判定，不进请求载荷、不改服务端契约。
+    function draftSignature() {
+      return JSON.stringify(days.value.map(d => [
+        String(d.date == null ? '' : d.date),
+        String(d.content == null ? '' : d.content).trim(),
+        Object.keys(d.quantities || {}).sort().map(k => [k, String(d.quantities[k] == null ? '' : d.quantities[k]).trim()])
+      ]));
+    }
     async function preview(payload) {
       if (!props.plan) return;
       const seq = ++previewSeq;
+      const sig = draftSignature();   // 在途改稿校验的基线
       loading.value = true;
       try {
         // 初始预览发 {}（按源计划内容解析）；重新预览由 reparse 传 { days: 当前编辑稿 }
         const res = await api.post('/api/workPlans/' + props.plan.id + '/split/preview', payload || {});
         if (seq !== previewSeq) return;   // 期间已发起更新的预览，丢弃本次
+        // 请求发出后稿件被改过（内容或工量）：响应不得覆盖当前稿，也不得恢复确认凭据
+        if (draftSignature() !== sig) { previewVersion.value = ''; return; }
         const list = Array.isArray(res.errors) ? res.errors.slice() : [];
         if (res.ok === false && !list.length) list.push('预览未通过，请检查每日内容');
         errors.value = list;
@@ -141,6 +153,8 @@ const PlanSplitDlg = {
         previewVersion.value = res.previewVersion || '';
       } catch (e) {
         if (seq !== previewSeq) return;   // 旧请求的失败不得覆盖新结果
+        // 在途改过稿时，本次失败同样不落地（改稿已使凭据失效，且错误不属于当前稿）
+        if (draftSignature() !== sig) { previewVersion.value = ''; return; }
         const d = e.data || {};
         // 400 带 errors[] 时逐条展示；门禁/耗尽只有 message，则显示该条
         const list = Array.isArray(d.errors) ? d.errors.slice() : [];
