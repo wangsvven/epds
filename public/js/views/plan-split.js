@@ -115,12 +115,15 @@ const PlanSplitDlg = {
       INVALID_INPUT: '请求不合法：content 与 days 不能同时提供'
     };
 
+    let previewSeq = 0;   // 预览请求序号：仅最后一次请求的响应可落地（防慢响应覆盖新结果）
     async function preview(payload) {
       if (!props.plan) return;
+      const seq = ++previewSeq;
       loading.value = true;
       try {
         // 初始预览发 {}（按源计划内容解析）；重新预览由 reparse 传 { days: 当前编辑稿 }
         const res = await api.post('/api/workPlans/' + props.plan.id + '/split/preview', payload || {});
+        if (seq !== previewSeq) return;   // 期间已发起更新的预览，丢弃本次
         const list = Array.isArray(res.errors) ? res.errors.slice() : [];
         if (res.ok === false && !list.length) list.push('预览未通过，请检查每日内容');
         errors.value = list;
@@ -137,18 +140,19 @@ const PlanSplitDlg = {
         });
         previewVersion.value = res.previewVersion || '';
       } catch (e) {
+        if (seq !== previewSeq) return;   // 旧请求的失败不得覆盖新结果
         const d = e.data || {};
         // 400 带 errors[] 时逐条展示；门禁/耗尽只有 message，则显示该条
         const list = Array.isArray(d.errors) ? d.errors.slice() : [];
         errors.value = list.length ? list : [d.message || CODE_TEXT[d.error] || e.message || '预览失败'];
         previewVersion.value = '';   // 失败即无有效预览
         // 失败一律不清空 days：保留用户已编辑的内容与工量，便于就地修正后重试
-      } finally { loading.value = false; }
+      } finally { if (seq === previewSeq) loading.value = false; }
     }
 
     // 打开时先清空再填头部：reset 会清 planName/planRange，顺序不能反
     watch(() => props.modelValue, v => {
-      if (!v) { errors.value = []; days.value = []; planName.value = ''; planRange.value = ''; return; }
+      if (!v) { previewSeq += 1; errors.value = []; days.value = []; planName.value = ''; planRange.value = ''; return; }
       errors.value = []; days.value = [];
       const p = props.plan || {};
       planName.value = p.name || '';
@@ -176,7 +180,7 @@ const PlanSplitDlg = {
         const ids = Array.isArray(res.createdPlanIds) ? res.createdPlanIds : [];
         ElementPlus.ElMessage.success(res.replay ? '该拆分此前已确认，未重复生成' : '已生成 ' + ids.length + ' 条日计划');
         visible.value = false;
-        emit('done', { count: ids.length, batchId: res.batchId, firstDayPlanId: res.firstDayPlanId, createdPlanIds: ids, replay: !!res.replay });
+        emit('done', { count: ids.length, splitBatchId: res.splitBatchId, firstDayPlanId: res.firstDayPlanId, createdPlanIds: ids, replay: !!res.replay });
       } catch (e) {
         const d = e.data || {};
         const list = Array.isArray(d.errors) ? d.errors.slice() : [];
@@ -265,7 +269,7 @@ const PlanSplitDlg = {
       </div>
     </div>
 
-    <div class="psp-tip"><span v-if="days.length && !previewVersion" class="psp-wd">内容或工量已改动，请重新预览后再确认。</span>拆分后父计划收缩为第一天（名称不变），其余每天生成一条子计划；勘察编号与工作票编号父子共用，生成文档按各自日期另行生成。</div>
+    <div class="psp-tip"><span v-if="days.length && !previewVersion" class="psp-wd">内容或工量已改动，请重新预览后再确认。</span>拆分后父计划收缩为第一天（名称不变），其余每天生成一条子计划；勘察编号各日共用，工作票号首日保留原号、配电后日按各自月份取新号（线路沿用原号）。</div>
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>

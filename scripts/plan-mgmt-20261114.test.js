@@ -1791,6 +1791,7 @@ function splitViewHarness(opts) {
   sb.api = {
     async post(u, b) {
       calls.post.push({ u, b });
+      if (o.sequence && o.sequence.length) return o.sequence.shift();
       if (o.throwError) throw o.throwError;
       if (o.response) return o.response;
       return { ok: true, previewVersion: 'v1:stub', sourcePlanId: 'wp-sp1', firstDayPlanId: 'wp-sp1', days: (b && b.days) || [] };
@@ -1954,7 +1955,7 @@ t('T5 精确重放：同版本同 days → 200 replay，同一 batchId/createdPl
   const c2 = splitCall(splitCommitH, SP_ID, body, null, true);
   assert.equal(c2.res.statusCode, 200);
   assert.equal(c2.res.payload.replay, true);
-  assert.equal(c2.res.payload.batchId, c1.res.payload.batchId);
+  assert.equal(c2.res.payload.splitBatchId, c1.res.payload.splitBatchId);
   assert.deepEqual(c2.res.payload.createdPlanIds, c1.res.payload.createdPlanIds);
   assert.equal(state.saveCalls, save1, '重放不得再次保存');
 });
@@ -2082,7 +2083,7 @@ t('U2 前端无撤销入口、改期不再拦「先撤销」，专用 PUT 规则
 });
 t('U3 确认成功按新响应字段处理：done 事件带 splitBatchId / firstDayPlanId / createdPlanIds', async () => {
   const h = splitViewHarness({
-    response: { ok: true, replay: false, batchId: 'sp9', firstDayPlanId: 'wp-sp1', createdPlanIds: ['c1', 'c2'], days: editedDays() }
+    response: { ok: true, replay: false, splitBatchId: 'sp9', firstDayPlanId: 'wp-sp1', createdPlanIds: ['c1', 'c2'], days: editedDays() }
   });
   h.view.days.value = editedDays();
   h.view.previewVersion.value = 'v1:x';
@@ -2091,7 +2092,7 @@ t('U3 确认成功按新响应字段处理：done 事件带 splitBatchId / first
   assert.equal(done.length, 1, '应发出一次 done');
   assert.deepEqual(done[0].p.createdPlanIds, ['c1', 'c2']);
   assert.equal(done[0].p.count, 2);
-  assert.equal(done[0].p.batchId, 'sp9');
+  assert.equal(done[0].p.splitBatchId, 'sp9');
   assert.equal(done[0].p.firstDayPlanId, 'wp-sp1');
   assert.ok(h.emits.some(e => e.n === 'update:modelValue' && e.p === false), '应发出关闭事件');
 });
@@ -2113,6 +2114,63 @@ t('U5 无有效预览时 submit 不发请求（守卫 + 提示）', async () => 
   await h.view.submit();
   assert.equal(h.calls.post.length, 0, '不得在无预览情况下调用确认接口');
   assert.equal(h.calls.warn.length, 1);
+});
+
+/* ========== Step 7–9 复审修正：V 版本类型 / 重放身份与顺序 / 前端防串稿 ========== */
+g('V 复审修正（版本类型 / 重放身份与稳定顺序 / 前端防串稿）');
+t('V1 previewVersion 非字符串（数字/数组/null/对象）→ 400 INVALID_INPUT、零保存', () => {
+  [123, ['v1'], null, {}].forEach(v => {
+    const body = { days: spDays(), previewVersion: v };
+    const r = splitCall(splitCommitH, SP_ID, body, [spPlan()]);
+    assert.equal(r.res.statusCode, 400, 'previewVersion=' + JSON.stringify(v));
+    assert.equal(r.res.payload.error, 'INVALID_INPUT');
+    assert.equal(state.saveCalls, 0);
+  });
+});
+t('V2 重放身份限定：子记录即便带同版本也不按重放处理（409 ALREADY_SPLIT）', () => {
+  const seed = [spPlan({ parentPlanId: 'wp-p', splitBatchId: 'sp-x', splitCommitVersion: 'v1:a:b:c' })];
+  const r = splitCall(splitCommitH, SP_ID, { previewVersion: 'v1:a:b:c', days: spDays() }, seed);
+  assert.equal(r.res.statusCode, 409);
+  assert.equal(r.res.payload.error, 'ALREADY_SPLIT');
+  assert.equal(state.saveCalls, 0);
+});
+t('V3 重放顺序稳定：同批子记录按 startDate → createdAt → id 排序，重复调用一致', () => {
+  const seed = () => [spPlan()];
+  const pv = prevCall({}, seed()).res.payload;
+  const body = confirmPayload(pv);
+  const c = splitCall(splitCommitH, SP_ID, body, seed());
+  const kid = DB.workPlans.find(x => x.parentPlanId === SP_ID);
+  DB.workPlans.push({
+    id: 'zzz', parentPlanId: SP_ID, splitBatchId: c.res.payload.splitBatchId,
+    startDate: kid.startDate, createdAt: kid.createdAt + 'Z', deleted: false
+  });
+  const r1 = splitCall(splitCommitH, SP_ID, body, null, true);
+  const r2 = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.deepEqual(r1.res.payload.createdPlanIds, r2.res.payload.createdPlanIds);
+  assert.equal(r1.res.payload.createdPlanIds[r1.res.payload.createdPlanIds.length - 1], 'zzz',
+    'createdAt 较大的同起始记录应排在后面');
+});
+t('V4 前端防串稿：后发预览先完成时，慢的旧响应不得覆盖新结果', async () => {
+  let resolveFirst;
+  const first = new Promise(r => { resolveFirst = r; });
+  const second = Promise.resolve({
+    ok: true, previewVersion: 'v2',
+    days: [{ date: SP_D1, content: '新一', quantities: {} }, { date: SP_D2, content: '新二', quantities: {} }]
+  });
+  const h = splitViewHarness({ sequence: [first, second] });
+  h.view.days.value = editedDays();
+  const p1 = h.view.reparse();                       // 第一次：挂起
+  h.view.days.value = [
+    { date: SP_D1, content: '新一', quantities: {} },
+    { date: SP_D2, content: '新二', quantities: {} }
+  ];
+  await h.view.reparse();                            // 第二次：立即完成
+  resolveFirst({ ok: true, previewVersion: 'v1', days: [
+    { date: SP_D1, content: '旧一', quantities: {} }, { date: SP_D2, content: '旧二', quantities: {} }
+  ] });
+  await p1;
+  assert.equal(h.view.previewVersion.value, 'v2', '凭据应保留最新请求的版本');
+  assert.equal(h.view.days.value[0].content, '新一', '慢响应不得覆盖新结果');
 });
 
 /* ---------- 执行与汇总 ---------- */

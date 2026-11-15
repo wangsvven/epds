@@ -3433,14 +3433,15 @@ async function runSmoke() {
       previewVersion: pv.previewVersion,
       days: pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }))
     } }), 'split');
-    need(sp.ok === true && sp.createdPlanIds.length === 2 && !!sp.batchId && sp.firstDayPlanId === parent.id,
-      '应生成 2 条子计划且返回 new 字段：' + brief(sp));
+    need(sp.ok === true && sp.createdPlanIds.length === 2 && !!sp.splitBatchId && sp.firstDayPlanId === parent.id,
+      '应生成 2 条子计划且返回 splitBatchId/firstDayPlanId/createdPlanIds：' + brief(sp));
+    need(sp.batchId === undefined, '响应不再返回旧字段 batchId');
 
     const p = needOk(await api('GET', '/api/workPlans/' + parent.id, { token }), '父计划详情');
     need(p.endDate === '2026-11-11 10:00:00', '父计划应收缩为第一天：' + p.endDate);
     need(p.content === '电杆组立3根' && p.wlPole === '3' && p.wlCable === '',
       '父计划内容与工程量应换成第一天：' + brief({ c: p.content, w: p.wlPole, c2: p.wlCable }));
-    need(p.splitBatchId === sp.batchId, '父计划应带本批批次：' + p.splitBatchId);
+    need(p.splitBatchId === sp.splitBatchId, '父计划应带本批批次：' + p.splitBatchId);
     need(!p.splitSnapshot, 'Step 7 起不再写拆分快照：' + brief(p.splitSnapshot));
     need(p.splitCommitVersion === pv.previewVersion, '首日应写入本次 previewVersion：' + p.splitCommitVersion);
     need(!p.survey.splitBatchId && p.survey.updatedAt === '2026-11-10 09:00:00' && p.survey.hazardPoints[0].id === 'hz_seed_a',
@@ -3450,7 +3451,7 @@ async function runSmoke() {
     need(c1.name === '冒烟拆分三日计划（11月12日）', '子计划名应为原名 + （M月D日）：' + c1.name);
     need(c1.startDate === '2026-11-12 08:00:00' && c1.endDate === '2026-11-12 10:00:00',
       '子计划起止应为当天 + 父计划时刻：' + c1.startDate + ' ~ ' + c1.endDate);
-    need(c1.planType === '周计划' && c1.status === '未执行' && c1.parentPlanId === parent.id && c1.splitBatchId === sp.batchId,
+    need(c1.planType === '周计划' && c1.status === '未执行' && c1.parentPlanId === parent.id && c1.splitBatchId === sp.splitBatchId,
       '子计划类型/状态/父引用不符：' + brief({ t: c1.planType, s: c1.status, p: c1.parentPlanId }));
     need(c1.surveyNo === '202611001' && c1.workTicketNo === '202611680001',
       '非配电子计划沿用源勘察号与源工作票号（沿既有口径）');
@@ -3465,6 +3466,10 @@ async function runSmoke() {
     } });
     need(again.status === 200 && again.data.replay === true, '同请求重复确认应精确重放 200：' + again.status + ' ' + brief(again.data));
     need((again.data.createdPlanIds || []).join(',') === sp.createdPlanIds.join(','), '重放应返回同一批子记录');
+    need(again.data.splitBatchId === sp.splitBatchId, '重放应返回同一 splitBatchId');
+    // 非字符串版本 → 400 INVALID_INPUT（不得 String() 强转）
+    const badVer = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: { previewVersion: 123, days: [] } });
+    need(badVer.status === 400 && badVer.data.error === 'INVALID_INPUT', '非字符串版本应 400：' + badVer.status + ' ' + brief(badVer.data));
     // 改动内容（同版本）→ 已拆拒绝
     const tampered = pv.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }));
     tampered[0].content = '改过内容';
@@ -3670,6 +3675,12 @@ async function runSmoke() {
     need(/th\.el-table__cell > \.cell,[\s\S]{0,120}padding-left:6px/.test(html),
       '单元格左右内边距应收紧到 6px，保证 12 列表头与日期不被省略');
     need(/plan-split-dlg/.test(p) && /@done="onSplitDone"/.test(p), 'plans.js 应挂载拆分弹窗并在完成后刷新');
+    // 复制载荷须剥离拆分四键（历史记录字段保留不动）
+    need(/delete body\.splitBatchId/.test(p) && /delete body\.splitSnapshot/.test(p)
+      && /delete body\.parentPlanId/.test(p) && /delete body\.splitCommitVersion/.test(p),
+      '复制应剥离 splitBatchId/splitSnapshot/parentPlanId/splitCommitVersion');
+    // 确认成功读 splitBatchId（旧 batchId 字段已废弃）
+    need(/splitBatchId: res\.splitBatchId/.test(d), '前端应按 splitBatchId 处理确认响应');
     need(!/修改起止时间需先撤销拆分/.test(p), '已拆分计划改期限制应已移除（改期走专用 PUT 规则）');
     need(/syncNarrow[\s\S]{0,120}innerWidth <= 768/.test(d) && /psp-card/.test(d), '≤768px 应切换为逐天卡片布局');
     need(/currentDaysPayload/.test(d) && /previewVersion/.test(d), '重新预览应发送当前 days 并带 previewVersion 凭据');

@@ -212,7 +212,9 @@ app.post('/api/workPlans/:id/split/preview', (req, res) => {
   res.json({ ok: true, previewVersion, sourcePlanId: p.id, firstDayPlanId: p.id, days });
 });
 
-/* ---------- 确认拆分：版本复核 / 精确重放 / 一次 saveDB 落库 ---------- */
+/* ---------- 确认拆分：版本复核 / 精确重放 / 一次 saveDB 落库 ----------
+ * 拒绝路径不调用 saveDB（本次请求内存零变更）；saveDB 抛错仅保证「内存回到操作前」，
+ * 不声称磁盘原子、半写安全或跨进程并发安全。 */
 /* 规范化 days 的摘要段：与 preview 的版本第 2 段同源，供重放核对（不重算原预览） */
 function normalizeDaysForDigest(input) {
   return (Array.isArray(input) ? input : []).map(d => ({
@@ -234,7 +236,9 @@ function splitChildrenOf(p, batchId) {
     .filter(x => x && x.parentPlanId === p.id && x.splitBatchId === batchId)
     .sort((a, b) => (String(a.startDate) < String(b.startDate) ? -1
       : String(a.startDate) > String(b.startDate) ? 1
-        : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+        : String(a.createdAt) < String(b.createdAt) ? -1
+          : String(a.createdAt) > String(b.createdAt) ? 1
+            : String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
 }
 
 app.post('/api/workPlans/:id/split', (req, res) => {
@@ -242,14 +246,19 @@ app.post('/api/workPlans/:id/split', (req, res) => {
   if (!p) return res.status(404).json({ ok: false, error: '未找到计划' });
   const b = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
 
-  // 1) 精确重放：先于「已拆再拆拒绝」识别（同版本 + 同规范化 days 摘要）
-  const ver = String(b.previewVersion == null ? '' : b.previewVersion);
-  if (p.splitBatchId && p.splitCommitVersion && ver && ver === p.splitCommitVersion && Array.isArray(b.days)) {
+  // 1) 版本必须为字符串（数字/数组/null 等显式非法值不得被 String() 强转后参与比对）
+  if (b.previewVersion !== undefined && typeof b.previewVersion !== 'string') {
+    return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'previewVersion 必须是字符串' });
+  }
+  // 2) 精确重放：先于「已拆再拆拒绝」识别（同版本 + 同规范化 days 摘要）
+  //    身份限定：URL 记录必须是本批首日（有 splitCommitVersion 且非子记录）
+  const ver = typeof b.previewVersion === 'string' ? b.previewVersion : '';
+  if (p.splitBatchId && p.splitCommitVersion && !p.parentPlanId && ver && ver === p.splitCommitVersion && Array.isArray(b.days)) {
     const seg = String(p.splitCommitVersion).split(':');
     if (seg.length === 4 && daysDigestOf(normalizeDaysForDigest(b.days)) === seg[2]) {
       const kids = splitChildrenOf(p, p.splitBatchId);
       return res.json({
-        ok: true, replay: true, batchId: p.splitBatchId,
+        ok: true, replay: true, splitBatchId: p.splitBatchId,
         firstDayPlanId: p.id, createdPlanIds: kids.map(k => k.id)
       });
     }
@@ -352,12 +361,12 @@ app.post('/api/workPlans/:id/split', (req, res) => {
   try {
     saveDB();
   } catch (e) {
-    DB.workPlans.length = lenBefore;              // 移除本次追加的子记录，不留部分写入
+    DB.workPlans.length = lenBefore;              // 移除本次追加的子记录（仅内存还原，不声称磁盘原子/半写安全）
     const idx = DB.workPlans.indexOf(p);
     if (idx > -1) DB.workPlans[idx] = before;     // 父记录还原到操作前
     return res.status(500).json({ ok: false, error: 'SAVE_FAILED', message: '保存失败，已回滚内存记录：' + String((e && e.message) || e) });
   }
-  return res.json({ ok: true, batchId, firstDayPlanId: p.id, createdPlanIds: created.map(c => c.id) });
+  return res.json({ ok: true, splitBatchId: batchId, firstDayPlanId: p.id, createdPlanIds: created.map(c => c.id) });
 });
 
 /* ---------- 撤销拆分：Step 7 起关闭（不读快照、不恢复任何数据） ---------- */
