@@ -1213,8 +1213,18 @@ const Imports = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { loading.value = false; }
     }
     function doSearch() { page.value = 1; }
+    // 批次是否记录了关联材料（早期批次没有 materialIds，整批删除必然被服务端拒绝）
+    function hasBatchIds(row) { return !!(row && Array.isArray(row.materialIds) && row.materialIds.length); }
     // 删除导入批次（仅超级用户）：批次 + 该批次导入的材料一并删除
     async function removeBatch(row) {
+      if (!hasBatchIds(row)) {
+        ElementPlus.ElMessageBox.alert(
+          '该批次为历史导入，未记录关联材料，服务端无法整批删除。<br><br>'
+          + '请在「材料明细」中按工程 / 编码逐条删除（只未被进行中的领料单、出库单引用的物料可删）。',
+          '历史批次无法整批删除', { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning' }
+        );
+        return;
+      }
       const n = Array.isArray(row.materialIds) && row.materialIds.length ? row.materialIds.length : (row.rows || 0);
       try {
         await ElementPlus.ElMessageBox.confirm(
@@ -1252,7 +1262,7 @@ const Imports = {
       }
     }
     onMounted(load);
-    return { list, loading, filters, page, pageSize, projects, filtered, paged, load, doSearch, removeBatch };
+    return { list, loading, filters, page, pageSize, projects, filtered, paged, load, doSearch, removeBatch, hasBatchIds };
   },
   template: `
   <div>
@@ -1301,7 +1311,9 @@ const Imports = {
       </el-table-column>
       <el-table-column v-if="canAdmin()" label="操作" width="90">
         <template #default="{row}">
-          <el-button link type="danger" size="small" @click="removeBatch(row)">删除</el-button>
+          <el-button link type="danger" size="small" :disabled="!hasBatchIds(row)"
+            :title="hasBatchIds(row) ? '' : '历史批次未记录关联材料，无法整批删除'"
+            @click="removeBatch(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>

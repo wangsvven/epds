@@ -760,10 +760,23 @@ app.put('/api/materials/:id', (req, res) => {
   const b = req.body || {};
   const err = validateMaterialBody(b, { forEdit: true, oldItem: old });
   if (err) return res.status(400).json({ error: err });
+  // 所属工程：有单据时禁止改（否则单据明细的工程快照与材料当前工程错位 →
+  // 列表按工程统计会漏掉那些单据，而按日回放只认材料 id，两套口径必然分叉；
+  // 反方向还会留下「工程里已无该材料」的孤儿占用量）
+  const nextProject = String(b.project || old.project).trim();
+  if (nextProject !== String(old.project || '').trim()) {
+    const refs = materialRefsOf(old);
+    if (refs.length) {
+      return res.status(409).json({
+        error: '该材料已有' + refs.map(r => r.label + ' ' + r.count + ' 张').join('、') + '，不能修改所属工程；请先作废相关单据',
+        refs
+      });
+    }
+  }
   const qtyChanged = roundQty(b.qtyRequired) !== roundQty(old.qtyRequired);
   const cur = {
     ...old,
-    project: String(b.project || old.project).trim(),
+    project: nextProject,
     description: String(b.description !== undefined ? b.description : old.description).trim(),
     qtyRequired: roundQty(b.qtyRequired !== undefined ? b.qtyRequired : old.qtyRequired),
     qtyArrived: roundQty(old.qtyArrived), // 已到只随确认入库/补入库/作废冲销变化，编辑不改写

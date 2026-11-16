@@ -1209,6 +1209,31 @@ async function runSmoke() {
     return '下拉 id+姓名 · 提交 workerId · 姓名兼容';
   });
 
+  /* ---------- P0-5 有单据的材料禁止改所属工程（防「跨工程占用」） ---------- */
+  await step('materials', 'P0-5 有单据的材料禁止改所属工程；无单据可改、作废后可改', async () => {
+    const mk = (project) => ({
+      project, source: '甲供材料', description: 'ZT测试-P05 改工程料', qtyRequired: 10, unit: '根', code: 'ZT-P05'
+    });
+    const m = needOk(await api('POST', '/api/materials', { token, body: mk(MP_C) }), 'materials POST P05');
+    // ① 无单据：允许改（且改回来也允许）
+    needOk(await api('PUT', '/api/materials/' + m.id, { token, body: mk('冒烟测试项目B') }), 'P05 改工程（无单据）');
+    needOk(await api('PUT', '/api/materials/' + m.id, { token, body: mk(MP_C) }), 'P05 改回');
+    // ② 有领料单（已确认入库）→ 409 且带 refs
+    await arriveVia(m.id, 3);
+    const r1 = await api('PUT', '/api/materials/' + m.id, { token, body: mk('冒烟测试项目B') });
+    need(r1.status === 409, '有单据改工程应 409，实际 ' + r1.status + ' ' + brief(r1.data));
+    need(/不能修改所属工程/.test(r1.data.error), '文案应说明不能改工程：' + r1.data.error);
+    need(Array.isArray(r1.data.refs) && r1.data.refs.some(x => /领料单/.test(x.label)),
+      '应回带 refs 说明是哪类单据：' + brief(r1.data.refs));
+    // ③ 作废那张领料单后即可改（不是永久锁死）
+    const reqs = await listOk('/api/materialRequisitions', token);
+    const req = reqs.find(x => (x.items || []).some(it => it.materialId === m.id) && x.status === '已入库');
+    need(req, '找不到该材料的领料单');
+    needOk(await api('PUT', '/api/materialRequisitions/' + req.id + '/void', { token, body: { reason: 'ZT测试-P05 解绑' } }), 'void P05');
+    needOk(await api('PUT', '/api/materials/' + m.id, { token, body: mk('冒烟测试项目B') }), 'P05 作废后改工程');
+    return '无单据可改 · 有单据 409 带 refs · 作废后可改';
+  });
+
   /* ---------- P1 出库可选关联（计划 / 作业日 / 工序 / 来源领料单） ---------- */
   let p1MatId = '', p1ReqId = '', p1PlanId = '', p1OutId = '', p1ReqNo = '', p1PlanBId = '';
   await step('materials', 'P1-A 带来源领料单 + 计划出库 → 成功；GET/反查/material-usage 全部可见', async () => {
@@ -3844,6 +3869,23 @@ async function runSmoke() {
     need(/function byDocNoAsc\(a, b\)[\s\S]{0,220}cmpDocNoTopToday\(a\.outNo, b\.outNo, today\)/.test(routesSrc),
       '出库单列表应按「当天置顶 + 其余升序」排序（后端 byDocNoAsc → cmpDocNoTopToday）');
     return '默认 在建工程/全部工程类型/全部导入状态/选择工程 + 三个下拉选项 + completed·category·importId 联动 + 候选随筛 + 自动清空 + 懒加载 + 窄屏两列 + 导入状态常规色 + 出库单默认全部 + 两列表升序';
+  });
+
+  /* ---------- 全库账目一致性自检（放在脏数据夹具之前：此时库内不应有任何「存值 ≠ 明细」） ---------- */
+  await step('结构', '全库账目自检：已到/未到/归还/工程归属/单据日期 与明细零差异（写入路径没漏同步）', async () => {
+    const dbFile = path.join(TMP, 'data', 'db.json');
+    let db = null;
+    // saveDB 非原子写：极小概率读到半截 JSON，重试几次
+    for (let i = 0; i < 5 && !db; i++) {
+      try { db = JSON.parse(fs.readFileSync(dbFile, 'utf8')); } catch (e) { db = null; }
+    }
+    need(db, '读不到临时库 ' + dbFile);
+    const { auditDB } = require(path.join(ROOT, 'scripts', 'consistency-audit.js'));
+    const rows = auditDB(db);
+    need(!rows.length, '发现 ' + rows.length + ' 处不一致：' +
+      rows.slice(0, 6).map(r => r.code + ' ' + r.detail).join(' | '));
+    const alive = (a) => (a || []).filter(x => x && !x.deleted).length;
+    return '材料 ' + alive(db.materials) + ' / 领料 ' + alive(db.materialRequisitions) + ' / 出库 ' + alive(db.materialOutbound) + ' → 0 处不一致';
   });
 
   /* ---------- P0-4 存量不一致：脏数据夹具 + 只读性（放最后，需重启临时服务） ---------- */
