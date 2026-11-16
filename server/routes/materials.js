@@ -7,7 +7,7 @@ const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO, aliveFilter, fmtNow, bjStr } = require('../core/util');
-const { withGen, materialStatus, roundQty, replayAvailability } = require('../core/material-calc');
+const { withGen, materialStatus, roundQty, replayAvailability, availableAsOf } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 const { isWorkerAdmitted } = require('../core/worker-status');
 const { docNoKey, cmpDocNo, cmpDocNoTopToday, nextDocNo, alignPlan, refPatchPlan } = require('../core/doc-no');
@@ -130,6 +130,9 @@ function outboundStats(project) {
 app.get('/api/materialOutbound/stock', (req, res) => {
   const project = String(req.query.project || '');
   if (!project) return res.json([]);
+  // includeZero=1：把「曾入库、当前已耗尽」的材料一并返回（available: 0），供登记弹窗按截至日核算。
+  // 过滤基线仍是 qtyArrived > 0 —— 从未入库的材料不因此出现。不带参数时响应与改前逐字一致。
+  const includeZero = String(req.query.includeZero || '') === '1';
   const stats = outboundStats(project);
   const rows = [];
   DB.materials.filter(aliveFilter()).forEach(m => {
@@ -139,11 +142,51 @@ app.get('/api/materialOutbound/stock', (req, res) => {
     const st = stats[m.id] || { taken: 0, returned: 0 };
     const net = roundQty(st.taken - st.returned);
     const available = roundQty(Math.max(0, inQty - net));
-    if (available <= 0) return; // 已全部出库的材料不再出现在可出库列表
+    if (available <= 0 && !includeZero) return; // 已全部出库的材料默认不再出现在可出库列表
     const hasRecords = DB.materialOutbound.some(o => !o.deleted && o.project === project && (o.items || []).some(it => it.materialId === m.id));
     rows.push({ id: m.id, description: m.description, code: m.code, unit: m.unit, inQty, taken: st.taken, returned: st.returned, net, available, hasRecords });
   });
   res.json(rows);
+});
+/* 截至业务日的可用量（只读，供登记出库弹窗核算）
+ * 与 /stock 的分工：/stock 回答「现在」的聚合可用；本接口回答「截至 D 还有多少」。
+ * 与出库创建的两道校验同源（都走 core/material-calc），不另起一套库存算法；
+ * 只读：不写库、不校验补录原因（补录原因仍只由提交侧 bizDateError 负责）。 */
+app.get('/api/materialOutbound/stock-asof', (req, res) => {
+  const project = String(req.query.project || '').trim();
+  if (!project) return res.status(400).json({ error: '缺少工程参数' });
+  const date = String(req.query.date || '').trim();
+  if (!date) return res.status(400).json({ error: '缺少日期参数' });
+  if (!isBizDate(date)) return res.status(400).json({ error: '日期格式应为 YYYY-MM-DD（须为真实存在的日期）' });
+  const today = todayBizDate();
+  if (date > today) return res.status(400).json({ error: '日期不能晚于今天（' + today + '）' });
+  const rawIds = String(req.query.ids || '').trim();
+  if (!rawIds) return res.status(400).json({ error: '缺少材料 id 参数（ids）' });
+  const segs = rawIds.split(',').map(x => String(x == null ? '' : x).trim());
+  if (segs.some(s => !s)) return res.status(400).json({ error: '材料 id 参数（ids）含空段' });
+  const ids = [];
+  segs.forEach(s => { if (ids.indexOf(s) === -1) ids.push(s); });   // 重复 id 去重
+  // 归属校验：任一 id 不存在 / 已删除 / 不属于该工程 → 整单拒绝
+  const mats = [];
+  for (const id of ids) {
+    const m = DB.materials.find(x => x && x.id === id && !x.deleted);
+    if (!m || m.project !== project) return res.status(400).json({ error: '物料不存在或不属于所选工程' });
+    mats.push(m);
+  }
+  const rows = mats.map(m => {
+    const r = availableAsOf(m.id, date);
+    return {
+      materialId: m.id,
+      code: m.code || '',
+      description: m.description || '',
+      unit: m.unit || '',
+      available: r.available,
+      notYetIn: !!r.notYetIn,
+      beforeOpening: !!r.beforeOpening,
+      openingDate: r.openingDate || ''
+    };
+  });
+  res.json({ ok: true, project, date, rows });
 });
 // P1 出库可选关联：项目名口径与材料/计划一致（同名，或同属一个父工程 —— 父工程名与其子项目名互认）
 function projectFamilyOf(name) {
