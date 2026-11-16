@@ -268,6 +268,32 @@ t('A14 回归：replayAvailability 返回值结构未变（ok/firstNegativeDate/
   assert.equal(eventsOf.length, 1);
 });
 
+t('A16 曾有出库 → notYetIn=false（即使出库时刻在期初盖戳之前、已含进期初）', () => {
+  // 带期初字段、opening 与 openingRaw 均为 0、无任何入库 history，
+  // 但有一笔业务日 ≤ D 的有效出库（时刻早于 openingAt，模拟老手工备料已全出完）
+  seed({
+    materials: [material()],
+    requisitions: [],
+    outbound: [outbound('o1', 'm1', '2026-11-10', 6, { createdAt: '2026-11-10 09:00:00' })]
+  });
+  const r = availableAsOf('m1', '2026-11-20');
+  assert.equal(r.available, 0, '出库时刻 ≤ 期初盖戳 → 已含期初，不重复扣减');
+  assert.equal(r.notYetIn, false, '曾有出库即证明 D 之前有过库存，不得报尚未入库');
+
+  // 边界：出库业务日晚于 D → 不构成「截至 D 之前有库存」的证据
+  seed({
+    materials: [material()],
+    requisitions: [],
+    outbound: [outbound('o1', 'm1', '2026-11-25', 6, { createdAt: '2026-11-25 09:00:00' })]
+  });
+  assert.equal(availableAsOf('m1', '2026-11-20').notYetIn, true, 'D 之后的出库不影响判断');
+  assert.equal(availableAsOf('m1', '2026-11-20').available, 0);
+
+  // 回归：真未入库（无入库、无出库）仍为 true
+  seed({ materials: [material()], requisitions: [], outbound: [] });
+  assert.equal(availableAsOf('m1', '2026-11-20').notYetIn, true);
+});
+
 /* ================= B 接口 ================= */
 g('B 接口 stock-asof 与 /stock includeZero');
 
