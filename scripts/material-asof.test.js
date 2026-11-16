@@ -294,6 +294,57 @@ t('A16 曾有出库 → notYetIn=false（即使出库时刻在期初盖戳之前
   assert.equal(availableAsOf('m1', '2026-11-20').notYetIn, true);
 });
 
+t('A17 迁移前的出库单在迁移后作废：期初按当时净额回补（群晖 17 根双扣的回归）', () => {
+  // 迁移时刻 18:05：已到 50（25+25），有效出库净额 17（13+4）→ 期初 33
+  // 11-15 把这两张作废、又按原业务日补录 4+13 与 15、1 → 聚合 93−33=60
+  // 不回补期初时回放 = 33 −17(折叠补录) −15 −1 +43 = 43（少 17）；回补后 60
+  const base = [
+    outbound('o1', 'm1', '2026-11-11', 13, { createdAt: '2026-11-11 17:12:00', status: '已作废', voidedAt: '2026-11-15 17:36:00' }),
+    outbound('o2', 'm1', '2026-11-11', 4, { createdAt: '2026-11-11 17:39:00', status: '已作废', voidedAt: '2026-11-15 17:24:00' }),
+    outbound('o3', 'm1', '2026-11-10', 4, { createdAt: '2026-11-15 17:46:00' }),
+    outbound('o4', 'm1', '2026-11-11', 13, { createdAt: '2026-11-15 17:51:00' }),
+    outbound('o5', 'm1', '2026-11-12', 15, { createdAt: '2026-11-15 17:52:00' }),
+    outbound('o6', 'm1', '2026-11-15', 1, { createdAt: '2026-11-15 18:09:00' })
+  ];
+  const reqs = [
+    inboundReq('r1', 'm1', '2026-11-09', 25, { status: '已入库', history: [{ arrivalDate: '2026-11-09', at: '2026-11-09 13:28:00', rows: [{ materialId: 'm1', thisQty: 25 }] }] }),
+    inboundReq('r2', 'm1', '2026-11-10', 25, { status: '已入库', history: [{ arrivalDate: '2026-11-10', at: '2026-11-10 14:06:00', rows: [{ materialId: 'm1', thisQty: 25 }] }] }),
+    inboundReq('r3', 'm1', '2026-11-15', 43, { status: '已入库', history: [{ arrivalDate: '2026-11-15', at: '2026-11-15 13:46:00', rows: [{ materialId: 'm1', thisQty: 43 }] }] })
+  ];
+  seed({ materials: [material({ qtyArrived: 93, openingAvailable: 33, openingRaw: 33 })], requisitions: reqs, outbound: base });
+  assert.equal(availableAsOf('m1', '2026-11-16').available, 60, '期初回补 17 后与聚合一致（93−33）');
+  const rp = replayAvailability('m1');
+  assert.equal(rp.ok, true, '回补后不应判负');
+  assert.equal(rp.available, 60, '回放终值同为 60');
+
+  // 反向验证：期初不解释时不动（见 A19）；期初不解释的情形不在此列
+});
+
+t('A18 迁移前的领料单在迁移后作废：期初扣回当时已入库的量', () => {
+  // 迁移时：r1 入库 100 + r2 入库 20 → 已到 120、无出库 → 期初 120
+  // 迁移后作废 r2（冲销 20）→ 已到 100、聚合可用 100；期初不回补则回放仍 120（偏高 20）
+  seed({
+    materials: [material({ qtyArrived: 100, openingAvailable: 120, openingRaw: 120 })],
+    requisitions: [
+      inboundReq('r1', 'm1', '2026-11-10', 100, { status: '已入库', history: [{ arrivalDate: '2026-11-10', at: '2026-11-10 09:00:00', rows: [{ materialId: 'm1', thisQty: 100 }] }] }),
+      inboundReq('r2', 'm1', '2026-11-11', 20, { status: '已作废', voidedAt: '2026-11-16 10:00:00', history: [{ arrivalDate: '2026-11-11', at: '2026-11-11 09:00:00', rows: [{ materialId: 'm1', thisQty: 20 }] }] })
+    ],
+    outbound: []
+  });
+  assert.equal(availableAsOf('m1', '2026-11-16').available, 100, '期初扣回 20 后与聚合一致');
+  assert.equal(replayAvailability('m1').available, 100, '回放终值同为 100');
+});
+
+t('A19 安全阀：期初与迁移口径不自洽（老账/数据搬家）→ 不回补，沿用原值', () => {
+  // 已到(T) 300、无出库 → 迁移公式应写 300，库里却是 100（解释不通）
+  seed({
+    materials: [material({ qtyArrived: 300, openingAvailable: 100, openingRaw: 100 })],
+    requisitions: [inboundReq('r1', 'm1', '2026-11-10', 300, { status: '已入库', history: [{ arrivalDate: '2026-11-10', at: '2026-11-10 09:00:00', rows: [{ materialId: 'm1', thisQty: 300 }] }] })],
+    outbound: [outbound('o1', 'm1', '2026-11-11', 50, { createdAt: '2026-11-11 17:00:00', status: '已作废', voidedAt: '2026-11-16 10:00:00' })]
+  });
+  assert.equal(availableAsOf('m1', '2026-11-16').available, 100, '不回补：仍按库内期初 100 起算（差异交 P0-4，不在算法里猜）');
+});
+
 /* ================= B 接口 ================= */
 g('B 接口 stock-asof 与 /stock includeZero');
 

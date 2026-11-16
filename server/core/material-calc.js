@@ -98,12 +98,77 @@ function eventsOf(materialId) {
   });
   return out;
 }
+/* ---------- 期初回补（只读派生，不写库） ----------
+ * 期初余额是迁移那一刻的冻结快照：迁移前已存在的领料单/出库单已被折算进 openingAvailable。
+ * 这些单据之后被作废（删除只发生在作废之后）时，opening 不会自己变，而它们也不再产生事件，
+ * 于是「截至日回放」与「当前聚合（qtyArrived − 有效出库净额）」永久分叉：
+ *   作废迁移前的出库单 → 聚合补回、回放仍扣（回放偏低，极端情况给出负数可用）
+ *   作废迁移前的领料单 → 聚合冲销、回放仍计（回放偏高）
+ * 这里在读取时把差额算回来，时间口径与 eventsOf 同源：
+ *   出库：迁移前已存在（createdAt ≤ openingAt）且迁移后作废 → + 当时的净额（qty − 当时已归还）
+ *   领料：迁移前已入库（history.at ≤ openingAt）且迁移后作废 → − 当时的入库合计
+ *
+ * 安全阀：只有「期初能被迁移口径解释」时才回补，即
+ *   openingAvailable === max(0, 已到(openingAt) − 有效出库净额(openingAt))
+ * 解释不通（期初来自别的数据源：老账、数据搬家、手工改库）一律不回补，沿用原值，
+ * 这类不一致交 P0-4 只读报告，不在库存算法里猜。
+ *
+ * 全程只读、不改任何字段：存量库换上新代码即自动归位，不需要数据迁移。
+ */
+function openingAdjustOf(materialId) {
+  const DB = DB_();
+  const mat = (DB.materials || []).find(x => x && x.id === materialId);
+  const openingAt = timePart(mat && mat.openingAt);
+  if (!mat || !openingAt) return 0;   // 无期初时刻（迁移后新建的材料）→ 没有冻结基数要修
+  const openingDate = dayPart(mat.openingDate);
+  const leT = v => { const s = timePart(v); return !!s && s <= openingAt; };
+  const gtT = v => { const s = timePart(v); return !!s && s > openingAt; };
+  let arrivedAtT = 0, netAtT = 0, voidedOut = 0, voidedIn = 0;
+  // 领料：还原「迁移那一刻的已到」，并记下迁移后才作废的单据当时已入库的量
+  (DB.materialRequisitions || []).forEach(r => {
+    if (!r) return;
+    if (r.status === '已作废' && !gtT(r.voidedAt)) return;  // 迁移前就作废：当时既未入已到，也未进期初
+    let qtyAtT = 0;
+    (r.history || []).forEach(h => {
+      if (!leT(h && h.at)) return;
+      const row = (h.rows || []).find(x => x && x.materialId === materialId);
+      qtyAtT += Number(row && row.thisQty) || 0;
+    });
+    if (!(qtyAtT > 0)) return;
+    arrivedAtT = roundQty(arrivedAtT + qtyAtT);
+    if (r.status === '已作废') voidedIn = roundQty(voidedIn + qtyAtT);
+  });
+  // 出库：还原「迁移那一刻的有效出库净额」，并记下迁移后才作废的单据当时的净额
+  (DB.materialOutbound || []).forEach(o => {
+    if (!o) return;
+    const it = (o.items || []).find(x => x && x.materialId === materialId);
+    if (!it) return;
+    const created = timePart(o.createdAt);
+    const existedAtT = created ? created <= openingAt
+      : (!!openingDate && !!dayPart(o.outDate) && dayPart(o.outDate) < openingDate); // 旧数据缺 createdAt 时按业务日兜底
+    if (!existedAtT) return;                                  // 迁移后才开的单（哪怕业务日补录更早）当时不在期初
+    if (o.status !== '有效' && !gtT(o.voidedAt)) return;      // 迁移前就作废：未进期初
+    let returnedAtT = 0;
+    (o.returns || []).forEach(x => {
+      if (!leT(x && x.at)) return;                            // 迁移后才归还的不计入当时净额
+      const row = (x.rows || []).find(y => y && y.materialId === materialId);
+      returnedAtT += Number(row && row.qty) || 0;
+    });
+    const net = roundQty((Number(it.qty) || 0) - roundQty(returnedAtT));
+    netAtT = roundQty(netAtT + net);
+    if (o.status !== '有效') voidedOut = roundQty(voidedOut + net);
+  });
+  // 安全阀：期初若不能被迁移公式（migrations.js 20261111-material-opening-balance）解释，就不动
+  const derived = roundQty(arrivedAtT - netAtT);
+  if (roundQty(Number(mat.openingAvailable) || 0) !== Math.max(0, derived)) return 0;
+  return roundQty(voidedOut - voidedIn);
+}
 function replayAvailability(materialId, extraEvents) {
   const DB = DB_();
   const mat = (DB.materials || []).find(x => x && x.id === materialId);
   const openingDate = dayPart(mat && mat.openingDate);
   const openingAt = timePart(mat && mat.openingAt);
-  const opening = roundQty(Number(mat && mat.openingAvailable) || 0);
+  const opening = roundQty((Number(mat && mat.openingAvailable) || 0) + openingAdjustOf(materialId));
   let events = eventsOf(materialId);
   (extraEvents || []).forEach(e => {
     const d = dayPart(e.date);
@@ -199,7 +264,8 @@ function availableAsOf(materialId, date) {
   }
   const openingDate = dayPart(mat.openingDate);
   const openingAt = timePart(mat.openingAt);
-  const opening = roundQty(Number(mat.openingAvailable) || 0);
+  const openingAdj = openingAdjustOf(materialId);   // 与 replayAvailability 同一回补口径
+  const opening = roundQty((Number(mat.openingAvailable) || 0) + openingAdj);
   // 期初之前：逐日库存不可核算（旧回放对期初前不判负，后端不必然兜住）→ 明确返回不可核算
   if (openingDate && d < openingDate) {
     return { materialId, available: null, notYetIn: false, beforeOpening: true, openingDate };
@@ -226,7 +292,7 @@ function availableAsOf(materialId, date) {
   // 且截至日也没有出库事件 —— 曾有出库即证明 D 之前有过库存，不得报「尚未入库」
   // （归还必以出库为前提，其判据已被出库条件覆盖，不单独作为条件）
   const auditable = !!openingDate && mat.openingRaw !== undefined && mat.openingRaw !== null;
-  const zeroOpening = opening === 0 && roundQty(Number(mat.openingRaw) || 0) === 0;
+  const zeroOpening = opening === 0 && roundQty((Number(mat.openingRaw) || 0) + openingAdj) === 0;
   const noInbound = !inboundDatesOf(materialId).some(x => x <= d);
   const noOutbound = !rawEvents.some(e => e.kind === 'out' && e.date <= d);
   const notYetIn = auditable && zeroOpening && noInbound && noOutbound;
