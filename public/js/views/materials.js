@@ -1337,12 +1337,116 @@ const Outbounds = {
     const selCount = computed(() => selMap.size);
     const snapOf = r => ({ id: r.id, code: r.code, description: r.description, unit: r.unit, available: r.available });
     const outQty = reactive({});
+    /* ---------- 截至出库日的库存核算（stock-asof，只读） ----------
+     * 弹窗打开、出库日期变化（含作业日联动）都重算；结果只用于展示与前端拦截，
+     * 提交仍走既有创建接口的两道校验（当前聚合 + 按日回放），不以此承诺提交必过。 */
+    const asofRows = reactive({});                                  // materialId -> 后端行
+    const asofState = reactive({ status: 'idle', error: '', date: '', seq: 0 });
+    const showZero = ref(false);                                    // 「显示当前零库存材料」，默认关
+    function asofOf(row) { return asofRows[String(row && row.id ? row.id : '')] || null; }
+    function asofAvail(row) {
+      const x = asofOf(row);
+      if (!x || x.beforeOpening || x.available === null || x.available === undefined) return null;
+      const n = Number(x.available);
+      return isFinite(n) ? n : null;
+    }
+    function clearAsof() {
+      Object.keys(asofRows).forEach(k => delete asofRows[k]);
+      asofState.status = 'idle'; asofState.error = ''; asofState.date = ''; asofState.seq++;
+    }
+    async function fetchAsof() {
+      if (!dlg.visible) return;
+      const date = String(dlg.outDate || '').trim();
+      const ids = dlg.rows.map(r => r.id).filter(Boolean);
+      const seq = ++asofState.seq;
+      const bindProject = String(project.value || '');
+      const bindIds = ids.join(',');
+      if (!bindProject || !ids.length || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        Object.keys(asofRows).forEach(k => delete asofRows[k]);
+        asofState.status = 'error'; asofState.date = '';
+        asofState.error = !date ? '请选择出库日期' : '出库日期格式应为 YYYY-MM-DD';
+        return;
+      }
+      asofState.status = 'loading'; asofState.error = ''; asofState.date = '';
+      try {
+        const q = '/api/materialOutbound/stock-asof?project=' + encodeURIComponent(bindProject)
+          + '&date=' + encodeURIComponent(date) + '&ids=' + encodeURIComponent(bindIds);
+        const r = await api.get(q);
+        // 请求绑定逐项核对：实例未关、工程/材料集合/日期未变、且是最后一次请求，才采用
+        if (seq !== asofState.seq) return;
+        if (!dlg.visible) return;
+        if (String(project.value || '') !== bindProject) return;
+        if (dlg.rows.map(x => x.id).join(',') !== bindIds) return;
+        if (String(dlg.outDate || '').trim() !== date) return;
+        const list = (r && r.rows) || (Array.isArray(r) ? r : []);
+        const map = {};
+        list.forEach(x => { if (x && x.materialId) map[x.materialId] = x; });
+        Object.keys(asofRows).forEach(k => delete asofRows[k]);
+        if (!ids.every(id => map[id])) {            // 响应缺行：按失败处理，不沿用旧的可用值
+          asofState.status = 'error';
+          asofState.error = '核算结果不完整，请重试';
+          return;
+        }
+        Object.keys(map).forEach(k => { asofRows[k] = map[k]; });
+        asofState.status = 'ok';
+        asofState.date = date;
+      } catch (e) {
+        if (seq !== asofState.seq) return;          // 旧请求的失败不得覆盖新结果
+        Object.keys(asofRows).forEach(k => delete asofRows[k]);
+        asofState.status = 'error';
+        asofState.error = (e.data && e.data.error) || e.message || '库存核算失败';
+      }
+    }
+    // 行状态：ok / notIn（尚未入库）/ zero（可用为 0）/ short（不足）/ beforeOpening / missing
+    function rowState(row) {
+      const x = asofOf(row);
+      if (!x) return 'missing';
+      if (x.beforeOpening) return 'beforeOpening';
+      const a = Number(x.available);
+      if (!isFinite(a)) return 'missing';
+      if (a <= 0) return x.notYetIn ? 'notIn' : 'zero';
+      if ((Number(row.qty) || 0) > a + 1e-9) return 'short';
+      return 'ok';
+    }
+    function rowStateText(row) {
+      const st = rowState(row);
+      const x = asofOf(row);
+      if (st === 'missing') return asofState.status === 'error' ? (asofState.error || '核算失败') : '核算中…';
+      if (st === 'beforeOpening') return '期初日 ' + (x.openingDate || '—') + ' 之前不可核算';
+      if (st === 'notIn') return '截至所选日期尚未入库';
+      if (st === 'zero') return '截至该日可用为 0';
+      if (st === 'short') {
+        const a = Number(x.available), q = Number(row.qty) || 0;
+        return '可用 ' + fmt4(a) + ' · 本次 ' + fmt4(q) + ' · 缺口 ' + fmt4(q - a);
+      }
+      return '';
+    }
+    function rowStyleOf({ row }) {
+      const st = rowState(row);
+      return (st === 'ok' || st === 'missing') ? {} : { background: 'rgba(240,80,80,0.07)' };
+    }
+    // 数量上限：只防明显越界，绝不为难用户已填的值（改日期不得改数量）
+    function qtyMaxOf(row) {
+      const a = asofAvail(row);
+      const cur = Number(row.qty) || 0;
+      if (a === null) return undefined;
+      return Math.max(a, cur);
+    }
+    const canSubmitOut = computed(() => {
+      if (!dlg.visible || !dlg.workerId) return false;
+      if (asofState.status !== 'ok') return false;
+      if (asofState.date !== String(dlg.outDate || '').trim()) return false;
+      if (dlg.rows.some(r => rowState(r) === 'beforeOpening')) return false;
+      return true;
+    });
     const mainTable = ref(null);
     const page = ref(1); const pageSize = ref(50);
     const opage = ref(1); const opageSize = ref(30);
     // 登记出库 / 出库单详情 / 归还 / 打印预览
     // 出库可选关联 —— 计划（workPlanId）、作业日（workDate）、工序（processName）
     const dlg = reactive({ visible: false, workerId: '', workPlanId: '', workDate: '', outDate: '', outDateReason: '', processName: '', rows: [] });
+    watch(() => dlg.visible, v => { if (v) fetchAsof(); else clearAsof(); });
+    watch(() => dlg.outDate, () => { if (dlg.visible) fetchAsof(); });
     const planList = ref([]);  // 关联计划候选（按工程同口径过滤）
     const od = reactive({ visible: false, rec: null });
     const rdlg = reactive({ visible: false, rec: null, rows: [], returnDate: '', returnDateReason: '' });
@@ -1414,7 +1518,8 @@ const Outbounds = {
       loading.value = true;
       try {
         if (project.value) {
-          const r = await api.get('/api/materialOutbound/stock?project=' + encodeURIComponent(project.value));
+          const r = await api.get('/api/materialOutbound/stock?project=' + encodeURIComponent(project.value)
+            + (showZero.value ? '&includeZero=1' : ''));
           list.value = Array.isArray(r) ? r : (r.data || []);
         } else {
           list.value = [];
@@ -1450,8 +1555,12 @@ const Outbounds = {
       || String(r.description || '').includes(keyword.value.trim()) || String(r.code || '').includes(keyword.value.trim())));
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
     function addSel(r) {
-      // 勾选时自动把该行「本次出库数量」填为可用库存；已填过的值不覆盖
-      if (!selMap.has(r.id) && outQty[r.id] === undefined) outQty[r.id] = Number(r.available) || 0;
+      // 勾选时自动把该行「本次出库数量」填为可用库存；已填过的值不覆盖。
+      // 当前可用为 0 的行（仅「显示零库存材料」时可见）不预填 0，留空由用户按截至日可用填写
+      if (!selMap.has(r.id) && outQty[r.id] === undefined) {
+        const av = Number(r.available);
+        if (av > 0) outQty[r.id] = av;
+      }
       selMap.set(r.id, snapOf(r));   // 顺带刷新快照里的可用库存
     }
     function dropSel(r) {
@@ -1518,11 +1627,24 @@ const Outbounds = {
       return dlg.outDate < t.toISOString().slice(0, 10);
     });
     async function submitOut() {
+      // 状态纪律：函数自身再检查一遍，不只靠按钮 disabled
+      if (asofState.status !== 'ok' || asofState.date !== String(dlg.outDate || '').trim()) {
+        ElementPlus.ElMessage.warning('库存核算未完成，请稍候或重新选择出库日期'); return;
+      }
+      if (dlg.rows.some(r => rowState(r) === 'beforeOpening')) {
+        ElementPlus.ElMessage.error('所选出库日期早于部分材料的期初日，无法核算，不能提交'); return;
+      }
       const w = workers.value.find(x => x.id === dlg.workerId);
       if (!w) { ElementPlus.ElMessage.warning('请选择领取人'); return; }
       for (const r of dlg.rows) {
         if (!(Number(r.qty) > 0)) { ElementPlus.ElMessage.error('请填写出库数量（' + r.description + '）'); return; }
-        if (Number(r.qty) > Number(r.available) + 1e-9) { ElementPlus.ElMessage.error('「' + r.description + '」本次出库 ' + r.qty + ' 超过可用库存 ' + r.available); return; }
+        const a = asofAvail(r);
+        if (a === null) { ElementPlus.ElMessage.error('「' + r.description + '」截至该日无法核算，不能提交'); return; }
+        if (Number(r.qty) > a + 1e-9) {
+          ElementPlus.ElMessage.error('「' + r.description + '」可用 ' + fmt4(a) + ' · 本次 ' + fmt4(Number(r.qty))
+            + ' · 缺口 ' + fmt4(Number(r.qty) - a));
+          return;
+        }
       }
       try {
         const body = {
@@ -1539,7 +1661,7 @@ const Outbounds = {
         Object.keys(outQty).forEach(k => delete outQty[k]);
         await load();
         od.rec = res.data; od.visible = true;
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+      } catch (e) { ElementPlus.ElMessage.error((e.data && e.data.error) || e.message); }
     }
     function openOrder(o) { od.rec = o; od.visible = true; }
     // 点击「查看出库单」：切换到出库单页签并按该材料筛选
@@ -1700,7 +1822,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selMap, selCount, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSelect, onSelectAll, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selMap, selCount, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSelect, onSelectAll, isSelected, showZero, openDlg, dlg, asofState, asofOf, asofAvail, rowState, rowStateText, rowStyleOf, qtyMaxOf, canSubmitOut, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
   },
   template: `
   <div>
@@ -1730,9 +1852,10 @@ const Outbounds = {
 
     <el-tabs v-model="tab">
       <el-tab-pane label="可出库材料" name="stock">
-        <div style="display:flex;gap:10px;margin:2px 0 12px;width:320px">
-          <el-input v-model="keyword" placeholder="搜索材料名称、编码" clearable @keyup.enter="load" />
+        <div style="display:flex;gap:10px;align-items:center;margin:2px 0 12px">
+          <el-input v-model="keyword" placeholder="搜索材料名称、编码" clearable @keyup.enter="load" style="width:260px" />
           <el-button type="primary" @click="load">搜索</el-button>
+          <el-checkbox v-model="showZero" @change="load">显示当前零库存材料</el-checkbox>
         </div>
         <el-empty v-if="!project" description="请先选择工程，再查看可出库材料。" />
         <template v-else>
@@ -1855,19 +1978,31 @@ const Outbounds = {
         </el-form-item>
         <div v-if="outDateFallbackNow" style="color:#E6A23C;font-size:12px;margin:-4px 0 8px">作业日晚于今天，出库日将按今天登记。</div>
       </el-form>
-      <div style="color:var(--text-2);font-size:13px;margin:-6px 0 10px">已选择 {{ dlg.rows.length }} 种材料，提交时会再次核对当前可用库存。</div>
-      <el-table :data="dlg.rows" size="small" border style="width:100%">
-        <el-table-column prop="description" label="材料" min-width="160" />
-        <el-table-column label="可用库存" width="100" align="right"><template #default="{row}">{{ fmt4(row.available) }}</template></el-table-column>
-        <el-table-column label="本次出库" width="140">
+      <div style="color:var(--text-2);font-size:13px;margin:-6px 0 10px">已选择 {{ dlg.rows.length }} 种材料；下方可用量按出库日期核算。提交时仍会按当前库存与按日回放复核。</div>
+      <div v-if="asofState.status === 'loading'" style="color:var(--text-2);font-size:12px;margin:-4px 0 8px">正在按出库日期核算可用库存…</div>
+      <div v-else-if="asofState.status === 'error'" style="color:#F56C6C;font-size:12px;margin:-4px 0 8px">{{ asofState.error }}</div>
+      <el-table :data="dlg.rows" row-key="id" :row-style="rowStyleOf" size="small" border style="width:100%">
+        <el-table-column prop="description" label="材料" min-width="150" />
+        <el-table-column label="截至出库日可用" width="126" align="right">
           <template #default="{row}">
-            <el-input-number v-model="row.qty" :min="0" :max="Number(row.available)" :precision="4" :controls="false" size="small" style="width:120px" />
+            <span v-if="asofAvail(row) === null">—</span>
+            <span v-else style="font-weight:700">{{ fmt4(asofAvail(row)) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="168">
+          <template #default="{row}">
+            <span :style="{ color: rowState(row) === 'ok' ? 'var(--text-2)' : '#F56C6C', fontSize: '12px' }">{{ rowStateText(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="本次出库" width="130">
+          <template #default="{row}">
+            <el-input-number v-model="row.qty" :min="0" :max="qtyMaxOf(row)" :precision="4" :controls="false" size="small" style="width:110px" />
           </template>
         </el-table-column>
       </el-table>
       <template #footer>
         <el-button @click="dlg.visible=false">取 消</el-button>
-        <el-button type="primary" :disabled="!dlg.workerId" @click="submitOut">确认出库</el-button>
+        <el-button type="primary" :disabled="!canSubmitOut" @click="submitOut">确认出库</el-button>
       </template>
     </el-dialog>
 

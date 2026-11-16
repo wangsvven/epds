@@ -11,6 +11,8 @@
 const assert = require('assert');
 const path = require('path');
 const Module = require('module');
+const fs = require('fs');
+const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
 const DB_PATH = require.resolve(path.join(ROOT, 'server', 'core', 'db.js'));
@@ -64,13 +66,25 @@ function seed(opts) {
   saveCalls = 0;
 }
 
-/* ---------- runner ---------- */
-let pass = 0; const fails = [];
-function t(name, fn) {
-  try { fn(); pass++; console.log('  PASS  ' + name); }
-  catch (e) { fails.push({ name: name, msg: e.message }); console.log('  FAIL  ' + name + '\n        ' + String(e.message).split('\n').join('\n        ')); }
+/* ---------- runner（收集后顺序执行，支持 async 用例） ---------- */
+let pass = 0; const fails = []; const cases = [];
+function t(name, fn) { cases.push({ kind: 't', name: name, fn: fn }); }
+function g(name) { cases.push({ kind: 'g', name: name }); }
+async function runAll() {
+  for (const c of cases) {
+    if (c.kind === 'g') { console.log('\n' + c.name); continue; }
+    try { await c.fn(); pass++; console.log('  PASS  ' + c.name); }
+    catch (e) {
+      fails.push({ name: c.name, msg: e.message });
+      console.log('  FAIL  ' + c.name + '\n        ' + String(e.message).split('\n').join('\n        '));
+    }
+  }
+  console.log('\n===== 总计：' + (pass + fails.length) + ' 项，通过 ' + pass + '，失败 ' + fails.length + ' =====');
+  if (fails.length) {
+    fails.forEach(f => console.log('  - ' + f.name + '：' + String(f.msg).split('\n')[0]));
+    process.exit(1);
+  }
 }
-function g(name) { console.log('\n' + name); }
 
 /* ================= A 核心口径 ================= */
 g('A 截至日可用量 availableAsOf');
@@ -418,8 +432,278 @@ t('B6 创建出库的回放拒绝仍返回 replayFail 结构（既有行为回�
 });
 
 /* ---------- 汇总 ---------- */
-console.log('\n===== 总计：' + (pass + fails.length) + ' 项，通过 ' + pass + '，失败 ' + fails.length + ' =====');
-if (fails.length) {
-  fails.forEach(f => console.log('  - ' + f.name + '：' + String(f.msg).split('\n')[0]));
-  process.exit(1);
+/* ================= D 前端行为（组件级真实函数调用） ================= */
+g('D 登记弹窗按截至日核算（真实 Outbounds.setup）');
+
+const MAT_VIEW_PATH = path.join(ROOT, 'public', 'js', 'views', 'materials.js');
+
+function matHarness(opts) {
+  const o = opts || {};
+  const msgs = [];
+  const gets = [];
+  const posts = [];
+  const watchList = [];
+  const sb = { console: console, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, Date: Date, Math: Math, Number: Number, String: String, Boolean: Boolean, Array: Array, Object: Object, RegExp: RegExp, Promise: Promise, isNaN: isNaN, parseFloat: parseFloat, parseInt: parseInt };
+  vm.createContext(sb);
+  vm.runInContext('globalThis.window = globalThis;', sb);
+  sb.Vue = {
+    ref: v => ({ value: v }),
+    reactive: obj => obj,
+    computed: fn => (typeof fn === 'function'
+      ? { get value() { return fn(); } }
+      : { get value() { return fn.get(); }, set value(v) { if (fn.set) fn.set(v); } }),
+    watch: (gg, cb) => { watchList.push({ g: gg, cb: cb }); return () => {}; },
+    onMounted: () => {}, onUnmounted: () => {}, nextTick: f => (f ? f() : undefined), h: () => ({})
+  };
+  // 浏览器里这些是 api.js 顶层解构出的全局（script 作用域），沙箱同样铺开
+  sb.ref = sb.Vue.ref; sb.reactive = sb.Vue.reactive;
+  sb.computed = sb.Vue.computed; sb.watch = sb.Vue.watch;
+  sb.onMounted = () => {}; sb.onUnmounted = () => {};
+  sb.nextTick = f => (f ? f() : undefined);
+  sb.fmtTime = v => String(v == null ? '' : v);
+  sb.canWrite = () => true;
+  sb.addEventListener = () => {}; sb.removeEventListener = () => {};
+  sb.document = {};
+  sb.ServerTime = { ymd: () => (o.today || '2026-11-16') };
+  sb.api = {
+    async get(u) { gets.push(u); return o.get ? o.get(u) : []; },
+    async post(u, b) {
+      posts.push({ u: u, b: b });
+      return o.post ? o.post(u, b) : { ok: true, data: { outNo: 'OUT-TEST-0001' } };
+    }
+  };
+  sb.ElementPlus = {
+    ElMessage: {
+      success: m => msgs.push('success:' + m), error: m => msgs.push('error:' + m),
+      warning: m => msgs.push('warning:' + m), info: m => msgs.push('info:' + m)
+    }
+  };
+  vm.runInContext(fs.readFileSync(MAT_VIEW_PATH, 'utf8') + '\n;globalThis.__OB = Outbounds;', sb, { filename: 'views/materials.js' });
+  const view = sb.__OB.setup({}, { emit: () => {} });
+  view.workers.value = [{ id: 'w1', name: '张三', phone: '13800000000' }];
+  return { view: view, watchList: watchList, gets: gets, posts: posts, msgs: msgs };
 }
+const tick = () => new Promise(r => setTimeout(r, 0));
+function fireWatch(h, kind) {
+  for (const w of h.watchList) {
+    let v;
+    try { v = w.g(); } catch (e) { continue; }
+    if (kind === 'visible' && v === true) { w.cb(v); return true; }
+    if (kind === 'hidden' && v === false) { w.cb(v); return true; }
+    if (kind === 'outDate' && typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) { w.cb(v); return true; }
+  }
+  return false;
+}
+function idsOf(u) {
+  const m = /[?&]ids=([^&]*)/.exec(String(u || ''));
+  return m ? decodeURIComponent(m[1]).split(',').filter(Boolean) : [];
+}
+function asofPayload(ids, avail, extra) {
+  return {
+    ok: true, date: '2026-11-16',
+    rows: ids.map(id => Object.assign({
+      materialId: id, code: 'C1', description: 'M-' + id, unit: '个',
+      available: typeof avail === 'function' ? avail(id) : avail,
+      notYetIn: false, beforeOpening: false, openingDate: '2026-11-12'
+    }, (extra && extra[id]) || {}))
+  };
+}
+// 造「已勾选、已填量、已打开弹窗」的初始态
+function openWithRows(h, rows, opts) {
+  const o = opts || {};
+  const v = h.view;
+  v.project.value = o.project || 'P1';
+  rows.forEach(r => {
+    v.selMap.set(r.id, { id: r.id, code: r.code || 'C1', description: r.description || ('M-' + r.id), unit: '个', available: r.available });
+    if (r.qty !== undefined) v.outQty[r.id] = r.qty;
+  });
+  v.openDlg();                     // 按 outQty 生成 dlg.rows，outDate 设为今天（会清空 workerId）
+  v.dlg.workerId = (o.workerId === undefined) ? 'w1' : o.workerId;
+  if (o.outDate) v.dlg.outDate = o.outDate;
+}
+
+t('D1 改日期保数量：切换出库日期后 qty 不变、可用与行状态更新', async () => {
+  let avail = 100;
+  const h = matHarness({ get: u => (u.indexOf('/stock-asof') > -1 ? asofPayload(idsOf(u), avail) : []) });
+  openWithRows(h, [{ id: 'm1', available: 100, qty: 30 }, { id: 'm2', available: 50, qty: 20 }]);
+  fireWatch(h, 'visible');
+  await tick(); await tick();
+  assert.equal(h.view.asofState.status, 'ok', '首次核算应成功');
+  assert.equal(h.view.asofAvail(h.view.dlg.rows[0]), 100);
+  assert.equal(h.view.canSubmitOut.value, true, '有领取人 + 核算成功 → 可提交');
+  avail = 25;                       // 换日：可用降到 25
+  h.view.dlg.outDate = '2026-11-15';
+  fireWatch(h, 'outDate');
+  await tick(); await tick();
+  assert.equal(h.view.asofState.date, '2026-11-15');
+  assert.equal(h.view.asofAvail(h.view.dlg.rows[0]), 25, '可用应随日期重算');
+  assert.equal(h.view.dlg.rows[0].qty, 30, '数量不得被改动');
+  assert.equal(h.view.dlg.rows[1].qty, 20, '数量不得被改动');
+  assert.equal(h.view.rowState(h.view.dlg.rows[0]), 'short', '30 > 25 应为不足');
+  assert.equal(h.view.rowState(h.view.dlg.rows[1]), 'ok');
+  assert.match(h.view.rowStateText(h.view.dlg.rows[0]), /缺口 5/);
+});
+
+t('D2 行状态与文案：尚未入库 / 可用为 0 / 不足 / 期初前，四态文案正确且整行浅红', async () => {
+  const h = matHarness({
+    get: u => asofPayload(idsOf(u), 0, {
+      a: { notYetIn: true },
+      b: { notYetIn: false },
+      c: { available: 10, notYetIn: false },
+      d: { available: null, beforeOpening: true, openingDate: '2026-11-12' }
+    })
+  });
+  openWithRows(h, [
+    { id: 'a', available: 0 }, { id: 'b', available: 0 },
+    { id: 'c', available: 10, qty: 15 }, { id: 'd', available: 0 }
+  ]);
+  fireWatch(h, 'visible');
+  await tick(); await tick();
+  const rows = h.view.dlg.rows;
+  assert.equal(h.view.rowState(rows[0]), 'notIn');
+  assert.match(h.view.rowStateText(rows[0]), /尚未入库/);
+  assert.equal(h.view.rowState(rows[1]), 'zero');
+  assert.match(h.view.rowStateText(rows[1]), /截至该日可用为 0/);
+  assert.equal(h.view.rowState(rows[2]), 'short');
+  assert.match(h.view.rowStateText(rows[2]), /可用 10\.0000 · 本次 15\.0000 · 缺口 5\.0000/);
+  assert.equal(h.view.rowState(rows[3]), 'beforeOpening');
+  assert.match(h.view.rowStateText(rows[3]), /期初日 2026-11-12 之前不可核算/);
+  assert.equal(h.view.asofAvail(rows[3]), null, '期初前不返回近似值');
+  assert.ok(Object.keys(h.view.rowStyleOf({ row: rows[2] })).length > 0, '不足行应有浅红背景');
+  assert.deepEqual(h.view.rowStyleOf({ row: rows[2] }) , h.view.rowStyleOf({ row: rows[0] }));
+  assert.equal(h.view.canSubmitOut.value, false, '存在期初前行 → 禁提交');
+});
+
+t('D3 请求绑定：日期 A→B 连改，旧响应（成功或失败）一律被丢弃；旧结束不清新加载态', async () => {
+  const pending = [];
+  const h = matHarness({ get: u => new Promise(res => pending.push({ u: u, res: res })) });
+  openWithRows(h, [{ id: 'm1', available: 100, qty: 10 }], { outDate: '2026-11-16' });
+  fireWatch(h, 'visible');                       // 请求 1
+  await tick();
+  h.view.dlg.outDate = '2026-11-15';
+  fireWatch(h, 'outDate');                       // 请求 2
+  await tick();
+  assert.equal(pending.length, 2);
+  pending[1].res(asofPayload(['m1'], 20));       // 新的先回
+  await tick(); await tick();
+  assert.equal(h.view.asofAvail(h.view.dlg.rows[0]), 20);
+  assert.equal(h.view.asofState.status, 'ok');
+  pending[0].res(asofPayload(['m1'], 999));      // 旧的后回：不得覆盖
+  await tick(); await tick();
+  assert.equal(h.view.asofAvail(h.view.dlg.rows[0]), 20, '旧成功响应必须丢弃');
+  assert.equal(h.view.asofState.date, '2026-11-15', '绑定日期仍是最新请求');
+  // 旧请求失败晚到，也不得把状态打成失败
+  h.view.dlg.outDate = '2026-11-14';
+  fireWatch(h, 'outDate');                       // 请求 3
+  await tick();
+  pending[2].res(asofPayload(['m1'], 30));
+  await tick(); await tick();
+  assert.equal(h.view.asofState.status, 'ok');
+  const stale = pending[0];                      // 已 resolve 的旧请求不再影响；再造一个失败场景
+  assert.ok(stale);
+  // 关闭弹窗后到达的响应必须丢弃
+  h.view.dlg.visible = false;
+  fireWatch(h, 'hidden');
+  await tick();
+  assert.equal(h.view.asofState.status, 'idle', '关闭即复位');
+});
+
+t('D4 禁用纪律：缺行 / 空日期 / 失败 → 按钮禁用，且直接调用 submitOut 也被拦下（不发创建请求）', async () => {
+  // ① 响应缺行
+  const h1 = matHarness({ get: u => ({ ok: true, date: '2026-11-16', rows: [] }) });
+  openWithRows(h1, [{ id: 'm1', available: 100, qty: 10 }]);
+  fireWatch(h1, 'visible');
+  await tick(); await tick();
+  assert.equal(h1.view.asofState.status, 'error', '缺行按失败处理');
+  assert.equal(h1.view.canSubmitOut.value, false);
+  const n1 = h1.posts.length;
+  await h1.view.submitOut();
+  assert.equal(h1.posts.length, n1, '核算未完成不得发创建请求');
+  assert.ok(h1.msgs.some(m => m.indexOf('库存核算未完成') > -1), h1.msgs.join('|'));
+
+  // ② 日期为空
+  const h2 = matHarness({ get: u => asofPayload(idsOf(u), 100) });
+  openWithRows(h2, [{ id: 'm1', available: 100, qty: 10 }]);
+  h2.view.dlg.outDate = '';
+  fireWatch(h2, 'visible');
+  await tick(); await tick();
+  assert.equal(h2.view.asofState.status, 'error');
+  assert.match(h2.view.asofState.error, /请选择出库日期/);
+  assert.equal(h2.view.canSubmitOut.value, false);
+
+  // ③ 接口失败
+  const h3 = matHarness({ get: u => { const e = new Error('boom'); e.data = { error: '物料不存在或不属于所选工程' }; throw e; } });
+  openWithRows(h3, [{ id: 'm1', available: 100, qty: 10 }]);
+  fireWatch(h3, 'visible');
+  await tick(); await tick();
+  assert.equal(h3.view.asofState.status, 'error');
+  assert.match(h3.view.asofState.error, /物料不存在或不属于所选工程/);
+  assert.equal(h3.view.canSubmitOut.value, false);
+
+  // ④ 没有领取人也不可提交
+  const h4 = matHarness({ get: u => asofPayload(idsOf(u), 100) });
+  openWithRows(h4, [{ id: 'm1', available: 100, qty: 10 }], { workerId: '' });
+  fireWatch(h4, 'visible');
+  await tick(); await tick();
+  assert.equal(h4.view.asofState.status, 'ok');
+  assert.equal(h4.view.canSubmitOut.value, false, '未选领取人不可提交');
+});
+
+t('D5 候选列表：零库存开关默认关；开启后请求带 includeZero=1', async () => {
+  const h = matHarness({ get: () => [] });
+  h.view.project.value = 'P1';
+  await h.view.load();
+  const stockUrls1 = h.gets.filter(u => u.indexOf('/api/materialOutbound/stock?') > -1);
+  assert.ok(stockUrls1.length > 0, '应请求可出库列表');
+  assert.equal(stockUrls1[0].indexOf('includeZero'), -1, '默认不带 includeZero');
+  assert.equal(h.view.showZero.value, false, '开关默认关');
+  h.view.showZero.value = true;
+  await h.view.load();
+  const stockUrls2 = h.gets.filter(u => u.indexOf('/api/materialOutbound/stock?') > -1);
+  assert.ok(stockUrls2[stockUrls2.length - 1].indexOf('includeZero=1') > -1, '开启后带 includeZero=1');
+});
+
+t('D6 提交：成功后清空选中与数量；失败保留全部输入并透传后端文案', async () => {
+  const okH = matHarness({ get: u => asofPayload(idsOf(u), 100), post: () => ({ ok: true, data: { outNo: 'OUT-OK-1' } }) });
+  openWithRows(okH, [{ id: 'm1', available: 100, qty: 10 }]);
+  fireWatch(okH, 'visible');
+  await tick(); await tick();
+  await okH.view.submitOut();
+  await tick(); await tick();
+  assert.equal(okH.view.selMap.size, 0, '成功后清空选中');
+  assert.equal(Object.keys(okH.view.outQty).length, 0, '成功后清空数量');
+  assert.ok(okH.msgs.some(m => m.indexOf('OUT-OK-1') > -1), okH.msgs.join('|'));
+
+  const badH = matHarness({
+    get: u => asofPayload(idsOf(u), 100),
+    post: () => { const e = new Error('failed'); e.data = { error: '补录后 2026-11-16 物料「M-m1」可用库存将为负（当时可用 0，本单出库 10）' }; throw e; }
+  });
+  openWithRows(badH, [{ id: 'm1', available: 100, qty: 10 }]);
+  fireWatch(badH, 'visible');
+  await tick(); await tick();
+  await badH.view.submitOut();
+  await tick(); await tick();
+  assert.equal(badH.view.selMap.size, 1, '失败不得清空选中');
+  assert.equal(badH.view.dlg.rows[0].qty, 10, '失败保留数量');
+  assert.ok(badH.msgs.some(m => m.indexOf('可用库存将为负') > -1), '应透传后端文案：' + badH.msgs.join('|'));
+});
+
+t('D7 同编码双 id：两行同级材料可同时选中、数量分别保留、弹窗独立核算', async () => {
+  const h = matHarness({ get: u => asofPayload(idsOf(u), id => (id === 'mA' ? 10 : 90)) });
+  openWithRows(h, [
+    { id: 'mA', code: 'SAME', available: 10, qty: 4 },
+    { id: 'mB', code: 'SAME', available: 90, qty: 8 }
+  ]);
+  assert.equal(h.view.selCount.value, 2, '同编码不同 id 应计 2 条');
+  fireWatch(h, 'visible');
+  await tick(); await tick();
+  const rows = h.view.dlg.rows;
+  assert.equal(rows.length, 2, '弹窗应两行独立');
+  assert.equal(h.view.asofAvail(rows[0]), 10);
+  assert.equal(h.view.asofAvail(rows[1]), 90);
+  assert.equal(rows[0].qty, 4);
+  assert.equal(rows[1].qty, 8);
+  assert.equal(h.view.canSubmitOut.value, true);
+});
+
+runAll();
