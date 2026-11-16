@@ -157,4 +157,74 @@ function replayAvailability(materialId, extraEvents) {
   return { ok: true, firstNegativeDate: '', available: avail, qty: 0, refNo: '', self: false, label: '', kind: '' };
 }
 
-module.exports = { roundQty, qtyGeneratedOf, qtyOutstandingOf, withGen, materialStatus, eventsOf, replayAvailability };
+/* ---------- 截至某业务日的可用量（只读口径，供登记出库弹窗核算） ----------
+ * 与 replayAvailability 同源：同一 eventsOf、同一期初折算规则，只是把「逐日判负」
+ * 换成「累加到指定日为止」，因此不会出现两套库存口径。
+ *
+ * availableAsOf(materialId, date) →
+ *   { materialId, available, notYetIn, beforeOpening, openingDate, missing? }
+ *   - available：四位小数；beforeOpening 时为 null（期初前无法核算，不做近似）
+ *   - beforeOpening：date < 该材料 openingDate
+ *   - notYetIn：仅当「历史完整可信，且截至 date 没有任何有效入库」时为 true
+ *       历史完整可信的可核查依据 = 该材料带期初字段（迁移对当时全部材料写入；
+ *       迁移之后新建的材料不再补写，故缺字段一律视为历史不可核查 → false）
+ *       另需 openingAvailable = 0 且 openingRaw = 0（期初净余额为零，不含老账负数抵消）
+ *       入库一律按未作废领料单的 history 判定，日期用与 eventsOf 相同的回退链
+ *   - 本函数不读也不写任何可见状态，只做计算
+ */
+function inboundDatesOf(materialId) {
+  const DB = DB_();
+  const out = [];
+  (DB.materialRequisitions || []).forEach(r => {
+    if (!r || r.deleted || r.status === '已作废') return;
+    if (!(r.items || []).some(it => it && it.materialId === materialId)) return;
+    (r.history || []).forEach(h => {
+      const row = (h && h.rows || []).find(x => x && x.materialId === materialId);
+      const qty = Number(row && row.thisQty) || 0;
+      if (qty <= 0) return;
+      const d = dayPart(h.arrivalDate) || dayPart(h.at) || dayPart(r.confirmedAt) || dayPart(r.reqDate);
+      if (d) out.push(d);
+    });
+  });
+  return out;
+}
+function availableAsOf(materialId, date) {
+  const DB = DB_();
+  const mat = (DB.materials || []).find(x => x && x.id === materialId);
+  const d = dayPart(date);
+  if (!mat || !d) {
+    return { materialId, available: null, notYetIn: false, beforeOpening: false, openingDate: '', missing: true };
+  }
+  const openingDate = dayPart(mat.openingDate);
+  const openingAt = timePart(mat.openingAt);
+  const opening = roundQty(Number(mat.openingAvailable) || 0);
+  // 期初之前：逐日库存不可核算（旧回放对期初前不判负，后端不必然兜住）→ 明确返回不可核算
+  if (openingDate && d < openingDate) {
+    return { materialId, available: null, notYetIn: false, beforeOpening: true, openingDate };
+  }
+  // 期初折算与 replayAvailability 逐字同口径：≤ openingAt 的流水已含在期初；< openingDate 的并入基数
+  let base = opening;
+  const events = [];
+  eventsOf(materialId).forEach(e => {
+    if (openingAt && e.at && e.at <= openingAt) return;
+    if (openingDate && e.date < openingDate) {
+      base = roundQty(base + (e.kind === 'in' ? e.qty : -e.qty));
+      return;
+    }
+    events.push(e);
+  });
+  // 累加至 date（含当日）：同日先入后出不影响截至日终值
+  let avail = base;
+  events.forEach(e => {
+    if (!e.date || e.date > d) return;
+    avail = roundQty(avail + (e.kind === 'in' ? e.qty : -e.qty));
+  });
+  // notYetIn：可核查（有期初字段）且期初净额为 0 且截至日无任何有效入库
+  const auditable = !!openingDate && mat.openingRaw !== undefined && mat.openingRaw !== null;
+  const zeroOpening = opening === 0 && roundQty(Number(mat.openingRaw) || 0) === 0;
+  const noInbound = !inboundDatesOf(materialId).some(x => x <= d);
+  const notYetIn = auditable && zeroOpening && noInbound;
+  return { materialId, available: avail, notYetIn, beforeOpening: false, openingDate };
+}
+
+module.exports = { roundQty, qtyGeneratedOf, qtyOutstandingOf, withGen, materialStatus, eventsOf, replayAvailability, availableAsOf };
