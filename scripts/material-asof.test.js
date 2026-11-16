@@ -768,4 +768,30 @@ t('C3 当日不足：数量超过截至日可用 → 前端拦截，不调用创
   assert.ok(h.msgs.some(m => /缺口 5/.test(m)), '应提示缺口：' + h.msgs.join('|'));
 });
 
+t('D8 404 文案映射：接口未加载说人话，其它错误仍显示原文', async () => {
+  // ① 404（服务进程未加载 stock-asof）：换成可理解的提示，状态仍 error、不可提交、数量不变
+  const h404 = matHarness({
+    get: () => { const e = new Error('未找到'); e.status = 404; e.data = { error: '未找到' }; throw e; }
+  });
+  openWithRows(h404, [{ id: 'm1', available: 100, qty: 30 }]);
+  fireWatch(h404, 'visible');
+  await tick(); await tick();
+  assert.equal(h404.view.asofState.status, 'error');
+  assert.equal(h404.view.asofState.error, '库存核算接口未加载，请重启服务后重试',
+    '实际：' + h404.view.asofState.error);
+  assert.equal(h404.view.canSubmitOut.value, false, '仍禁用提交');
+  assert.equal(h404.view.dlg.rows[0].qty, 30, '数量不得被改动');
+
+  // ② 非 404（400 业务报错）：原样显示后端文案，不得被改写
+  const h400 = matHarness({
+    get: () => { const e = new Error('物料不存在或不属于所选工程'); e.status = 400; e.data = { error: '物料不存在或不属于所选工程' }; throw e; }
+  });
+  openWithRows(h400, [{ id: 'm1', available: 100, qty: 30 }]);
+  fireWatch(h400, 'visible');
+  await tick(); await tick();
+  assert.equal(h400.view.asofState.status, 'error');
+  assert.equal(h400.view.asofState.error, '物料不存在或不属于所选工程', '非 404 不得改写');
+  assert.equal(h400.view.canSubmitOut.value, false);
+});
+
 runAll();

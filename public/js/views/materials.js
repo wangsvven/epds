@@ -1394,7 +1394,11 @@ const Outbounds = {
         if (seq !== asofState.seq) return;          // 旧请求的失败不得覆盖新结果
         Object.keys(asofRows).forEach(k => delete asofRows[k]);
         asofState.status = 'error';
-        asofState.error = (e.data && e.data.error) || e.message || '库存核算失败';
+        // 404 多半是「服务进程还没加载这个接口」——说人话，避免把「未找到」当成材料丢了；
+        // 其它错误（400 业务报错、网络异常）仍原样显示后端文案，一字不改
+        asofState.error = (e && e.status === 404)
+          ? '库存核算接口未加载，请重启服务后重试'
+          : ((e.data && e.data.error) || e.message || '库存核算失败');
       }
     }
     // 行状态：ok / notIn（尚未入库）/ zero（可用为 0）/ short（不足）/ beforeOpening / missing
