@@ -706,4 +706,40 @@ t('D7 同编码双 id：两行同级材料可同时选中、数量分别保留�
   assert.equal(h.view.canSubmitOut.value, true);
 });
 
+/* ================= C 显示与提交一致性 ================= */
+g('C 显示与提交的分工');
+
+t('C1 显示足够但后续日不足：提交被回放拒绝，错误含材料与日期，输入全部保留', async () => {
+  const h = matHarness({
+    get: u => asofPayload(idsOf(u), 100),
+    post: () => {
+      const e = new Error('failed');
+      e.data = { error: '补录后 2026-11-20 物料「M-m1」可用库存将为负（当时可用 0，本单出库 30）', date: '2026-11-20', materialId: 'm1', code: 'C1' };
+      throw e;
+    }
+  });
+  openWithRows(h, [{ id: 'm1', available: 100, qty: 30 }]);
+  fireWatch(h, 'visible');
+  await tick(); await tick();
+  assert.equal(h.view.canSubmitOut.value, true, '截至日足够 → 界面不拦');
+  await h.view.submitOut();
+  await tick(); await tick();
+  assert.ok(h.msgs.some(m => m.indexOf('2026-11-20') > -1 && m.indexOf('M-m1') > -1), '错误须含具体日期与材料：' + h.msgs.join('|'));
+  assert.equal(h.view.dlg.rows[0].qty, 30, '失败保留数量');
+  assert.equal(h.view.selMap.size, 1, '失败保留选中');
+});
+
+t('C3 当日不足：数量超过截至日可用 → 前端拦截，不调用创建接口', async () => {
+  const h = matHarness({ get: u => asofPayload(idsOf(u), 10) });
+  openWithRows(h, [{ id: 'm1', available: 100, qty: 15 }]);
+  fireWatch(h, 'visible');
+  await tick(); await tick();
+  assert.equal(h.view.canSubmitOut.value, true, '按钮本身可用（是否够量由函数内校验）');
+  const before = h.posts.length;
+  await h.view.submitOut();
+  await tick();
+  assert.equal(h.posts.length, before, '超量不得发创建请求');
+  assert.ok(h.msgs.some(m => /缺口 5/.test(m)), '应提示缺口：' + h.msgs.join('|'));
+});
+
 runAll();
