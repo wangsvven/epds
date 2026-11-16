@@ -1327,7 +1327,15 @@ const Outbounds = {
     const list = ref([]);
     const orders = ref([]);
     const loading = ref(false);
-    const selection = ref([]);
+    // 勾选记录独立存放：键 = 材料行 id（一「条」材料），值 = 打开登记弹窗/提交所需快照。
+    // 为什么按 id 而不是 code：材料编码只是品类编码，同一 code 下有多条不同规格/不同工程的记录
+    // （实测同工程内一个 code 可对应 8 条），按 code 计数会把它们算成 1 条、且只能出其中一条的账。
+    // 不再把 el-table 的 selection-change 结果当作选中状态的唯一来源——表格数据一切换（分页/搜索/load）
+    // 就会按当前页重发该事件，跨页勾选会被覆盖丢失。
+    const selMap = reactive(new Map());
+    let syncingSel = false;   // 程序化回显期间忽略事件带来的增量同步
+    const selCount = computed(() => selMap.size);
+    const snapOf = r => ({ id: r.id, code: r.code, description: r.description, unit: r.unit, available: r.available });
     const outQty = reactive({});
     const mainTable = ref(null);
     const page = ref(1); const pageSize = ref(50);
@@ -1437,31 +1445,61 @@ const Outbounds = {
       return !!fa && fa === fb;
     }
     const planOptions = computed(() => planList.value.filter(w => w && sameScope(w.project, project.value)));
-    function onProjectChange() { selection.value = []; Object.keys(outQty).forEach(k => delete outQty[k]); page.value = 1; opage.value = 1; load(); }
+    function onProjectChange() { selMap.clear(); Object.keys(outQty).forEach(k => delete outQty[k]); page.value = 1; opage.value = 1; load(); }
     const filtered = computed(() => list.value.filter(r => !keyword.value.trim()
       || String(r.description || '').includes(keyword.value.trim()) || String(r.code || '').includes(keyword.value.trim())));
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
-    function onSel(rows) {
-      // 勾选时自动把该行「本次出库数量」填为可用库存；取消勾选则清空。
-      // 只对「本次新勾选」的行填数，重渲染 / 再次触发 selection-change 不会覆盖用户手改的值。
-      const prev = selection.value.map(s => s.id);
-      const now = {};
-      rows.forEach(r => { now[r.id] = true; });
-      rows.forEach(r => {
-        if (prev.indexOf(r.id) === -1) outQty[r.id] = Number(r.available) || 0;
-      });
-      prev.forEach(id => { if (!now[id]) delete outQty[id]; });
-      selection.value = rows;
+    function addSel(r) {
+      // 勾选时自动把该行「本次出库数量」填为可用库存；已填过的值不覆盖
+      if (!selMap.has(r.id) && outQty[r.id] === undefined) outQty[r.id] = Number(r.available) || 0;
+      selMap.set(r.id, snapOf(r));   // 顺带刷新快照里的可用库存
     }
-    function isSelected(row) { return selection.value.some(s => s.id === row.id); }
+    function dropSel(r) {
+      selMap.delete(r.id);
+      delete outQty[r.id];             // 手动取消勾选 → 清掉该材料已填数量
+    }
+    /* 增量同步只认「用户交互」事件：
+     * - select / select-all 只在用户点行内勾选框 / 表头全选框时触发；
+     * - selection-change 在表格数据被替换（翻页/过滤/load）时也会以空数组触发，
+     *   若按「不在事件结果就移出存储」处理，会把跨页已选的行误删 —— 故不再使用该事件。
+     * 两者都只覆盖当前页的行，不在当前页的行不会被触碰。 */
+    function onSelect(selection, row) {
+      if (syncingSel || !row) return;
+      if ((selection || []).some(x => x.id === row.id)) addSel(row); else dropSel(row);
+    }
+    function onSelectAll(selection) {
+      if (syncingSel) return;   // 程序化回显触发的事件不参与增量同步
+      const set = new Set((selection || []).map(r => r.id));
+      (paged.value || []).forEach(r => { if (set.has(r.id)) addSel(r); else dropSel(r); });
+    }
+    // 表格重渲染后按存储回显勾选：当前页中已选中的行恢复勾选态，表头全选/半选随之一致
+    function restoreSel() {
+      const t = mainTable.value;
+      if (!t || !t.toggleRowSelection) return;
+      syncingSel = true;
+      try {
+        (paged.value || []).forEach(row => {
+          const on = selMap.has(row.id);
+          // 按 id 唯一后每行各占一个快照，可安全刷新可用库存（数量按 id 挂载，不受影响）
+          if (on) { const cur = selMap.get(row.id); selMap.set(row.id, Object.assign({}, cur, { available: row.available })); }
+          t.toggleRowSelection(row, on);
+        });
+      } finally { syncingSel = false; }
+    }
+    // 列表内容变化（翻页 / 每页条数 / 搜索 / 点 × 清空 / load 刷新）只换内容，不动已勾选
+    watch(() => (paged.value || []).map(r => r.id).join('|'), () => restoreSel(), { flush: 'post' });
+    // 切回「可出库材料」页签时表格重建，同样需要回显
+    watch(tab, v => { if (v === 'stock') restoreSel(); }, { flush: 'post' });
+    function isSelected(row) { return selMap.has(row.id); }
     function sumQty(o) { return (o.items || []).reduce((s, i) => s + (Number(i.qty) || 0), 0); }
     function remaining(it) { return Math.max(0, (Number(it.qty) || 0) - (Number(it.returned) || 0)); }
 
     function openDlg() {
-      if (!selection.value.length) { ElementPlus.ElMessage.info('请先勾选需要出库的材料'); return; }
+      if (!selMap.size) { ElementPlus.ElMessage.info('请先勾选需要出库的材料'); return; }
       // P3-2：未填数量时保持为空（不用 0 占位），提交由前端拦截提示
       const q0 = v => (v === undefined || v === null || v === '' ? null : Number(v));
-      dlg.rows = selection.value.map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: q0(outQty[r.id]) }));
+      // 行数据从选中存储生成：含跨页、跨搜索累加的全部条目
+      dlg.rows = Array.from(selMap.values()).map(r => ({ id: r.id, description: r.description, unit: r.unit, available: r.available, qty: q0(outQty[r.id]) }));
       dlg.workerId = ''; dlg.workPlanId = ''; dlg.workDate = ''; dlg.processName = '';
       dlg.outDate = bizToday(); dlg.outDateReason = '';
       dlg.visible = true;
@@ -1496,7 +1534,7 @@ const Outbounds = {
         const res = await api.post('/api/materialOutbound/create', body);
         ElementPlus.ElMessage.success('出库单 ' + res.data.outNo + ' 已登记' + (res.outDateFallback ? '（作业日晚于今天，出库日已按今天）' : ''));
         dlg.visible = false;
-        selection.value = [];
+        selMap.clear();   // 提交成功后清空选中存储与数量
         if (mainTable.value && mainTable.value.clearSelection) mainTable.value.clearSelection();
         Object.keys(outQty).forEach(k => delete outQty[k]);
         await load();
@@ -1662,14 +1700,14 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selection, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSel, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selMap, selCount, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSelect, onSelectAll, isSelected, openDlg, dlg, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
   },
   template: `
   <div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div style="font-size:17px;font-weight:600">请选择项目</div>
       <div>
-        <el-button v-if="canWrite('materials')" type="primary" :disabled="!selection.length" @click="openDlg">登记出库（{{ selection.length }}）</el-button>
+        <el-button v-if="canWrite('materials')" type="primary" :disabled="!selCount" @click="openDlg">登记出库（{{ selCount }}）</el-button>
         <el-button @click="load">{{ tab === 'orders' ? '刷新出库记录' : '刷新库存' }}</el-button>
       </div>
     </div>
@@ -1698,7 +1736,7 @@ const Outbounds = {
         </div>
         <el-empty v-if="!project" description="请先选择工程，再查看可出库材料。" />
         <template v-else>
-          <el-table ref="mainTable" :data="paged" v-loading="loading" border style="width:100%" @selection-change="onSel">
+          <el-table ref="mainTable" :data="paged" row-key="id" v-loading="loading" border style="width:100%" @select="onSelect" @select-all="onSelectAll">
             <el-table-column type="selection" width="42" />
             <el-table-column label="材料名称" min-width="240">
               <template #default="{row}">
