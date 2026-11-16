@@ -1224,16 +1224,20 @@ async function runSmoke() {
       token,
       body: { name: 'ZT测试-P1A 关联计划', planType: '周计划', project: MP_C, startDate: '2026-11-01 08:00:00', endDate: '2026-11-30 18:00:00', status: '未执行' }
     }), 'workPlans POST P1A').id;
+    // 作业日不写死日历日期：本用例的材料在本次运行当天才确认入库，而出库可用按作业日（=出库日）回放，
+    // 作业日若早于入库日会被判「可用 0」而整单 400。取运行当天（本地日历日，与后端 todayBizDate 同口径），
+    // 保证不早于入库日、不晚于今天；TODAY 是紧凑写法 YYYYMMDD，此处还原成 YYYY-MM-DD。
+    const p1WorkDate = TODAY.slice(0, 4) + '-' + TODAY.slice(4, 6) + '-' + TODAY.slice(6, 8);
     const ob = needOk(await api('POST', '/api/materialOutbound/create', {
       token,
       body: {
         project: MP_C, workerId: smokeWorker.id,
-        workPlanId: p1PlanId, workDate: '2026-11-15', processName: '立杆',
+        workPlanId: p1PlanId, workDate: p1WorkDate, processName: '立杆',
         items: [{ materialId: m.id, qty: 3, requisitionId: p1ReqId }]
       }
     }), 'outbound create P1A');
     p1OutId = ob.data.id;
-    need(ob.data.workPlanId === p1PlanId && ob.data.workDate === '2026-11-15' && ob.data.processName === '立杆',
+    need(ob.data.workPlanId === p1PlanId && ob.data.workDate === p1WorkDate && ob.data.processName === '立杆',
       '单头关联字段不符：' + brief({ p: ob.data.workPlanId, d: ob.data.workDate, n: ob.data.processName }));
     need(ob.data.workPlanName === 'ZT测试-P1A 关联计划', '创建响应应带计划名称，实际 ' + ob.data.workPlanName);
     need(ob.data.items[0].requisitionId === p1ReqId && ob.data.items[0].reqNo === p1ReqNo,
@@ -1388,8 +1392,11 @@ async function runSmoke() {
 
   await step('materials', 'P3-2/P3-3 前端：勾选自动填可用库存、取消清空、未填拦截；暂存框精度 4', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
-    need(/outQty\[r\.id\] = Number\(r\.available\) \|\| 0/.test(src), '勾选应自动填该行可用库存');
-    need(/prev\.forEach\(id => \{ if \(!now\[id\]\) delete outQty\[id\]/.test(src), '取消勾选应清空该行数量');
+    // 勾选状态已改为按材料行 id 独立存放（selMap），勾选/取消由 select / select-all 增量同步：
+    // 勾选时 addSel 把「可用库存 > 0」的行预填为本次出库数量（零库存行留空，交由截至日可用填写），
+    // 取消时 dropSel 删掉该材料已填数量。断言按该实现取值。
+    need(/function addSel\(r\)[\s\S]{0,320}if \(av > 0\) outQty\[r\.id\] = av/.test(src), '勾选应自动填该行可用库存');
+    need(/function dropSel\(r\)[\s\S]{0,120}selMap\.delete\(r\.id\)[\s\S]{0,60}delete outQty\[r\.id\]/.test(src), '取消勾选应清空该行数量');
     need(/请填写出库数量/.test(src), '未填数量应提示「请填写出库数量」');
     need(/stagingQty\[row\.id\][\s\S]{0,120}:precision="4"/.test(src), '暂存数量框应支持 4 位小数');
     return '自动填量 · 取消清空 · 未填拦截 · 暂存 precision=4';
