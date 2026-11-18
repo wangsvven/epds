@@ -3405,6 +3405,43 @@ async function runSmoke() {
     return '脚本顺序 / 日历仅周计划页签 + 四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注 / 选人先校验时间';
   });
 
+  /* ---------- 周计划日历点选筛选（纯前端，2026-11-18 定版） ---------- */
+  await step('结构', '周计划日历点选筛选：覆盖谓词单点 / 筛选与清空接线 / 页签隔离静态防回归', async () => {
+    const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
+    // ① 卡片可点，且统一走同一个处理函数；选中态有明确区分
+    need(/v-for="d in calendarDays"[\s\S]{0,260}@click="toggleCalDay\(d\.ds\)"/.test(p),
+      '日历卡片应绑定 @click="toggleCalDay(d.ds)"');
+    need(/cursor:pointer/.test(p) && /:style="calSelDay === d\.ds \? \{/.test(p),
+      '日历卡片应有 cursor:pointer 与选中态样式绑定');
+    need(/function toggleCalDay\(ds\) \{[\s\S]{0,140}calSelDay\.value = \(calSelDay\.value === ds\) \? '' : ds;[\s\S]{0,60}page\.value = 1;/.test(p),
+      'toggleCalDay 应「同日再点即清空」并把分页复位到第 1 页');
+    // ② 覆盖谓词只定义一处，日历条数与列表筛选两处调用（不许各写一份）
+    const defCnt = (p.match(/const coversDay = \(p, ds\) =>/g) || []).length;
+    need(defCnt === 1, '覆盖谓词 coversDay 应只定义一处，实际 ' + defCnt + ' 处');
+    const cmpCnt = (p.match(/daySlice\(p\.startDate\) <= ds && daySlice\(p\.endDate\) >= ds/g) || []).length;
+    need(cmpCnt === 1, '覆盖比较应只在 coversDay 里出现一次，实际 ' + cmpCnt + ' 处（不得另写一份）');
+    need(/const plans = upcoming\.value\.filter\(p => coversDay\(p, ds\)\)/.test(p),
+      '日历卡片条数应调用 coversDay（与筛选同一谓词）');
+    need(/if \(calSelDay\.value && !coversDay\(p, calSelDay\.value\)\) return false;/.test(p),
+      'filtered 应叠加 calSelDay 的覆盖判定（同一谓词）');
+    // ③ 既有日期区间筛选保持原包含口径（不得借本批改写）
+    need(/if \(filters\.startDate && p\.startDate < filters\.startDate\) return false;/.test(p) &&
+      /if \(filters\.endDate && p\.endDate > filters\.endDate\) return false;/.test(p),
+      '既有日期区间筛选应保持包含口径不变');
+    // ④ 空状态文案与页签隔离
+    need(/const isFiltered = computed\(\(\) => [^;]*calSelDay\.value/.test(p), 'isFiltered 应纳入 calSelDay');
+    need(/function onTab\(\) \{ page\.value = 1; calSelDay\.value = ''; load\(\); \}/.test(p),
+      'onTab 应清空 calSelDay（筛选不得带到其他页签）');
+    // ⑤ 清除标签：M月D日 文案 + 可关闭 + 处理函数
+    need(/v-if="calSelDay" closable[\s\S]{0,140}@close="clearCalDay"/.test(p) &&
+      /按 \{\{ calDayLabel \}\} 筛选/.test(p), '日历标题行应有可关闭的「按 M月D日 筛选」标签');
+    need(/function clearCalDay\(\) \{ calSelDay\.value = ''; page\.value = 1; \}/.test(p),
+      'clearCalDay 应清空选中并复位分页');
+    need(/calSelDay, calDayLabel, toggleCalDay, clearCalDay/.test(p),
+      'setup 应暴露 calSelDay / calDayLabel / toggleCalDay / clearCalDay');
+    return '卡片可点+选中态 / coversDay 单点两处调用 / calSelDay 叠加与 isFiltered / onTab 清空 / 标签清除 / 暴露';
+  });
+
   /* ---------- 周计划拆分 ---------- */
   await step('plans', '拆分解析器纯函数：日期标题/切段/跨月/条目结构/七类工程量/校验收集', async () => {
     const PS = require('../server/core/plan-split');
