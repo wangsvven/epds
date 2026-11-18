@@ -179,6 +179,13 @@ const PlansView = {
     }));
     // 月计划管理 / 已归档月计划 = 专用检修口径面板（views/monthPlans.js）
     const isMonthTab = computed(() => tab.value === 'month' || tab.value === 'archived');
+    // 日计划日历「点选某天」：'' = 未选；否则为 YYYY-MM-DD（仅周计划页签使用，切页签清空）
+    const calSelDay = ref('');
+    const daySlice = v => String(v || '').slice(0, 10);
+    // 覆盖判定（唯一口径）：计划是否覆盖某一天。
+    // 日历卡片的条数统计与「点选某天」的列表筛选都调这里，不许各写一份；
+    // 与筛选栏的日期区间（包含口径、整串比较）刻意不同：跨天计划在它覆盖的每一天都应命中。
+    const coversDay = (p, ds) => !!ds && daySlice(p.startDate) <= ds && daySlice(p.endDate) >= ds;
     const filtered = computed(() => tabList.value.filter(p => {
       // 项目详情跳转带入的项目范围（项目名 + 其子项目名），精确匹配，不受关键词模糊匹配影响
       if (filters.projectScope.length && !filters.projectScope.includes(p.project)) return false;
@@ -190,11 +197,13 @@ const PlansView = {
       if (filters.team && p.team !== filters.team) return false;
       if (filters.leader && p.leader !== filters.leader) return false;
       if (filters.ticketType && p.ticketType !== filters.ticketType) return false;
+      // 日历点选的单日：按「覆盖口径」叠加在上述筛选之上
+      if (calSelDay.value && !coversDay(p, calSelDay.value)) return false;
       return true;
     }));
     const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
     // 空状态文案：状态类页签（已执行/已结算/已取消）给针对性引导，避免只显示通用的「暂无数据」
-    const isFiltered = computed(() => !!(filters.startDate || filters.endDate || filters.name || filters.content || filters.noProject || filters.team || filters.leader || filters.ticketType || (filters.projectScope && filters.projectScope.length)));
+    const isFiltered = computed(() => !!(filters.startDate || filters.endDate || filters.name || filters.content || filters.noProject || filters.team || filters.leader || filters.ticketType || (filters.projectScope && filters.projectScope.length) || calSelDay.value));
     const EMPTY_HINT = {
       executed: { none: '暂无已执行计划', filtered: '当前筛选条件下没有已执行计划' },
       settled: { none: '暂无已结算零星计划', filtered: '当前筛选条件下没有已结算零星计划' },
@@ -210,7 +219,6 @@ const PlansView = {
       return isFiltered.value ? '可调整或重置上方筛选条件' : '';
     });
     // 日计划日历概览：未来 21 天内的有效计划（跨日计划按覆盖日期展示）
-    const daySlice = v => String(v || '').slice(0, 10);
     const upcoming = computed(() => {
       const today = fmtDate(ServerTime.now());
       const end21 = fmtDate(ServerTime.now(21));
@@ -223,10 +231,23 @@ const PlansView = {
       for (let i = 0; i <= 21; i++) {
         const d = new Date(Date.now() + i * 86400000);
         const ds = fmtDate(d);
-        const plans = upcoming.value.filter(p => daySlice(p.startDate) <= ds && daySlice(p.endDate) >= ds);
+        const plans = upcoming.value.filter(p => coversDay(p, ds));
         if (plans.length) days.push({ ds, label: (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + WEEK_CN[d.getDay()], plans });
       }
       return days;
+    });
+    // 点选日历卡片：选中该天 → 列表只留覆盖那天的计划；再点同一天 → 取消；点另一天 → 切换
+    function toggleCalDay(ds) {
+      calSelDay.value = (calSelDay.value === ds) ? '' : ds;
+      page.value = 1;
+    }
+    // 清除入口（标题行的可关闭标签）
+    function clearCalDay() { calSelDay.value = ''; page.value = 1; }
+    // 标签文案：M月D日（与卡片标题的月日写法一致，不带周几）
+    const calDayLabel = computed(() => {
+      const ds = calSelDay.value;
+      if (!ds) return '';
+      return Number(ds.slice(5, 7)) + '月' + Number(ds.slice(8, 10)) + '日';
     });
     // 表格展示：日期 MM-DD HH:mm，空值显示 -
     function fmtDT(v) { if (!v) return '-'; const s = String(v); return s.length > 10 ? s.slice(5, 16) : s.slice(5); }
@@ -1489,7 +1510,7 @@ const PlansView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     // 切页签同时重拉列表：月计划面板的状态流转会改 status，共用页签需拿到最新数据
-    function onTab() { page.value = 1; load(); }
+    function onTab() { page.value = 1; calSelDay.value = ''; load(); }
     // 项目详情「查看月/周计划」：切到对应页签，并把列表限定在该项目（含其子项目）
     const scopeLabel = ref('');
     function clearProjectScope() { filters.projectScope = []; scopeLabel.value = ''; page.value = 1; }
@@ -1555,7 +1576,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, splitBadge, canSplit };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, calSelDay, calDayLabel, toggleCalDay, clearCalDay, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, splitBadge, canSplit };
   },
   template: `
   <div class="plans-view">
@@ -1563,11 +1584,17 @@ const PlansView = {
     <div v-if="tab === 'week'" style="background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:16px 18px;margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:17px;font-weight:600">日计划日历</div>
+        <el-tag v-if="calSelDay" closable effect="plain" type="primary" @close="clearCalDay" style="cursor:pointer">
+          按 {{ calDayLabel }} 筛选
+        </el-tag>
       </div>
       <div style="font-size:12px;margin-top:6px">未来 21 天共 {{ upcoming.length }} 个日历安排，跨日计划按覆盖日期展示</div>
       <div v-if="!calendarDays.length" style="margin-top:12px;background:var(--surface-3);border:1px solid var(--line);border-radius:6px;padding:16px;font-size:13px">未来 21 天暂无施工计划</div>
       <div v-else style="display:flex;gap:12px;overflow-x:auto;padding:12px 2px 4px">
-        <div v-for="d in calendarDays" :key="d.ds" style="min-width:250px;max-width:280px;flex:0 0 auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:12px 14px">
+        <div v-for="d in calendarDays" :key="d.ds" @click="toggleCalDay(d.ds)"
+          :title="calSelDay === d.ds ? '再点一次取消按这天筛选' : '点击只看覆盖这一天的计划'"
+          style="min-width:250px;max-width:280px;flex:0 0 auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:12px 14px;cursor:pointer"
+          :style="calSelDay === d.ds ? { borderColor: '#6E7F9A', boxShadow: '0 0 0 1px #6E7F9A inset', background: 'var(--surface-3)' } : {}">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <b style="font-size:14px">{{ d.label }}</b>
             <span style="background:#6E7F9A;color:#fff;border-radius:10px;font-size:12px;padding:1px 9px">{{ d.plans.length }} 条</span>
