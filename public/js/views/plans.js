@@ -137,7 +137,9 @@ const PlansView = {
       try { const r = await api.get('/api/contacts'); contacts.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
       await loadHazards();
     }
-    // 选中关联项目 → 自动读取项目信息回填（名称/作业类型/专业/部门/电压/作业地址/变电站线路）
+    // 选中关联项目 → 自动读取项目信息回填（名称/作业类型/专业/部门/电压）
+    // 作业地址、变电站/线路不再带入（用户 2026-11-18 定版：默认空白由用户手填）；
+    // 这两个字段这里既不填也不清 —— 改选项目时不得触碰用户已手填/已保存的内容
     function onProjectSelect(name) {
       const p = projectsFull.value.find(x => (x.name || x.projectName) === name);
       if (!p) return;
@@ -148,10 +150,6 @@ const PlansView = {
         if (p.specialty && SPECIALTIES.includes(p.specialty)) f.specialty = p.specialty;
         if (p.provincialDept && DEPTS.includes(p.provincialDept)) f.dept = p.provincialDept;
         if (p.voltage && VOLTAGE_LEVELS.includes(p.voltage)) f.voltage = p.voltage;
-        const addrParts = [p.address, p.substation].filter(Boolean);
-        const coords = (p.lng && p.lat) ? ('（' + p.lng + ',' + p.lat + '）') : '';
-        if (addrParts.length || coords) f.address = addrParts.join('/') + coords;
-        if (p.substation) f.station = p.substation;
         f.subProject = '';
       }
     }
@@ -1316,7 +1314,7 @@ const PlansView = {
       dlg.form.planType = tab.value === 'month' ? '月计划' : '周计划';
       // 从项目详情跳转过来时，关联项目默认带入（避免新增后因项目筛选而"消失"）
       if (filters.projectScope.length) dlg.form.project = filters.projectScope[0];
-      // 预填（「新增周计划」从月计划带入）：先关联项目（带出地址/变电站/电压），再覆盖其余有值字段，不冲掉默认值
+      // 预填（「新增周计划」从月计划带入）：先关联项目（带出名称/作业类型/专业/部门/电压），再覆盖其余有值字段，不冲掉默认值
       if (prefill) {
         if (prefill.project) { dlg.form.project = prefill.project; onProjectSelect(prefill.project); }
         Object.keys(prefill).forEach(k => {
