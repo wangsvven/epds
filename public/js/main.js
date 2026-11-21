@@ -70,11 +70,11 @@ window.Locate = {
   make: function (cfg) {
     var st = reactive({
       active: false, seq: 0, text: '', total: 0, missing: 0, failed: false, refreshFailed: false,
-      group: '', groups: [], set: null, snap: null
+      group: '', groups: [], set: null, retry: null, desc: null, snap: null
     });
     function hit(x) { return !!(st.active && st.set && x && st.set.has(String(x.id))); }
     function takeSnap() { if (!st.snap) st.snap = cfg.snap(); }
-    function restoreSnap() { if (st.snap) { cfg.restore(st.snap); st.snap = null; } }
+    function restoreSnap() { if (st.snap) { cfg.restore(st.snap); st.snap = null; } st.retry = null; }
     function countGroups(hits) {
       if (!cfg.groupOf) return { groups: [], group: '' };
       var map = {}, order = cfg.groups || [];
@@ -96,6 +96,8 @@ window.Locate = {
         // 零命中：首次不动展示；同页替换则先撤旧展示并恢复最初快照（补充一）
         if (st.active) { restoreSnap(); st.set = null; }
         st.active = true; st.total = 0; st.missing = set.size; st.groups = []; st.group = '';
+        // 保留描述符：数据尚未加载完时判定的零命中，后续成功加载要能补做应用（不自愈就一直误报零命中）
+        st.retry = set;
         if (cfg.onZero) cfg.onZero('initial', set);
         return;
       }
@@ -111,12 +113,34 @@ window.Locate = {
       if (p.seq !== window.Locate.seq()) { window.Locate.drop(p.seq); return false; }  // 迟到：只清自己的
       window.Locate.take(p.seq);
       if (cfg.onFirst) cfg.onFirst(p);
+      if (st.failed && !st.set) {
+        // 首轮加载已失败：不判零命中，出失败态并留描述符，等下一次成功加载续上
+        st.desc = p; st.active = true; st.text = p.text || ''; st.seq = p.seq || 0;
+        return true;
+      }
       apply(p);
       return true;
     }
     // 数据刷新后按同一批 ids 重算；归零 → 恢复快照后再显示零命中横幅（三.4 第 6 步）
     function recompute() {
-      if (!st.active || !st.set) return;
+      if (st.failed && st.desc && !st.set) {
+        var d = st.desc; st.desc = null; st.failed = false;
+        apply(d);
+        return;
+      }
+      var rset = st.set || st.retry;
+      if (!st.active || !rset) return;
+      if (!st.set) {
+        // 零命中是在数据未就绪时判定的：数据到了若确有命中，补做一次应用（快照此刻才落）
+        var hs = cfg.base().filter(function (x) { return rset.has(String(x.id)); });
+        if (!hs.length) return;
+        st.set = rset; st.retry = null;
+        takeSnap();
+        st.total = hs.length; st.missing = Math.max(0, rset.size - hs.length);
+        afterApply(hs);
+        if (cfg.afterRecompute) cfg.afterRecompute(hs);
+        return;
+      }
       var hits = cfg.base().filter(hit);
       st.total = hits.length;
       st.missing = Math.max(0, st.set.size - hits.length);
@@ -129,7 +153,10 @@ window.Locate = {
       if (cfg.afterRecompute) cfg.afterRecompute(hits);
     }
     // 刷新失败：保留快照与上次成功结果，只提示（补充三）
-    function refreshFailed() { if (st.active) { st.refreshFailed = true; } }
+    function refreshFailed() {
+      if (st.active && !st.failed) { st.refreshFailed = true; return; }   // 定位中的刷新失败：保留上次结果
+      if (!st.active) { st.failed = true; st.active = true; st.total = 0; }  // 首轮加载失败：出失败横幅
+    }
     function pick(key) {
       if (!st.active || !key || key === st.group) return;
       st.group = key;
@@ -138,12 +165,12 @@ window.Locate = {
     function clear() {
       if (!st.active) return;
       restoreSnap();
-      st.active = false; st.set = null; st.groups = []; st.group = ''; st.refreshFailed = false; st.failed = false;
+      st.active = false; st.set = null; st.retry = null; st.desc = null; st.groups = []; st.group = ''; st.refreshFailed = false; st.failed = false;
       window.Locate.end('clear');
     }
     function exit() {
       // 失效结束（菜单/切离/新定位接管）：直接结束，不恢复快照
-      st.active = false; st.set = null; st.groups = []; st.group = ''; st.refreshFailed = false; st.failed = false; st.snap = null;
+      st.active = false; st.set = null; st.retry = null; st.desc = null; st.groups = []; st.group = ''; st.refreshFailed = false; st.failed = false; st.snap = null;
     }
     function fail() {
       // 加载失败：不存快照、不改展示（首次）；若已有会话则保留上次结果
@@ -156,7 +183,13 @@ window.Locate = {
       if (reason === 'clear') return;         // 自己发起的清除已在 clear() 内处理
       exit();
     }
-    function onNew() { if (!st.failed) consume(); }
+    // 同页新定位：数据尚未就绪（列表为空，通常是首轮加载在途）时先不消费，
+    // 留给叶子在加载成功后再 consume，避免把「还没加载完」误判成零命中
+    function onNew() {
+      if (st.failed) return;
+      if (!cfg.base().length) return;
+      consume();
+    }
     window.addEventListener('locate-end', onEnd);
     window.addEventListener('locate-new', onNew);
     function dispose() {
