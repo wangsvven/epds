@@ -1685,11 +1685,14 @@
   .loc-chip:hover { border-color:var(--brand); color:var(--brand-text); }
   .loc-chip.is-on { border-color:var(--brand); background:var(--brand-soft); color:var(--brand-text); font-weight:600; }
   /* 高亮须压过条纹、预警行（wk-warn-row）与勾选行：用更高特异性 + !important */
-  /* 高亮单元格禁用 EP 自带的 background-color 过渡（.el-table__cell 有 .25s），
-     否则鼠标移动时会在底色/悬停色之间来回渐变，看起来像闪烁 */
+  /* 表格体单元格整体去掉 EP 的 background-color 过渡（.el-table__cell 自带 .25s）。
+     原因：过渡若只写在高亮单元格上，清除定位时 .loc-row 一移除、过渡属性随之回落到 .25s，
+     黄底→白会补播一段淡出；鼠标在行间滑动还会反复重播，表现为「清除后滑动仍冒背景色」。
+     放在表格体层面则进入/退出高亮都是瞬时的，不会再有渐变残留。 */
+  .el-table .el-table__body td.el-table__cell { transition: none !important; }
   .el-table .el-table__body .loc-row > td,
   .el-table .el-table__body .loc-row.el-table__row > td {
-    background-color:var(--loc-bg) !important; transition:none !important; }
+    background-color:var(--loc-bg) !important; }
   .el-table .el-table__body .loc-row > td:first-child { box-shadow: inset 3px 0 0 var(--loc-line); }
   .el-table .el-table__body .loc-row:hover > td { background-color:var(--loc-bg-hover) !important; }
   /* 材料明细定位期：列筛选漏斗不可点（与筛选栏禁用一致） */
