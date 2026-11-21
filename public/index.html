@@ -52,7 +52,7 @@
       --warn-bg:#fff8ee; --warn-line:#ffdfb0; --warn-text:#b25e09;
       --danger-bg:#fef4f4; --danger-line:#f9cfcf; --danger-text:#c0392b;
       /* 首页动态定位：命中行黄底 + 左侧细线 */
-      --loc-bg:#fff8d8; --loc-bg-hover:#fdf0bf; --loc-line:#d9a600;
+      --loc-bg:#fffdf4; --loc-bg-hover:#fffbe6; --loc-line:#d9a600;
       --radius:12px; --radius-sm:8px;
       --shadow-sm:0 1px 2px rgba(16,24,40,.05);
       --shadow-md:0 8px 24px -10px rgba(16,24,40,.18), 0 2px 6px rgba(16,24,40,.05);
@@ -101,7 +101,7 @@
       --ok-bg:#12251b; --ok-line:#1f4432; --ok-text:#66d19e;
       --warn-bg:#2a1f10; --warn-line:#4a3618; --warn-text:#f0b866;
       --danger-bg:#2a1618; --danger-line:#4a2528; --danger-text:#f08a8a;
-      --loc-bg:#2b2611; --loc-bg-hover:#37301a; --loc-line:#b08d2a;
+      --loc-bg:#332d15; --loc-bg-hover:#3d3519; --loc-line:#b08d2a;
       --shadow-sm:0 1px 2px rgba(0,0,0,.4);
       --shadow-md:0 10px 28px -12px rgba(0,0,0,.7), 0 2px 6px rgba(0,0,0,.35);
       --el-color-primary: #5b8cff;
@@ -1685,10 +1685,13 @@
   .loc-chip:hover { border-color:var(--brand); color:var(--brand-text); }
   .loc-chip.is-on { border-color:var(--brand); background:var(--brand-soft); color:var(--brand-text); font-weight:600; }
   /* 高亮须压过条纹、预警行（wk-warn-row）与勾选行：用更高特异性 + !important */
+  /* 高亮单元格禁用 EP 自带的 background-color 过渡（.el-table__cell 有 .25s），
+     否则鼠标移动时会在底色/悬停色之间来回渐变，看起来像闪烁 */
   .el-table .el-table__body .loc-row > td,
-  .el-table .el-table__body .loc-row.el-table__row > td { background:var(--loc-bg) !important; }
+  .el-table .el-table__body .loc-row.el-table__row > td {
+    background-color:var(--loc-bg) !important; transition:none !important; }
   .el-table .el-table__body .loc-row > td:first-child { box-shadow: inset 3px 0 0 var(--loc-line); }
-  .el-table .el-table__body .loc-row:hover > td { background:var(--loc-bg-hover) !important; }
+  .el-table .el-table__body .loc-row:hover > td { background-color:var(--loc-bg-hover) !important; }
   /* 材料明细定位期：列筛选漏斗不可点（与筛选栏禁用一致） */
   .mat-loc-lock .col-funnel { pointer-events: none; opacity: .4; }
   .fd-tag { flex: 0 0 auto; box-sizing: border-box; height: 20px; line-height: 18px; padding: 0 6px; border: 1px solid; border-radius: 3px; font-size: 11.5px; white-space: nowrap; }
