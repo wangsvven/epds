@@ -143,10 +143,12 @@ const MonthPlansPanel = {
     tab: { type: String, default: 'month' },              // month | archived
     projectScope: { type: Array, default: () => [] },     // 项目详情「查看月计划」带入的项目范围
     locateActive: { type: Boolean, default: false },      // 首页动态定位会话（父组件持有，本组件只接收）
-    locateIds: { type: Array, default: () => [] }
+    locateIds: { type: Array, default: () => [] },
+    // 清除定位时父会话交回的快照（跨卸载保留在父会话）；本面板收到即套用并回执，不等下一帧的 ref
+    locateRestore: { type: Object, default: null }
   },
   // 「新增周计划」交给父组件（PlansPanel）打开周计划表单并带入本行内容
-  emits: ['make-week'],
+  emits: ['make-week', 'loc-restore-done'],
   setup(props, { emit }) {
     const { ref, reactive, computed, onMounted, watch } = Vue;
     const list = ref([]);
@@ -455,10 +457,16 @@ const MonthPlansPanel = {
     // 供父组件在会话创建时登记/恢复本面板的快照（跨卸载保留在父会话）
     function locSnap() { return { f: JSON.parse(JSON.stringify(filters)), page: page.value }; }
     function locApplySnap(sn) {
-      if (!sn) return;
+      if (!sn || !sn.f) return;
       Object.keys(filters).forEach(k => { filters[k] = sn.f[k]; });
       page.value = sn.page || 1;
     }
+    // 清除定位：父会话把快照当 prop 交回，本面板（无论新挂载还是已挂载）套用后回执清空
+    watch(() => props.locateRestore, (sn) => {
+      if (!sn) return;
+      locApplySnap(sn);
+      emit('loc-restore-done');
+    }, { immediate: true });
     function makeWeek(row) { emit('make-week', row); }
     // 已归档的记录不再进编辑，改为只读查看
     function editRow(row) { if (row.status === '已归档') openView(row); else openEdit(row); }

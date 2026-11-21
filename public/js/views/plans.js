@@ -214,18 +214,33 @@ const PlansView = {
       return '';                       // 无组可归（如已取消的月计划）：计入「未找到」
     }
     const panelRef = ref(null);
+    // 月面板快照：会话创建时（首次落快照前）登记一次，之后随父会话走，不随面板卸载/重挂载变化；
+    // 面板尚未挂载时按其正常初始化状态登记（filters 全空、page=1），不等挂载后再拍。
+    const PANEL_INIT_SNAP = { f: { areaStation: '', workType: '', leader: '', startDate: '', endDate: '', keyword: '' }, page: 1 };
+    let panelSnapReg = null;
+    function panelSnapOf() {
+      if (!panelSnapReg) {
+        panelSnapReg = (panelRef.value && panelRef.value.locSnap)
+          ? panelRef.value.locSnap()
+          : JSON.parse(JSON.stringify(PANEL_INIT_SNAP));
+      }
+      return JSON.parse(JSON.stringify(panelSnapReg));
+    }
+    // 清除定位交回面板的快照：当 prop 下发，面板挂载与否都能套用（不再靠清除时现读 ref）
+    const panelRestore = ref(null);
     const loc = window.Locate.make({
       nav: 'plans', sub: '',
       base: () => list.value,
       snap: () => ({
         tab: tab.value, page: page.value, cal: calSelDay.value,
         f: JSON.parse(JSON.stringify(filters)), scopeLabel: scopeLabel.value,
-        panel: (panelRef.value && panelRef.value.locSnap) ? panelRef.value.locSnap() : { f: {}, page: 1 }
+        panel: panelSnapOf()
       }),
       restore: (sn) => {
         Object.assign(filters, sn.f); tab.value = sn.tab; page.value = sn.page;
         calSelDay.value = sn.cal || ''; scopeLabel.value = sn.scopeLabel || '';
-        if (panelRef.value && panelRef.value.locApplySnap) panelRef.value.locApplySnap(sn.panel);
+        if (sn.panel) panelRestore.value = sn.panel;   // 面板套用后回执清空
+        panelSnapReg = null;                            // 会话结束：下次重新登记
       },
       groups: LOC_GROUPS,
       groupLabel: (g) => LOC_LABEL[g] || g,
@@ -1623,7 +1638,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, loc, locActive, locIds, locPanelIds, locRowClass, rowClassAll, calSelDay, calDayLabel, toggleCalDay, clearCalDay, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, splitBadge, canSplit };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, loc, locActive, locIds, locPanelIds, locRowClass, rowClassAll, panelRestore, calSelDay, calDayLabel, toggleCalDay, clearCalDay, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, splitBadge, canSplit };
   },
   template: `
   <div class="plans-view">
@@ -1669,7 +1684,7 @@ const PlansView = {
 
       <!-- 月计划管理 / 已归档月计划：检修口径专用面板 -->
       <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
-      <month-plans-panel v-if="isMonthTab" ref="panelRef" :tab="tab" :project-scope="filters.projectScope" :locate-active="locActive" :locate-ids="locPanelIds" @make-week="makeWeekFromMonth" />
+      <month-plans-panel v-if="isMonthTab" ref="panelRef" :tab="tab" :project-scope="filters.projectScope" :locate-active="locActive" :locate-ids="locPanelIds" :locate-restore="panelRestore" @loc-restore-done="panelRestore = null" @make-week="makeWeekFromMonth" />
 
       <template v-else>
       <div class="plan-filters">
