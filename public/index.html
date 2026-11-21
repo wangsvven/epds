@@ -1689,6 +1689,8 @@
   .el-table .el-table__body .loc-row.el-table__row > td { background:var(--loc-bg) !important; }
   .el-table .el-table__body .loc-row > td:first-child { box-shadow: inset 3px 0 0 var(--loc-line); }
   .el-table .el-table__body .loc-row:hover > td { background:var(--loc-bg-hover) !important; }
+  /* 材料明细定位期：列筛选漏斗不可点（与筛选栏禁用一致） */
+  .mat-loc-lock .col-funnel { pointer-events: none; opacity: .4; }
   .fd-tag { flex: 0 0 auto; box-sizing: border-box; height: 20px; line-height: 18px; padding: 0 6px; border: 1px solid; border-radius: 3px; font-size: 11.5px; white-space: nowrap; }
   .fd-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-1); font-variant-numeric: tabular-nums; }
   /* 中国传统色五色淡版：极淡底 + 同色系深一号字 + 同色系细边 */

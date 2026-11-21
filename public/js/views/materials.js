@@ -67,7 +67,8 @@ const MaterialsView = {
       tab.value = 'outbound';
       nextTick(() => window.dispatchEvent(new CustomEvent('outbounds-focus-material', { detail })));
     }
-    onMounted(load);
+    onMounted(async () => { await load(); loc.consume(); });   // 明细叶子：首轮加载后消费定位
+    onUnmounted(() => loc.dispose());
     // 切回材料明细即从后端重拉最新数据（确认入库/作废会改材料，旧快照导致更新不及时）
     watch(tab, (nv) => { if (nv === 'detail') load(); });
     // 领料单入库/作废后实时刷新材料明细（跨组件联动）
@@ -501,10 +502,10 @@ const MaterialsView = {
         <el-select v-model="filters.importState" style="width:150px">
           <el-option label="全部项目" value="__all" /><el-option label="已导入材料" value="imported" /><el-option label="未导入材料" value="none" />
         </el-select>
-        <el-select v-model="filters.project" filterable style="width:200px">
+        <el-select v-model="filters.project" filterable :disabled="locActive" style="width:200px">
           <el-option label="全部项目" value="__all" /><el-option v-for="n in projectCandidates" :key="n" :label="n" :value="n" />
         </el-select>
-        <el-select v-model="filters.status" style="width:150px">
+        <el-select v-model="filters.status" :disabled="locActive" style="width:150px">
           <el-option label="全部状态" value="__all" />
           <el-option label="未到库" value="未到库" />
           <el-option label="已生成领料单" value="已生成领料单" />
@@ -513,8 +514,8 @@ const MaterialsView = {
           <el-option label="异常" value="异常" />
           <el-option label="无效数据" value="无效数据" />
         </el-select>
-        <el-input v-model="filters.keyword" placeholder="搜索项目、物料、订单号" style="width:220px" clearable @keyup.enter="load" />
-        <el-button type="primary" @click="load">搜索</el-button>
+        <el-input v-model="filters.keyword" placeholder="搜索项目、物料、订单号" style="width:220px" clearable :disabled="locActive" @keyup.enter="load" />
+        <el-button type="primary" :disabled="locActive" @click="load">搜索</el-button>
       </div>
 
       <div class="mat-stats">
@@ -537,7 +538,7 @@ const MaterialsView = {
       </div>
 
       <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
-      <el-table ref="mainTable" :data="detailPaged" row-key="id" v-loading="loading" class="mat-table" style="width:100%" :row-class-name="locRowClass" @selection-change="onSel">
+      <el-table ref="mainTable" :data="detailPaged" row-key="id" v-loading="loading" class="mat-table" :class="{ 'mat-loc-lock': locActive }" style="width:100%" :row-class-name="locRowClass" @selection-change="onSel">
         <el-table-column type="selection" width="46" reserve-selection :selectable="canSelect" />
         <el-table-column prop="project" min-width="176">
           <template #header><div class="th-inner"><span>项目名称</span>
