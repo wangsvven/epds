@@ -72,7 +72,8 @@ window.Locate = {
       active: false, seq: 0, text: '', total: 0, missing: 0, failed: false, refreshFailed: false,
       group: '', groups: [], set: null, retry: null, desc: null, snap: null
     });
-    function hit(x) { return !!(st.active && st.set && x && st.set.has(String(x.id))); }
+    // 高亮只在「会话有效且确有收窄结果」时渲染：避免零命中/失败态残留黄底却无横幅
+    function hit(x) { return !!(st.active && st.total > 0 && st.set && x && st.set.has(String(x.id))); }
     function takeSnap() { if (!st.snap) st.snap = cfg.snap(); }
     function restoreSnap() { if (st.snap) { cfg.restore(st.snap); st.snap = null; } st.retry = null; }
     function countGroups(hits) {
