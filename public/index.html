@@ -236,15 +236,15 @@
       background:
         radial-gradient(140% 110% at 50% 42%, rgba(13,31,51,0) 48%, rgba(13,31,51,.16) 100%),
         linear-gradient(180deg, rgba(13,31,51,.04) 0%, rgba(13,31,51,0) 26%, rgba(13,31,51,.18) 100%); }
-    /* 环境光斑：缓慢漂移的柔光，为玻璃层提供可“折射”的液体层次 */
+    /* 环境光斑：静态柔光，为玻璃层提供可“折射”的液体层次（循环漂移已按 P2 停用） */
     .login-ambient { position:absolute; inset:0; z-index:1; pointer-events:none; overflow:hidden; }
     .login-ambient span { position:absolute; border-radius:50%; filter:blur(64px); mix-blend-mode:screen; will-change:transform; }
     .login-ambient .b1 { width:46vmax; height:46vmax; left:-8vmax; top:-12vmax; opacity:.34;
-      background:radial-gradient(circle at 40% 40%, rgba(120,180,255,.85), rgba(120,180,255,0) 68%); animation:lgDrift1 26s ease-in-out infinite alternate; }
+      background:radial-gradient(circle at 40% 40%, rgba(120,180,255,.85), rgba(120,180,255,0) 68%); }
     .login-ambient .b2 { width:38vmax; height:38vmax; right:-6vmax; bottom:-10vmax; opacity:.30;
-      background:radial-gradient(circle at 50% 50%, rgba(255,190,150,.85), rgba(255,190,150,0) 68%); animation:lgDrift2 32s ease-in-out infinite alternate; }
+      background:radial-gradient(circle at 50% 50%, rgba(255,190,150,.85), rgba(255,190,150,0) 68%); transform:scale(1.05); }
     .login-ambient .b3 { width:28vmax; height:28vmax; right:14vmax; top:-8vmax; opacity:.22;
-      background:radial-gradient(circle at 50% 50%, rgba(170,255,235,.85), rgba(170,255,235,0) 66%); animation:lgDrift3 22s ease-in-out infinite alternate; }
+      background:radial-gradient(circle at 50% 50%, rgba(170,255,235,.85), rgba(170,255,235,0) 66%); transform:scale(.95); }
     @keyframes lgDrift1 { from { transform:translate3d(0,0,0) scale(1); } to { transform:translate3d(6vmax,4vmax,0) scale(1.12); } }
     @keyframes lgDrift2 { from { transform:translate3d(0,0,0) scale(1.05); } to { transform:translate3d(-5vmax,-3vmax,0) scale(.95); } }
     @keyframes lgDrift3 { from { transform:translate3d(0,0,0) scale(.95); } to { transform:translate3d(-4vmax,6vmax,0) scale(1.1); } }
@@ -268,11 +268,10 @@
       background:linear-gradient(148deg, rgba(255,255,255,.92) 0%, rgba(255,255,255,.18) 26%, rgba(255,255,255,.05) 54%, rgba(255,255,255,.55) 88%, rgba(255,255,255,.28) 100%);
       -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
       -webkit-mask-composite:xor; mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask-composite:exclude; opacity:.95; }
-    /* 掠过卡面的柔光：让玻璃“活”起来，播放时不影响文字可读性 */
+    /* 掠过卡面的柔光：循环扫光已按 P2 停用，元素保留但静止在 opacity:0（不参与呈现） */
     .login-card::after { content:''; position:absolute; z-index:0; top:-38%; left:-14%; width:58%; height:130%; pointer-events:none;
       background:radial-gradient(closest-side, rgba(255,255,255,.42), rgba(255,255,255,0) 76%);
-      filter:blur(14px); transform:rotate(14deg); opacity:0;
-      animation:lgSheen 13s ease-in-out infinite; }
+      filter:blur(14px); transform:rotate(14deg); opacity:0; }
     @keyframes lgSheen { 0% { transform:translateX(-12%) rotate(14deg); opacity:0; }
       16% { opacity:.55; } 46% { opacity:.4; } 68% { transform:translateX(168%) rotate(14deg); opacity:0; }
       100% { transform:translateX(168%) rotate(14deg); opacity:0; } }
