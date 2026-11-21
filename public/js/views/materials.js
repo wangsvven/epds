@@ -897,6 +897,29 @@ const Requisitions = {
     function matNames(r) { return window.MatName.list(r.items); }
     function fmtQty(n) { const v = Math.round((Number(n) || 0) * 10000) / 10000; return String(v); }
     function statusType(s) { return s === '待入库' ? 'warning' : s === '部分到库' ? 'warning' : s === '已入库' ? 'success' : 'info'; }
+    // 汇总 chips 的底色/文字色（与暂存清单同款：浅色底小标签）
+    function chipStyle(color) { return 'display:inline-block;padding:2px 10px;border-radius:3px;font-size:12px;line-height:20px;background:' + color + '1f;color:' + color + ';'; }
+    // 按单位分组求和：本弹窗不跨单位裸加（与暂存清单的领料总数口径不同）
+    function sumByUnit(rows, qtyOf) {
+      const map = new Map();
+      (rows || []).forEach(r => {
+        const it = (((dlg.rec || {}).items) || []).find(x => x.materialId === r.materialId) || {};
+        const unit = String(it.unit || '').trim();
+        const n = Number(qtyOf(r));
+        map.set(unit, (map.get(unit) || 0) + (isFinite(n) ? n : 0));
+      });
+      return Array.from(map.entries()).map(e => ({ unit: e[0], qty: Math.round(e[1] * 10000) / 10000 }));
+    }
+    // 总数：确认入库 = 领料数量；补入库 = 剩余未入库量（与弹窗列名口径一致）
+    const totalChips = computed(() => sumByUnit(dlg.rows, r => r.qty));
+    const totalChipsLabel = computed(() => (dlg.type === 'supplement' ? '未入库总数' : '领料总数'));
+    // 「本次入库合计」：仅「有异常」模式显示，随输入实时派生（不另存状态、不写回）
+    const thisQtyChips = computed(() => sumByUnit(dlg.rows, r => {
+      const v = String(r.thisQty == null ? '' : r.thisQty).trim();
+      if (v === '') return 0;
+      const n = Number(v);
+      return isFinite(n) ? n : 0;
+    }));
 
     async function download(r) {
       try {
@@ -1031,7 +1054,7 @@ const Requisitions = {
     function arrivedSum(rec, materialId) {
       return itemHistory(rec, materialId).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
+    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, chipStyle, totalChips, totalChipsLabel, thisQtyChips, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
   },
   template: `
   <div>
@@ -1129,9 +1152,19 @@ const Requisitions = {
         <div>
           <div style="font-size:16px;font-weight:600">{{ dlg.type==='supplement' ? '补入库' : '确认入库' }}</div>
           <div style="margin-top:6px"><span style="font-weight:600">{{ dlg.rec && dlg.rec.reqNo }}</span>
+            <span v-if="dlg.rec && (dlg.rec.projects || []).length" style="color:var(--brand);margin-left:8px">· {{ dlg.rec.projects.join('、') }}</span>
             <span style="color:var(--text-3);margin-left:10px">请核对领料单明细后{{ dlg.type==='supplement' ? '补入库' : '确认入库' }}</span></div>
         </div>
       </template>
+      <div v-if="dlg.rec" class="stg-chips">
+        <span :style="chipStyle('#3370ff')">材料 {{ dlg.rows.length }} 条</span>
+        <span v-for="g in totalChips" :key="'q-' + g.unit" :style="chipStyle('#0e9e9e')">{{ totalChipsLabel }}
+          <b>{{ fmtQty(g.qty) }}</b><span v-if="g.unit">{{ ' ' + g.unit }}</span></span>
+        <template v-if="dlg.mode==='有异常'">
+          <span v-for="g in thisQtyChips" :key="'in-' + g.unit" :style="chipStyle('#e0532b')">本次入库合计
+            <b>{{ fmtQty(g.qty) }}</b><span v-if="g.unit">{{ ' ' + g.unit }}</span></span>
+        </template>
+      </div>
       <el-radio-group v-model="dlg.mode" style="margin-bottom:14px" @change="onModeChange">
         <el-radio label="无异常">无异常</el-radio>
         <el-radio label="有异常">有异常</el-radio>

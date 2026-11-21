@@ -1427,6 +1427,35 @@ async function runSmoke() {
     return '自动填量 · 取消清空 · 未填拦截 · 暂存 precision=4';
   });
 
+  /* ---------- 确认入库弹窗：项目名 + 按单位分组汇总 chips（纯显示，2026-11-21 定版） ---------- */
+  await step('materials', '确认入库弹窗：标题行项目名 + 汇总 chips（按单位分组 / 有异常才有本次入库合计）静态防回归', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    // ① 标题行：单号后以「·」追加项目名，多项目用「、」连接，为空不渲染
+    need(/v-if="dlg\.rec && \(dlg\.rec\.projects \|\| \[\]\)\.length"[\s\S]{0,160}dlg\.rec\.projects\.join\('、'\)/.test(src),
+      '标题行应在单号后拼接项目名（projects 用「、」连接，空时不渲染）');
+    // ② 汇总按单位分组求和：同一函数，两处 computed 复用（不得各写一份/跨单位裸加）
+    const grpCnt = (src.match(/function sumByUnit\(rows, qtyOf\)/g) || []).length;
+    need(grpCnt === 1, 'sumByUnit 应只定义一处，实际 ' + grpCnt + ' 处');
+    need(/const unit = String\(it\.unit \|\| ''\)\.trim\(\)/.test(src), '分组键应取物料单位（经 materialId 到 dlg.rec.items 查）');
+    need(/const totalChips = computed\(\(\) => sumByUnit\(dlg\.rows, r => r\.qty\)\)/.test(src),
+      '总数 chip 应由 sumByUnit 从 dlg.rows 的 qty 派生');
+    need(/const totalChipsLabel = computed\(\(\) => \(dlg\.type === 'supplement' \? '未入库总数' : '领料总数'\)\)/.test(src),
+      '总数 chip 标签应随 confirm/supplement 切「领料总数 / 未入库总数」');
+    // ③ 本次入库合计：只在「有异常」出现，空/非法按 0，随输入派生（不另存状态）
+    need(/const thisQtyChips = computed\(\(\) => sumByUnit\(dlg\.rows, r => \{/.test(src) &&
+      /const v = String\(r\.thisQty == null \? '' : r\.thisQty\)\.trim\(\)/.test(src) &&
+      /if \(v === ''\) return 0;/.test(src), '本次入库合计应按 thisQty 派生，空/非法按 0');
+    need(/<template v-if="dlg\.mode==='有异常'">[\s\S]{0,400}本次入库合计/.test(src),
+      '「本次入库合计」chip 必须只在有异常模式渲染');
+    // ④ 材料条数 chip + 样式复用暂存清单同款
+    need(/材料 \{\{ dlg\.rows\.length \}\} 条/.test(src), '应有「材料 N 条」chip');
+    need(/class="stg-chips"/.test(src) && /function chipStyle\(color\)/.test(src), 'chips 应复用 .stg-chips 与同款浅色底样式');
+    // ⑤ 回归：暂存清单的裸加总数口径本批不动
+    need(/const stagingTotalQty = computed\(\(\) => stagingRows\.value\.reduce\(\(s, r\) => s \+ \(Number\(stagingQty\[r\.id\]\) \|\| 0\), 0\)\)/.test(src),
+      '暂存清单的领料总数（跨单位裸加）应保持原样');
+    return '项目名拼接 / sumByUnit 单点两处派生 / 标签随类型 / 有异常才出合计 / 材料条数 / 暂存口径未动';
+  });
+
   await step('materials', 'P3-3 暂存小数：0.5 生成领料单成功并落库 0.5', async () => {
     const m = needOk(await api('POST', '/api/materials', {
       token, body: { project: MP_C, source: '甲供材料', description: 'ZT测试-P33 暂存小数', qtyRequired: 2, unit: '根', code: 'ZT-P33' }
