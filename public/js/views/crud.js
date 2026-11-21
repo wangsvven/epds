@@ -35,8 +35,11 @@ const CrudView = {
     }
     async function load() {
       loading.value = true;
-      try { list.value = await api.get('/api/' + props.config.endpoint); }
-      catch (e) { ElementPlus.ElMessage.error(e.message); }
+      try {
+        list.value = await api.get('/api/' + props.config.endpoint);
+        if (loc && loc.st.active) loc.recompute();
+      }
+      catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { loading.value = false; }
     }
     function openAdd() {
@@ -72,18 +75,33 @@ const CrudView = {
       return 'settings';
     }
 
-    onMounted(() => { loadRefs(); load(); });
+    /* ----- 首页「工作动态」定位：仅竣工资料（completionDocuments）启用；无列表状态可存 ----- */
+    const locOn = props.config.endpoint === 'completionDocuments';
+    const loc = window.Locate.make({
+      nav: locOn ? 'completion' : '__none__', sub: '',
+      base: () => list.value,
+      snap: () => ({}),
+      restore: () => {}
+    });
+    const locRows = computed(() => (loc.st.active && loc.st.total) ? list.value.filter(loc.hit) : list.value);
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    const locActive = computed(() => loc.st.active);
 
-    return { list, loading, dialogVisible, editing, form, openAdd, openEdit, submit, remove, fieldOptions, tagType, cfgModule };
+    onMounted(async () => { loadRefs(); await load(); if (locOn) loc.consume(); });
+    Vue.onUnmounted(() => loc.dispose());
+
+    return { list, loading, dialogVisible, editing, form, openAdd, openEdit, submit, remove, fieldOptions, tagType, cfgModule,
+      loc, locRows, locRowClass, locActive };
   },
   template: `
   <div>
+    <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
     <div class="toolbar">
       <el-button v-if="canWrite(cfgModule())" type="primary" @click="openAdd">+ 新增</el-button>
       <span class="spacer"></span>
-      <span style="color:var(--text-3);font-size:13px;">共 {{ list.length }} 条</span>
+      <span style="color:var(--text-3);font-size:13px;">共 {{ locRows.length }} 条</span>
     </div>
-    <el-table :data="list" v-loading="loading" border stripe style="width:100%">
+    <el-table :data="locRows" v-loading="loading" border stripe style="width:100%" :row-class-name="locRowClass">
       <el-table-column v-for="col in config.columns" :key="col.key" :prop="col.key" :label="col.label" :width="col.width">
         <template #default="{ row }">
           <el-tag v-if="col.tag" :type="tagType(row[col.key])">{{ row[col.key] }}</el-tag>

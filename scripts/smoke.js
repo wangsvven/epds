@@ -3434,6 +3434,43 @@ async function runSmoke() {
     return '脚本顺序 / 日历仅周计划页签 + 四状态+类型 / 高处全等 / 无班组过滤 / 冲突接线 / 冲突只置灰无标注 / 选人先校验时间';
   });
 
+  /* ---------- 首页工作动态跳转定位（纯前端，静态接线） ---------- */
+  await step('结构', '首页动态定位：契约/通道/消费点/序号与样式静态防回归', async () => {
+    const wf = fs.readFileSync(path.join(ROOT, 'public', 'js', 'work-feed.js'), 'utf8');
+    const mj = fs.readFileSync(path.join(ROOT, 'public', 'js', 'main.js'), 'utf8');
+    const db = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'dashboard.js'), 'utf8');
+    const mts = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'materials.js'), 'utf8');
+    const pl = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');
+    const mp = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'monthPlans.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+    // 契约：ids 卫生 + 各来源带 ids/sub
+    need(/function uniqIds\(list\)/.test(wf) && /function createdMessages/.test(wf) && /ids: uniqIds/.test(wf),
+      'work-feed 应统一 uniqIds 并在来源输出 ids');
+    need(/sub: 'workers'/.test(wf) && /sub: 'detail'/.test(wf) && /sub: 'requisition'/.test(wf) && /sub: 'outbound-orders'/.test(wf),
+      'users/materials 三类应带 sub 落点');
+    // 通道：单槽 pending + 序号 + 事件
+    need(/window\.__pendingLocate = \{/.test(db) && /window\.Locate\.bump\(\)/.test(db), 'dashboard.goTo 应写入 pending 并推进序号');
+    need(/make: function \(cfg\)/.test(mj) && /idsSet: function/.test(mj), 'main.js 应提供定位会话工厂与 idsSet');
+    need(/if \(!\(opts && opts.fromFeed\)\) window\.Locate\.end\('menu'\)/.test(mj), '菜单导航应先递增序号并丢弃 pending（fromFeed 除外）');
+    need(/fromFeed: true/.test(mj), 'nav-to（动态导航）应保留 pending');
+    // 卸载不动序号：定位相关代码里不得在 onBeforeUnmount/onUnmounted 中改 __locateSeq
+    need(!/on(Unmounted|BeforeUnmount)\([^)]*__locateSeq/.test(mj) && !/on(Unmounted|BeforeUnmount)\([^)]*Locate\.bump/.test(mj),
+      '组件卸载不得推进定位序号');
+    // 消费点
+    ['materials', 'plans', 'users', 'projects', 'borrow', 'actualWorks', 'crud'].forEach(f => {
+      const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', f + '.js'), 'utf8');
+      need(/window\.Locate\.make\(/.test(src), f + '.js 应接入定位会话');
+      need(/loc-banner/.test(src) || f === 'main', f + '.js 应渲染定位横幅');
+    });
+    need(/locateActive/.test(mp) && /locateIds/.test(mp) && /locSnap|locApplySnap/.test(mp), '月面板应只经 props/事件接收会话');
+    need(!/Locate\.pending\(\)|__pendingLocate/.test(mp), '月面板不得读全局 pending');
+    // 样式
+    need(/\.loc-row/.test(html) && /\.loc-bar/.test(html) && /--loc-bg/.test(html), 'index.html 应有横幅与命中行样式');
+    // 生成领料单 / 导出的定位期禁用
+    need(/locActive\s*\?\s*'定位期间不可用/.test(mts) || /:disabled="locActive"/.test(mts), '材料「生成领料单」等应定位期禁用');
+    return '契约 ids/sub · pending+序号+事件 · 菜单丢弃 · 卸载不推进序号 · 七处消费点 · 面板 props · 样式';
+  });
+
   /* ---------- 周计划日历点选筛选（纯前端，2026-11-18 定版） ---------- */
   await step('结构', '周计划日历点选筛选：覆盖谓词单点 / 筛选与清空接线 / 页签隔离静态防回归', async () => {
     const p = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'plans.js'), 'utf8');

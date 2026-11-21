@@ -87,7 +87,8 @@ const WorkersPanel = {
       try {
         list.value = await api.get('/api/workers');
         try { teams.value = await api.get('/api/teams'); } catch (e) { teams.value = []; }
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+        if (loc && loc.st.active) loc.recompute();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { loading.value = false; }
     }
     const filtered = computed(() => list.value.filter(w => {
@@ -97,7 +98,24 @@ const WorkersPanel = {
       if (filters.status && wst(w).derived !== filters.status) return false;
       return true;
     }));
-    const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize));
+    /* ----- 首页「工作动态」定位（人员动态 / 准入预警）：绕开筛选，收窄 + 高亮 ----- */
+    const loc = window.Locate.make({
+      nav: 'users', sub: 'workers',
+      base: () => list.value,
+      snap: () => ({ f: JSON.parse(JSON.stringify(filters)), page: page.value }),
+      restore: (s) => { Object.assign(filters, s.f); page.value = s.page; },
+      afterApply: () => { page.value = 1; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const rowClassAll = (o) => [rowClass(o), loc.hit(o.row) ? 'loc-row' : ''].filter(Boolean).join(' ');
+    const paged = computed(() => {
+      if (loc.st.active && loc.st.total) {
+        const rows = list.value.filter(loc.hit);
+        return rows.slice((page.value - 1) * pageSize, page.value * pageSize);
+      }
+      return filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize);
+    });
+    const locCount = computed(() => (loc.st.active && loc.st.total) ? list.value.filter(loc.hit).length : filtered.value.length);
     function resetFilters() { filters.name = ''; filters.identity = ''; filters.team = ''; filters.status = ''; page.value = 1; }
 
     // 准入到期预警：全部为派生计算，不改存储状态、不写库。
@@ -254,8 +272,10 @@ const WorkersPanel = {
     }
 
     // 首页公告栏点击进入：优先直接打开该人员编辑弹窗，找不到时降级为按姓名填好筛选
+    Vue.onUnmounted(() => loc.dispose());
     onMounted(async () => {
       await load();
+      loc.consume();
       const f = window.__pendingFocusWorker;
       if (!f) return;
       window.__pendingFocusWorker = null;
@@ -267,7 +287,8 @@ const WorkersPanel = {
       openAdd, openEdit, submit, togglePending, exitWorker, remove, downloadTemplate, downloadExport, triggerImport, onFileChange, load,
       imp, impKindType, toggleImpDecision, confirmImport,
       teamDlg, openTeamAdd, openTeamEdit, saveTeam, removeTeam, weekOption,
-      fmtValid, fmtCerts, wst, rowClass, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_STATUS_FILTER_OPTIONS, WORKER_CERT_OPTIONS };
+      fmtValid, fmtCerts, wst, rowClass, rowClassAll, statusTag, emptyText, WORKER_IDENTITY_OPTIONS, WORKER_STATUS_FILTER_OPTIONS, WORKER_CERT_OPTIONS,
+      loc, locActive, locCount };
   },
   template: `
   <div>
@@ -281,7 +302,7 @@ const WorkersPanel = {
           <el-button v-if="canWrite('users')" @click="openTeamAdd">新增班组</el-button>
           <el-button v-if="canWrite('users')" type="primary" @click="openAdd">新增人员</el-button>
           <el-button v-if="canWrite('users')" @click="triggerImport">选择文件导入</el-button>
-          <el-button @click="downloadExport">下载</el-button>
+          <el-button :disabled="locActive" @click="downloadExport">下载</el-button>
           <el-button @click="downloadTemplate">下载模板</el-button>
           <el-button :loading="loading" @click="load">刷新人员</el-button>
         </div>
@@ -298,20 +319,21 @@ const WorkersPanel = {
 
         <div class="wv-section">作业人员名单</div>
         <div class="wv-filters">
-          <el-input v-model="filters.name" placeholder="按姓名筛选" clearable style="width:200px" @input="page=1" />
-          <el-select v-model="filters.identity" placeholder="身份" clearable style="width:230px" @change="page=1">
+          <el-input v-model="filters.name" placeholder="按姓名筛选" clearable :disabled="locActive" style="width:200px" @input="page=1" />
+          <el-select v-model="filters.identity" placeholder="身份" clearable :disabled="locActive" style="width:230px" @change="page=1">
             <el-option v-for="o in WORKER_IDENTITY_OPTIONS" :key="o" :label="o" :value="o" />
           </el-select>
-          <el-select v-model="filters.team" placeholder="班组" clearable style="width:170px" @change="page=1">
+          <el-select v-model="filters.team" placeholder="班组" clearable :disabled="locActive" style="width:170px" @change="page=1">
             <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
           </el-select>
-          <el-select v-model="filters.status" placeholder="状态" clearable style="width:120px" @change="page=1">
+          <el-select v-model="filters.status" placeholder="状态" clearable :disabled="locActive" style="width:120px" @change="page=1">
             <el-option v-for="s in WORKER_STATUS_FILTER_OPTIONS" :key="s" :label="s" :value="s" />
           </el-select>
-          <el-button @click="resetFilters">重置</el-button>
+          <el-button :disabled="locActive" @click="resetFilters">重置</el-button>
         </div>
 
-        <el-table class="flat-table wk-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员" :row-class-name="rowClass">
+        <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+      <el-table class="flat-table wk-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员" :row-class-name="rowClassAll">
           <el-table-column prop="name" label="姓名" min-width="90" />
           <el-table-column label="身份" min-width="185"><template #default="{row}"><span :class="row.identity ? '' : 'wk-empty'">{{ emptyText(row.identity) }}</span></template></el-table-column>
           <el-table-column label="班组" min-width="100"><template #default="{row}"><span :class="row.team ? '' : 'wk-empty'">{{ emptyText(row.team) }}</span></template></el-table-column>
@@ -367,26 +389,27 @@ const WorkersPanel = {
         <el-button v-if="canWrite('users')" type="primary" size="small" @click="openAdd">新增</el-button>
         <el-button v-if="canWrite('users')" size="small" @click="triggerImport">选择文件导入</el-button>
         <span class="ck-hint">支持 .csv、.xls、.xlsx；请按模板填写，身份证号、手机号和有效期格式错误时整批不会导入。</span>
-        <el-button size="small" @click="downloadExport">下载</el-button>
+        <el-button size="small" :disabled="locActive" @click="downloadExport">下载</el-button>
         <el-button link type="primary" @click="downloadTemplate">下载模板</el-button>
       </div>
 
       <div class="wv-filters">
-        <el-input v-model="filters.name" placeholder="按姓名筛选" clearable style="width:160px" @input="page=1" />
-        <el-select v-model="filters.identity" placeholder="身份" clearable style="width:230px" @change="page=1">
+        <el-input v-model="filters.name" placeholder="按姓名筛选" clearable :disabled="locActive" style="width:160px" @input="page=1" />
+        <el-select v-model="filters.identity" placeholder="身份" clearable :disabled="locActive" style="width:230px" @change="page=1">
           <el-option v-for="o in WORKER_IDENTITY_OPTIONS" :key="o" :label="o" :value="o" />
         </el-select>
-        <el-select v-model="filters.team" placeholder="班组" clearable style="width:150px" @change="page=1">
+        <el-select v-model="filters.team" placeholder="班组" clearable :disabled="locActive" style="width:150px" @change="page=1">
           <el-option v-for="t in teams" :key="t.id" :label="t.name" :value="t.name" />
         </el-select>
-        <el-select v-model="filters.status" placeholder="状态" clearable style="width:120px" @change="page=1">
+        <el-select v-model="filters.status" placeholder="状态" clearable :disabled="locActive" style="width:120px" @change="page=1">
           <el-option v-for="s in WORKER_STATUS_FILTER_OPTIONS" :key="s" :label="s" :value="s" />
         </el-select>
-        <el-button @click="resetFilters">重置</el-button>
+        <el-button :disabled="locActive" @click="resetFilters">重置</el-button>
         <span class="ck-note">由资料员维护，无需为每名作业人员创建登录账号</span>
       </div>
 
-      <el-table class="flat-table wk-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员" :row-class-name="rowClass">
+      <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+      <el-table class="flat-table wk-table" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无人员" :row-class-name="rowClassAll">
         <el-table-column prop="name" label="姓名" min-width="90" />
         <el-table-column label="身份" min-width="190"><template #default="{row}"><span :class="row.identity ? '' : 'wk-empty'">{{ emptyText(row.identity) }}</span></template></el-table-column>
         <el-table-column label="班组" min-width="100"><template #default="{row}"><span :class="row.team ? '' : 'wk-empty'">{{ emptyText(row.team) }}</span></template></el-table-column>
@@ -653,11 +676,16 @@ const UsersView = {
     onMounted(() => {
       if (window.__pendingUsersTab) { tab.value = window.__pendingUsersTab; window.__pendingUsersTab = ''; }
     });
-    return { tab };
+    // 用户手动切离「作业人员」页签 = 主动切离被定位的列表 → 失效结束（不恢复快照）
+    // 只由用户点击触发（v-model 程序化改动不触发 tab-change），不会误杀刚写入的 pending
+    function onTabChange(name) {
+      if (name && name !== 'workers') window.Locate.end('leave');
+    }
+    return { tab, onTabChange };
   },
   template: `
   <div>
-    <el-tabs v-model="tab">
+    <el-tabs v-model="tab" @tab-change="onTabChange">
       <el-tab-pane label="登录账号列表" name="accounts"><AccountsPanel /></el-tab-pane>
       <el-tab-pane label="作业人员名单" name="workers" lazy><WorkersPanel variant="tab" /></el-tab-pane>
       <el-tab-pane label="外部通讯录" name="contacts" lazy><ContactsPanel /></el-tab-pane>

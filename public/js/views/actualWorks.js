@@ -87,7 +87,29 @@ const ActualConstructionView = {
     // 班组长 / 实施人员 筛选项（来自已有记录）
     const workerOptions = computed(() => [...new Set(records.value.flatMap(r => rowWorkers(r)).filter(Boolean))].sort());
     const submitterOptions = computed(() => [...new Set(records.value.map(r => String(r.submitter || '')).filter(Boolean))].sort());
-    const paged = computed(() => reportRows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
+    /* ----- 首页「工作动态」定位：记录列表在 report 页签，绕开报表筛选 ----- */
+    const loc = window.Locate.make({
+      nav: 'actualWorks', sub: '',
+      base: () => records.value,
+      snap: () => ({ tab: tab.value, page: page.value,
+        f: { dateRange: dateRange.value, project: fProject.value, workType: fWorkType.value, worker: fWorker.value, submitter: fSubmitter.value } }),
+      restore: (s) => {
+        tab.value = s.tab; page.value = s.page;
+        dateRange.value = s.f.dateRange; fProject.value = s.f.project; fWorkType.value = s.f.workType;
+        fWorker.value = s.f.worker; fSubmitter.value = s.f.submitter;
+      },
+      afterApply: () => { tab.value = 'report'; page.value = 1; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    const paged = computed(() => {
+      if (loc.st.active && loc.st.total) {
+        const rows = records.value.filter(loc.hit);
+        return rows.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+      }
+      return reportRows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+    });
+    const locRowsCount = computed(() => (loc.st.active && loc.st.total) ? records.value.filter(loc.hit).length : reportRows.value.length);
     watch(() => [reportRows.value.length, pageSize.value], () => {
       const maxP = Math.max(1, Math.ceil(reportRows.value.length / pageSize.value));
       if (page.value > maxP) page.value = maxP;
@@ -113,10 +135,18 @@ const ActualConstructionView = {
       try { const r = await api.get('/api/materials'); materialsAll.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
       try { const r = await api.get('/api/users'); usersAll.value = Array.isArray(r) ? r : (r.data || []); } catch (e) {}
     }
+    function switchTab(t) {
+      if (loc.st.active && t !== 'report') window.Locate.end('leave');
+      tab.value = t;
+    }
     async function loadRecords() {
       loading.value = true;
-      try { const r = await api.get('/api/actualWorks'); records.value = Array.isArray(r) ? r : (r.data || []); }
-      catch (e) { ElementPlus.ElMessage.error(e.message); }
+      try {
+        const r = await api.get('/api/actualWorks');
+        records.value = Array.isArray(r) ? r : (r.data || []);
+        if (loc && loc.st.active) loc.recompute();
+      }
+      catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { loading.value = false; }
     }
     function matQty(id) { const n = Number(qtyMap[id]); return Number.isFinite(n) && n > 0 ? n : 0; }
@@ -198,7 +228,8 @@ const ActualConstructionView = {
     function pkgLabelOf(it) { const b = matBucketOf(it && it.description); return MAT_PKG_LABEL[b] || ''; }
     // 导出为真正的 Excel(.xlsx)：一条记录 → 材料按条数占多行，其余列按记录纵向合并
     function exportExcel() {
-      const rows = reportRows.value;
+      // 定位期间导出当前命中集合（与可见列表一致）；否则按报表筛选结果
+      const rows = (loc.st.active && loc.st.total) ? records.value.filter(loc.hit) : reportRows.value;
       if (!rows.length) return ElementPlus.ElMessage.warning('没有可导出的数据');
       if (typeof XLSX === 'undefined') return ElementPlus.ElMessage.error('Excel 组件未加载，请刷新页面重试');
       const head = ['日期', '工作类型', '项目名称（包）', '班组长/实施人员', '材料', '提交人', '提交时间'];
@@ -225,19 +256,21 @@ const ActualConstructionView = {
       XLSX.utils.book_append_sheet(wb, ws, '工程实际施工量');
       XLSX.writeFile(wb, '工程实际施工量报表_' + todayStr() + '.xlsx');
     }
-    onMounted(() => { loadMeta(); loadRecords(); });
+    onMounted(async () => { loadMeta(); await loadRecords(); loc.consume(); });
+    Vue.onUnmounted(() => loc.dispose());
     return {
       tab, form, multi, projects, leaders, projectMaterials, filteredMaterials, materialSearch, qtyMap, matQty, kmOf, filledCount, fmtQty,
       records, loading, busy, dateRange, fProject, fWorkType, fWorker, fSubmitter, workerOptions, submitterOptions,
       page, pageSize, paged, reportRows, editingId, editRecord, cancelEdit,
-      workTypes: ACTUAL_WORK_TYPES, submit, remove, itemsText, pkgLabelOf, resetFilters, exportExcel, todayStr, rowTypes, rowWorkers
+      workTypes: ACTUAL_WORK_TYPES, submit, remove, itemsText, pkgLabelOf, resetFilters, exportExcel, todayStr, rowTypes, rowWorkers,
+      loc, locActive, locRowClass, locRowsCount, switchTab
     };
   },
   template: `
   <div class="ac-page">
     <div class="ac-tabs">
-      <div class="ac-tab" :class="{ on: tab === 'fill' }" @click="tab = 'fill'">填写</div>
-      <div class="ac-tab" :class="{ on: tab === 'report' }" @click="tab = 'report'">工程实际施工量报表</div>
+      <div class="ac-tab" :class="{ on: tab === 'fill' }" @click="switchTab('fill')">填写</div>
+      <div class="ac-tab" :class="{ on: tab === 'report' }" @click="switchTab('report')">工程实际施工量报表</div>
     </div>
 
     <div v-show="tab === 'fill'" class="ac-pane">
@@ -334,22 +367,24 @@ const ActualConstructionView = {
             <path d="M2.5 11.5v1.2c0 .7.5 1.3 1.2 1.3h8.6c.7 0 1.2-.6 1.2-1.3v-1.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
           </svg>导出 Excel
         </el-button>
-        <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
+        <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" :disabled="locActive"
           start-placeholder="开始日期" end-placeholder="结束日期" style="width:236px" popper-class="ac-date-pop" />
-        <el-select v-model="fProject" placeholder="项目名称（包）" clearable filterable style="width:212px">
+        <el-select v-model="fProject" placeholder="项目名称（包）" clearable filterable :disabled="locActive" style="width:212px">
           <el-option v-for="p in projects" :key="p" :label="p" :value="p" />
         </el-select>
-        <el-select v-model="fWorkType" placeholder="工作类型" clearable style="width:150px">
+        <el-select v-model="fWorkType" placeholder="工作类型" clearable :disabled="locActive" style="width:150px">
           <el-option v-for="t in workTypes" :key="t" :label="t" :value="t" />
         </el-select>
-        <el-select v-model="fWorker" placeholder="班组长" clearable style="width:126px">
+        <el-select v-model="fWorker" placeholder="班组长" clearable :disabled="locActive" style="width:126px">
           <el-option v-for="w in workerOptions" :key="w" :label="w" :value="w" />
         </el-select>
-        <el-select v-model="fSubmitter" placeholder="实施人员" clearable style="width:126px">
+        <el-select v-model="fSubmitter" placeholder="实施人员" clearable :disabled="locActive" style="width:126px">
           <el-option v-for="s in submitterOptions" :key="s" :label="s" :value="s" />
         </el-select>
       </div>
-      <el-table class="ac-rep" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无数据">
+      <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+      <el-table class="ac-rep" :data="paged" v-loading="loading" style="width:100%" empty-text="暂无数据"
+        :row-class-name="locRowClass">
         <el-table-column prop="date" label="日期" width="100" class-name="ac-mid" />
         <el-table-column label="工作类型" width="96" class-name="ac-mid">
           <template #default="{row}">{{ rowTypes(row).join('、') || '—' }}</template>

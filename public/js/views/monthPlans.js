@@ -141,7 +141,9 @@ function normRisk(v) {
 const MonthPlansPanel = {
   props: {
     tab: { type: String, default: 'month' },              // month | archived
-    projectScope: { type: Array, default: () => [] }      // 项目详情「查看月计划」带入的项目范围
+    projectScope: { type: Array, default: () => [] },     // 项目详情「查看月计划」带入的项目范围
+    locateActive: { type: Boolean, default: false },      // 首页动态定位会话（父组件持有，本组件只接收）
+    locateIds: { type: Array, default: () => [] }
   },
   // 「新增周计划」交给父组件（PlansPanel）打开周计划表单并带入本行内容
   emits: ['make-week'],
@@ -200,7 +202,11 @@ const MonthPlansPanel = {
       ? list.value.filter(p => p.status === '已归档')
       : list.value.filter(p => p.status === '未执行'));
 
-    const filtered = computed(() => tabList.value.filter(p => {
+    // 定位路径：基础集合 = 本组 tabList ∩ 命中 ids，绕过自身筛选（父组件会话驱动）
+    const locSet = computed(() => window.Locate.idsSet(props.locateIds));
+    const locRows = computed(() => props.locateActive ? tabList.value.filter(p => locSet.value.has(String(p.id))) : []);
+    const locRowClass = ({ row }) => (props.locateActive && locSet.value.has(String(row.id)) ? 'loc-row' : '');
+    const filtered = computed(() => props.locateActive ? locRows.value : tabList.value.filter(p => {
       if (props.projectScope && props.projectScope.length) {
         const hitScope = props.projectScope.includes(p.project) || props.projectScope.includes(p.projectName);
         if (!hitScope) return false;
@@ -283,7 +289,10 @@ const MonthPlansPanel = {
 
     const badgeClass = st => ({ '未执行': 'mp-b-new', '已执行': 'mp-b-run', '已结算': 'mp-b-done', '已归档': 'mp-b-arc', '已取消': 'mp-b-can' }[st] || 'mp-b-new');
     // 已归档行整体置灰，视觉上明确「只读 / 已完成」
-    const rowCls = ({ row }) => (row && row.status === '已归档') ? 'mp-row-archived' : '';
+    const rowCls = ({ row }) => {
+      const arr = [(row && row.status === '已归档') ? 'mp-row-archived' : '', locRowClass({ row })].filter(Boolean);
+      return arr.join(' ');
+    };
 
     /* ---------------- 新增 / 编辑 / 查看 ---------------- */
     const dlg = reactive({ visible: false, editingId: '', busy: false, readonly: false, form: null });
@@ -443,6 +452,13 @@ const MonthPlansPanel = {
     /* ---------------- 列表操作列：新增周计划 / 编辑 / 复刻 / 归档 / 删除 ---------------- */
     const rowLabel = row => (row.maintDevice || row.name || '该月计划');
     // 新增周计划：把本行交给父组件，由周计划表单带入后保存
+    // 供父组件在会话创建时登记/恢复本面板的快照（跨卸载保留在父会话）
+    function locSnap() { return { f: JSON.parse(JSON.stringify(filters)), page: page.value }; }
+    function locApplySnap(sn) {
+      if (!sn) return;
+      Object.keys(filters).forEach(k => { filters[k] = sn.f[k]; });
+      page.value = sn.page || 1;
+    }
     function makeWeek(row) { emit('make-week', row); }
     // 已归档的记录不再进编辑，改为只读查看
     function editRow(row) { if (row.status === '已归档') openView(row); else openEdit(row); }
@@ -737,6 +753,7 @@ const MonthPlansPanel = {
       openAdd, openEdit, openView, submit, onProjectChange, onManual, onOutageChange, onWorkTimeInput, onCountChange,
       markExecuted, markSettled, backToTodo, cancelPlan,
       makeWeek, editRow, copyMonth, archivePlan, unarchivePlan, removePlan, onAct, formStatus, flowFromView, saveWith,
+      locSnap, locApplySnap, locRowClass, locCount,
       exportXlsx, exporting, exportLogMd, exportingLog, imp, impInput, pickImpFile, onImpFile, confirmImport, impAddedCount, impDupCount,
       MP_DEVICE_TYPES, MP_VOLTAGES, MP_WORK_TYPES, MP_GRID_RISKS, MP_RISK_LEVELS, MP_STATUS, MP_COLS
     };
@@ -744,18 +761,18 @@ const MonthPlansPanel = {
   template: `
   <div class="mp-wrap">
     <div class="plan-filters">
-      <el-select v-model="filters.areaStation" placeholder="属地供电所" clearable class="pf-select" @change="page=1">
+      <el-select v-model="filters.areaStation" :disabled="locateActive" placeholder="属地供电所" clearable class="pf-select" @change="page=1">
         <el-option v-for="o in areaOpts" :key="o" :label="o" :value="o" />
       </el-select>
-      <el-select v-model="filters.workType" placeholder="作业类型" clearable class="pf-select" @change="page=1">
+      <el-select v-model="filters.workType" :disabled="locateActive" placeholder="作业类型" clearable class="pf-select" @change="page=1">
         <el-option v-for="o in workTypeOpts" :key="o" :label="o" :value="o" />
       </el-select>
-      <el-select v-model="filters.leader" placeholder="班组长" clearable class="pf-select" style="width:104px" @change="page=1">
+      <el-select v-model="filters.leader" :disabled="locateActive" placeholder="班组长" clearable class="pf-select" style="width:104px" @change="page=1">
         <el-option v-for="o in leaderOpts" :key="o" :label="o" :value="o" />
       </el-select>
       <el-date-picker v-model="filters.startDate" type="date" placeholder="开始日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
       <el-date-picker v-model="filters.endDate" type="date" placeholder="结束日期" value-format="YYYY-MM-DD" class="pf-date" @change="page=1" />
-      <el-input v-model="filters.keyword" placeholder="关键词（项目/工作内容/检修设备）" clearable class="pf-input mp-kw" @input="page=1" />
+      <el-input v-model="filters.keyword" :disabled="locateActive" placeholder="关键词（项目/工作内容/检修设备）" clearable class="pf-input mp-kw" @input="page=1" />
       <span class="pf-actions-sep" />
       <div class="pf-actions">
         <el-button v-if="canWrite('plans') && !isArchived" type="primary" size="small" @click="openAdd">新增计划</el-button>

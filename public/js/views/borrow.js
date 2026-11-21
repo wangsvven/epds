@@ -38,7 +38,11 @@ const BorrowView = {
       try {
         const r = await api.get('/api/borrowWorks');
         list.value = Array.isArray(r) ? r : (r.data || []);
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+        if (loc && loc.st.active) loc.recompute();        // 定位期间刷新：同一批 ids 重算
+      } catch (e) {
+        ElementPlus.ElMessage.error(e.message);
+        if (loc) loc.refreshFailed();                     // 刷新失败：保留快照与上次结果
+      }
       finally { loading.value = false; }
     }
     async function loadOpts() {
@@ -71,6 +75,18 @@ const BorrowView = {
       return true;
     }));
     function reset() { Object.assign(filters, { unit: '', direction: '', signStatus: '', dateRange: null, keyword: '' }); }
+
+    /* ----- 首页「工作动态」定位（收窄 + 高亮，纯前端，不写库） ----- */
+    const loc = window.Locate.make({
+      nav: 'borrow', sub: '',
+      base: () => list.value,
+      snap: () => ({ f: JSON.parse(JSON.stringify(filters)) }),
+      restore: (s) => { Object.assign(filters, s.f); },
+      afterApply: () => { /* 无分页，无需切换 */ }
+    });
+    const locRows = computed(() => (loc.st.active && loc.st.total) ? list.value.filter(loc.hit) : filtered.value);
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    const locActive = computed(() => loc.st.active);
 
     function openAdd() { dlg.id = ''; dlg.editing = false; dlg.form = newForm(); dlg.visible = true; }
     function openEdit(row) {
@@ -217,8 +233,12 @@ const BorrowView = {
 
     // 切到余额页时重新拉取一次，保证与明细页数据同步（明细新增/编辑后 list 本身也会刷新）
     watch(tab, v => { if (v === 'balance') load(); });
-    onMounted(() => { load(); loadOpts(); });
-    onUnmounted(() => revokeThumbs());
+    onMounted(async () => {
+      await load();
+      loc.consume();
+      loadOpts();
+    });
+    onUnmounted(() => { revokeThumbs(); loc.dispose(); });
 
     return {
       list, loading, tab, filters, subOpts, unitOpts, allUnitOpts,
@@ -226,7 +246,8 @@ const BorrowView = {
       filtered, reset, dlg, openAdd, openEdit, submit, remove,
       evDlg, evInput, evRecord, evFiles, openEvidences, onEvidenceFile, previewEvidence, removeEvidence, revokeThumbs,
       hasGen, generate,
-      balanceRows, balanceScope, balanceStat, setBalanceScope, diffText, diffCls, fmtTime
+      balanceRows, balanceScope, balanceStat, setBalanceScope, diffText, diffCls, fmtTime,
+      loc, locRows, locRowClass, locActive
     };
   },
   template: `
@@ -237,27 +258,29 @@ const BorrowView = {
     </el-tabs>
 
     <template v-if="tab === 'detail'">
+      <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
       <div class="ct-toolbar">
         <el-button v-if="canWrite('borrow')" type="primary" size="small" @click="openAdd">新增借工</el-button>
       </div>
 
       <div class="wv-filters">
-        <el-select v-model="filters.unit" placeholder="往来单位" clearable filterable style="width:160px">
+        <el-select v-model="filters.unit" placeholder="往来单位" clearable filterable :disabled="locActive" style="width:160px">
           <el-option v-for="u in allUnitOpts" :key="u" :label="u" :value="u" />
         </el-select>
-        <el-select v-model="filters.direction" placeholder="方向" clearable style="width:130px">
+        <el-select v-model="filters.direction" placeholder="方向" clearable :disabled="locActive" style="width:130px">
           <el-option v-for="d in DIRECTIONS" :key="d" :label="d" :value="d" />
         </el-select>
-        <el-select v-model="filters.signStatus" placeholder="签单状态" clearable style="width:130px">
+        <el-select v-model="filters.signStatus" placeholder="签单状态" clearable :disabled="locActive" style="width:130px">
           <el-option v-for="s in SIGN_STATUS" :key="s" :label="s" :value="s" />
         </el-select>
-        <el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="用工起" end-placeholder="用工止" style="width:250px" />
-        <el-input v-model="filters.keyword" placeholder="项目名称 / 工作内容" clearable style="width:200px" />
-        <el-button @click="reset">重置</el-button>
+        <el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="用工起" end-placeholder="用工止" :disabled="locActive" style="width:250px" />
+        <el-input v-model="filters.keyword" placeholder="项目名称 / 工作内容" clearable :disabled="locActive" style="width:200px" />
+        <el-button :disabled="locActive" @click="reset">重置</el-button>
         <span class="bw-filter-count" style="margin-left:auto;font-size:13px;color:var(--text-3)">共 {{ filtered.length }} 条</span>
       </div>
 
-      <el-table :data="filtered" v-loading="loading" border stripe style="width:100%" empty-text="暂无数据">
+      <el-table :data="locRows" v-loading="loading" border stripe style="width:100%" empty-text="暂无数据"
+        :row-class-name="locRowClass">
         <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column label="日期" width="100">
           <template #default="{ row }">{{ (row.workDate || '').replace(/-/g, '.') }}</template>

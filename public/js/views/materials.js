@@ -5,6 +5,22 @@ const MaterialsView = {
   setup() {
     const { ref, reactive, computed, onMounted, watch, onUnmounted } = Vue;
     const tab = ref('detail');
+    // 首页动态定位：容器只 peek pending（按 sub 定页签），不清除；叶子挂载后自己消费
+    let locTab = '';
+    function locPeekTab() {
+      const p = window.Locate.pending();
+      if (!p || p.nav !== 'materials') return;
+      tab.value = p.sub === 'requisition' ? 'requisition' : (p.sub === 'outbound-orders' ? 'outbound' : 'detail');
+      locTab = tab.value;
+    }
+    locPeekTab();   // setup 阶段就定好，首帧即渲染正确的叶子
+    // 用户手动切页签离开被定位的列表 → 失效结束（不恢复快照）
+    function onTabLocate(name) {
+      if (window.Locate.pending()) return;                 // 刚发起、尚未消费：不打断
+      if (locTab && name !== locTab) window.Locate.end('leave');
+    }
+    window.addEventListener('locate-new', locPeekTab);
+    Vue.onUnmounted(() => window.removeEventListener('locate-new', locPeekTab));
     const list = ref([]);
     const projects = ref([]);
     const loading = ref(false);
@@ -29,7 +45,8 @@ const MaterialsView = {
         const [ms, ps, os] = await Promise.all([api.get('/api/materials'), api.get('/api/projects'), api.get('/api/materialOutbound/orders').catch(() => [])]);
         list.value = ms; projects.value = ps;
         outOrders.value = Array.isArray(os) ? os : [];
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+        if (loc && loc.st.active) loc.recompute();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { loading.value = false; }
     }
     // 出库记录映射：materialId → 有效出库单数（已作废不计），用于材料明细「有出库记录」标识
@@ -142,7 +159,23 @@ const MaterialsView = {
     // 材料明细分页：20/50/100/200，默认 50
     const detailPage = ref(1);
     const detailPageSize = ref(50);
-    const detailPaged = computed(() => filtered.value.slice((detailPage.value - 1) * detailPageSize.value, detailPage.value * detailPageSize.value));
+    /* ----- 首页「工作动态」定位（材料动态）：基础集合 = 有权限可见的材料全集，绕开列筛选 ----- */
+    const loc = window.Locate.make({
+      nav: 'materials', sub: 'detail',
+      base: () => list.value.filter(m => allowedNames.value.includes(m.project)),
+      snap: () => ({ col: JSON.parse(JSON.stringify(colFilters)) }),
+      restore: (sn) => { Object.keys(colFilters).forEach(k => { colFilters[k] = sn.col[k]; }); },
+      afterApply: () => { detailPage.value = 1; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    const detailPaged = computed(() => {
+      if (loc.st.active && loc.st.total) {
+        const rows = list.value.filter(m => allowedNames.value.includes(m.project) && loc.hit(m));
+        return rows.slice((detailPage.value - 1) * detailPageSize.value, detailPage.value * detailPageSize.value);
+      }
+      return filtered.value.slice((detailPage.value - 1) * detailPageSize.value, detailPage.value * detailPageSize.value);
+    });
     watch(() => [filters.stage, filters.category, filters.importState, filters.project, filters.status, filters.keyword], () => { detailPage.value = 1; });
     watch(detailPageSize, () => { detailPage.value = 1; });
     const sumRequired = computed(() => filtered.value.reduce((s, m) => s + (Number(m.qtyRequired) || 0), 0));
@@ -433,12 +466,12 @@ const MaterialsView = {
     }
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
-      projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
+      projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, loc, locActive, locRowClass, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
       load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, genSaving, gToday, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, idlg, previewImport, doImport, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
   },
   template: `
   <div>
-    <el-tabs v-model="tab">
+    <el-tabs v-model="tab" @tab-change="onTabLocate">
       <el-tab-pane label="材料明细" name="detail" />
       <el-tab-pane label="领料单" name="requisition" />
       <el-tab-pane label="导入批次" name="import" />
@@ -503,7 +536,8 @@ const MaterialsView = {
         </div>
       </div>
 
-      <el-table ref="mainTable" :data="detailPaged" row-key="id" v-loading="loading" class="mat-table" style="width:100%" @selection-change="onSel">
+      <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+      <el-table ref="mainTable" :data="detailPaged" row-key="id" v-loading="loading" class="mat-table" style="width:100%" :row-class-name="locRowClass" @selection-change="onSel">
         <el-table-column type="selection" width="46" reserve-selection :selectable="canSelect" />
         <el-table-column prop="project" min-width="176">
           <template #header><div class="th-inner"><span>项目名称</span>
@@ -672,7 +706,7 @@ const MaterialsView = {
         <template #footer>
           <el-button @click="stagingVisible=false">关 闭</el-button>
           <el-button type="danger" plain @click="clearStaging">清 空</el-button>
-          <el-button type="primary" :loading="genSaving" @click="genRequisition">生成领料单</el-button>
+          <el-button type="primary" :loading="genSaving" :disabled="locActive" :title="locActive ? '定位期间不可用，清除定位后使用' : ''" @click="genRequisition">生成领料单</el-button>
         </template>
       </el-dialog>
 
@@ -864,11 +898,13 @@ const Requisitions = {
       loading.value = true;
       try {
         list.value = await api.get('/api/materialRequisitions');
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+        if (loc && loc.st.active) loc.recompute();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { loading.value = false; }
     }
     onMounted(async () => {
-      load();
+      await load();
+      loc.consume();
       try {
         const ps = await api.get('/api/projects');
         const names = [];
@@ -877,6 +913,7 @@ const Requisitions = {
       } catch (e) {}
       window.addEventListener('requisitions-refresh', load);
     });
+    onUnmounted(() => loc.dispose());
     // 列表排序用的「今天」：服务端业务日期（ServerTime.ymd() 由 /api/server-time 校准，与后端 todayBizDate() 同源）
     const sortToday = () => ((window.ServerTime && ServerTime.ymd) ? ServerTime.ymd() : new Date().toISOString().slice(0, 10));
     const filtered = computed(() => {
@@ -892,6 +929,17 @@ const Requisitions = {
     // 当天组置顶（单号日期段 == 今天）→ 其余按日期升序 → 同日内 流水组（数字后缀）按数值升序 → 6 位时间后缀组按值升序 → 无法识别的排最后
     // 定版格式 LL-YYYYMMDD-NNN；解析同时接受无 LL- 前缀的历史测试期写法。
     function resetFilters() { filters.project = ''; filters.status = ''; filters.keyword = ''; }
+
+    /* ----- 首页「工作动态」定位（领料动态）：绕开业务筛选，收窄 + 高亮 ----- */
+    const loc = window.Locate.make({
+      nav: 'materials', sub: 'requisition',
+      base: () => list.value,
+      snap: () => ({ f: { project: filters.project, status: filters.status, keyword: filters.keyword } }),
+      restore: (sn) => { filters.project = sn.f.project; filters.status = sn.f.status; filters.keyword = sn.f.keyword; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const locRows = computed(() => (loc.st.active && loc.st.total) ? list.value.filter(loc.hit) : filtered.value);
+    const rowClassAll = (o) => [rowClass(o), loc.hit(o.row) ? 'loc-row' : ''].filter(Boolean).join(' ');
     function sumQty(r) { return r.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); }
     // 列表「物料描述」列：只取物料名称主体，去掉型号 / 规格，多物料按明细顺序去重
     function matNames(r) { return window.MatName.list(r.items); }
@@ -1054,7 +1102,7 @@ const Requisitions = {
     function arrivedSum(rec, materialId) {
       return itemHistory(rec, materialId).reduce((s, h) => s + (Number(h.thisQty) || 0), 0);
     }
-    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, chipStyle, totalChips, totalChipsLabel, thisQtyChips, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
+    return { list, loading, filters, projectOptions, dlg, vdlg, filtered, load, resetFilters, sumQty, matNames, fmtQty, statusType, chipStyle, totalChips, totalChipsLabel, thisQtyChips, download, openConfirm, openSupplement, rowFlag, supDone, rowClass, rowClassAll, loc, locActive, locRows, onModeChange, qtyInput, doConfirm, voidReq, voidDeduct, confirmVoid, deleteReq, stockInfo, stockReason, itemHistory, arrivedSum, todayStr, oldLimit30 };
   },
   template: `
   <div>
@@ -1064,16 +1112,17 @@ const Requisitions = {
       <el-button @click="load">刷新领料单</el-button>
     </div>
     <div class="toolbar">
-      <el-select v-model="filters.project" placeholder="全部项目" clearable filterable style="width:220px">
+      <el-select v-model="filters.project" placeholder="全部项目" clearable filterable :disabled="locActive" style="width:220px">
         <el-option v-for="n in projectOptions" :key="n" :label="n" :value="n" />
       </el-select>
-      <el-select v-model="filters.status" placeholder="全部状态" clearable style="width:130px">
+      <el-select v-model="filters.status" placeholder="全部状态" clearable :disabled="locActive" style="width:130px">
         <el-option label="待入库" value="待入库" /><el-option label="部分到库" value="部分到库" /><el-option label="已入库" value="已入库" /><el-option label="已作废" value="已作废" />
       </el-select>
-      <el-input v-model="filters.keyword" placeholder="搜索领料单号、文件名" style="width:220px" clearable @keyup.enter="load" />
-      <el-button @click="resetFilters">重 置</el-button>
+      <el-input v-model="filters.keyword" placeholder="搜索领料单号、文件名" style="width:220px" clearable :disabled="locActive" @keyup.enter="load" />
+      <el-button :disabled="locActive" @click="resetFilters">重 置</el-button>
     </div>
-    <el-table :data="filtered" v-loading="loading" border style="width:100%" class="rq-main" :row-class-name="rowClass">
+    <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+    <el-table :data="locRows" v-loading="loading" border style="width:100%" class="rq-main" :row-class-name="rowClassAll">
       <el-table-column type="expand">
         <template #default="{row}">
           <div class="rq-exp">
@@ -1576,7 +1625,8 @@ const Outbounds = {
         const r2 = await api.get('/api/materialOutbound/orders' + (project.value ? '?project=' + encodeURIComponent(project.value) : ''));
         orders.value = Array.isArray(r2) ? r2 : (r2.data || []);
         if (project.value) await loadLinks();
-      } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { loading.value = false; }
+        if (loc && loc.st.active) loc.recompute();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); } finally { loading.value = false; }
     }
     // 关联候选（计划）—— 量小，随工程加载一并拉取；失败静默（关联是可选项）
     async function loadLinks() {
@@ -1725,6 +1775,7 @@ const Outbounds = {
     function focusMaterial(e) {
       const d = e.detail || {};
       if (!d.id) return;
+      if (loc && loc.st.active) return;    // 定位与材料聚焦互斥：定位期间忽略聚焦事件
       if (d.project) project.value = d.project;
       matFilter.value = { id: d.id, description: d.description, code: d.code };
       oKeyword.value = '';
@@ -1733,7 +1784,8 @@ const Outbounds = {
       if (project.value) load();
     }
     window.addEventListener('outbounds-focus-material', focusMaterial);
-    onUnmounted(() => window.removeEventListener('outbounds-focus-material', focusMaterial));
+    onMounted(async () => { await load(); loc.consume(); });
+    onUnmounted(() => { window.removeEventListener('outbounds-focus-material', focusMaterial); loc.dispose(); });
     const ofiltered = computed(() => {
       let arr = orders.value;
       // 单据状态：默认「全部」＝全量显示（含作废单）；可切「已出库（有效）」或「已作废」
@@ -1744,7 +1796,26 @@ const Outbounds = {
       if (k) arr = arr.filter(o => String(o.outNo || '').includes(k) || String(o.project || '').includes(k) || String(o.receiver || '').includes(k));
       return arr;
     });
-    const opaged = computed(() => ofiltered.value.slice((opage.value - 1) * opageSize.value, opage.value * opageSize.value));
+    /* ----- 首页「工作动态」定位（出库动态）：落 orders 页签，绕开项目总控/状态/关键词/材料聚焦 ----- */
+    const loc = window.Locate.make({
+      nav: 'materials', sub: 'outbound-orders',
+      base: () => orders.value,
+      snap: () => ({ tab: tab.value, project: project.value, st: oStatus.value, kw: oKeyword.value, mf: matFilter.value, page: opage.value }),
+      restore: (sn) => {
+        project.value = sn.project; oStatus.value = sn.st; oKeyword.value = sn.kw;
+        matFilter.value = sn.mf; opage.value = sn.page; tab.value = sn.tab;
+      },
+      afterApply: () => { tab.value = 'orders'; opage.value = 1; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    const opaged = computed(() => {
+      if (loc.st.active && loc.st.total) {
+        const rows = orders.value.filter(loc.hit);
+        return rows.slice((opage.value - 1) * opageSize.value, opage.value * opageSize.value);
+      }
+      return ofiltered.value.slice((opage.value - 1) * opageSize.value, opage.value * opageSize.value);
+    });
     // 未选工程也可看「全部工程」的出库单：进入出库单页签时按需取数（选工程时由 onProjectChange 取）
     watch(tab, (nv) => { if (nv === 'orders' && !project.value && !orders.value.length) load(); });
     // 出库单行汇总：累计领取/累计归还/补回数量/净出库（作废单已补回，净出库为 0）
@@ -1871,7 +1942,7 @@ const Outbounds = {
       setTimeout(() => iframe.remove(), 60000);
     }
     onMounted(() => { loadMeta(); if (window.__obFocusMaterial) { const d = window.__obFocusMaterial; delete window.__obFocusMaterial; focusMaterial({ detail: d }); } });
-    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selMap, selCount, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSelect, onSelectAll, isSelected, showZero, openDlg, dlg, asofState, asofOf, asofAvail, rowState, rowStateText, rowStyleOf, qtyMaxOf, canSubmitOut, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions };
+    return { tab, f1, f2, f3, project, keyword, projects, workers, loadImportMap, list, orders, loading, selMap, selCount, outQty, mainTable, page, pageSize, opage, opageSize, paged, opaged, filtered, ofiltered, matFilter, oStatus, oKeyword, load, onProjectChange, onSelect, onSelectAll, isSelected, showZero, openDlg, dlg, asofState, asofOf, asofAvail, rowState, rowStateText, rowStyleOf, qtyMaxOf, canSubmitOut, submitOut, od, openOrder, bizToday, oldLimit30, onWorkDateChange, outDateFallbackNow, needOutReason, rdlg, openReturn, submitReturn, vdlg, openVoid, confirmVoid, deleteOrder, deleteVoided, printOrder, printRow, doPrint, pdlg, showMatOrders, clearMatFilter, chip, fmt, fmt4, sumQty, remaining, oTake, oReturned, oCompensated, oNet, oRows, oTakeM, oReturnedM, oCompensatedM, oNetM, planOptions, loc, locActive, locRowClass };
   },
   template: `
   <div>
@@ -1954,7 +2025,8 @@ const Outbounds = {
           <el-input v-model="oKeyword" placeholder="搜索出库编号、工程、领取人" style="width:280px" clearable @keyup.enter="load" />
           <el-button type="primary" @click="load">搜索</el-button>
         </div>
-        <el-table :data="opaged" v-loading="loading" border style="width:100%">
+        <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+        <el-table :data="opaged" v-loading="loading" border style="width:100%" :row-class-name="locRowClass">
             <el-table-column prop="outNo" label="出库单号" width="200" />
             <el-table-column prop="project" label="工程" min-width="240" show-overflow-tooltip />
             <el-table-column prop="receiver" label="领取人" width="100" />

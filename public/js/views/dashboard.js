@@ -42,12 +42,21 @@ const Dashboard = {
         alertCount.value = feed.alertCount;
       } catch (e) { messages.value = []; alertCount.value = 0; }
     }
-    // 点击只导航到对应模块列表页；预警/人员动态落到「用户管理 · 作业人员名单」，
+    // 点击：写定位 pending（命中 ids + 落点 sub）并导航；预警/人员动态落到「用户管理 · 作业人员名单」，
     // 并显式清掉上一批的 __pendingFocusWorker，确保不再直开某人的编辑弹窗。
+    // 序号在此 +1（本次定位的身份）；同页（已在该模块）时再发 locate-new 让已挂载的叶子替换展示。
     function goTo(m) {
       window.__pendingUsersTab = m.usersTab || '';
       window.__pendingFocusWorker = null;
+      window.Locate.bump();
+      window.__pendingLocate = {
+        seq: window.Locate.seq(), nav: m.nav, sub: m.sub || '',
+        ids: (m.ids || []).slice(), kind: m.kind, label: m.label,
+        day: m.day || '', text: m.text || ''
+      };
+      const sameRoute = (window.__erpRoute || '') === m.nav;
       window.dispatchEvent(new CustomEvent('nav-to', { detail: m.nav }));
+      if (sameRoute) window.Locate.notifyNew();
     }
     onMounted(load);
     return { stats, me, messages, alertCount, goTo };

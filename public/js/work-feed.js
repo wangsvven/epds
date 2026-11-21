@@ -6,7 +6,10 @@
  *  - todayStr 一律由调用方按北京时间传 YYYY-MM-DD（ServerTime.ymd()），便于单测注入任意「今天」。
  *  - 时间戳两种形态：createdAt 是 UTC ISO（需 +8h 转北京自然日）；importedAt / exitedAt 是
  *    北京时间 'YYYY-MM-DD HH:mm[:ss]' 字符串（前 10 位即北京自然日）。
- *  - 输出消息 = { kind, label, nav, day, text[, order] }；kind 同时驱动标签配色。
+ *  - 输出消息 = { kind, label, nav, day, text[, order][, usersTab][, ids][, sub] }；kind 同时驱动标签配色。
+ *  - ids：该消息命中的记录 id 数组（去重、无空值），仅供首页「跳转定位」使用，不渲染、不落库；
+ *    sub：落点细分（users → 'workers'；materials → 'detail' | 'requisition' | 'outbound-orders'）。
+ *    文案里的计数与 ids 数量口径不同（如材料动态的「录入行数」≠ 新增 id 数），不要求相等。
  */
 (function () {
   var TECH_IDENTITY = '技工（计入高处作业人员）';   // 已裁定：只有精确等于该值才算「技工」
@@ -43,6 +46,17 @@
     var from = shiftDay(today, -2);
     return !!from && day >= from && day <= today;
   }
+  /* id 卫生：去重（统一按 String 比较）、剔除空值。所有来源输出前都过这一道。 */
+  function uniqIds(list) {
+    var seen = {}, out = [];
+    (list || []).forEach(function (v) {
+      if (v === null || v === undefined) return;
+      var k = String(v);
+      if (!k || seen[k]) return;
+      seen[k] = 1; out.push(k);
+    });
+    return out;
+  }
   /* 点名排序：技工优先，同组内按 timeKey 升序，再按姓名稳定收尾。 */
   function techFirst(list, timeKey) {
     return (list || []).slice().sort(function (a, b) {
@@ -71,8 +85,9 @@
     else if (n <= 3) who = ordered.slice(0, n).map(function (x) { return x.name; }).join('、');
     else who = ordered.slice(0, 3).map(function (x) { return x.name; }).join('、') + ' 等' + n + '人';
     return {
-      kind: 'alert', label: '准入预警', nav: 'users', usersTab: 'workers', day: '',
-      text: who + '准入有效期已到期或即将到期，请及时续期'
+      kind: 'alert', label: '准入预警', nav: 'users', usersTab: 'workers', sub: 'workers', day: '',
+      text: who + '准入有效期已到期或即将到期，请及时续期',
+      ids: uniqIds((alerts || []).map(function (a) { return a && a.id; }))
     };
   }
 
@@ -98,8 +113,9 @@
       var e = byDay[day], label = dayLabel(day, today);
       if (e.joined.length) {
         out.push({
-          kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers', day: day, order: 0,
-          text: label + '新增作业人员 ' + e.joined.length + ' 人'
+          kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers', sub: 'workers', day: day, order: 0,
+          text: label + '新增作业人员 ' + e.joined.length + ' 人',
+          ids: uniqIds(e.joined.map(function (x) { return x.id; }))
         });
       }
       if (e.left.length) {
@@ -109,8 +125,9 @@
           ? arr.map(function (x) { return x.name; }).join('、')
           : arr.slice(0, 3).map(function (x) { return x.name; }).join('、') + '等' + n + '人';
         out.push({
-          kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers', day: day, order: 1,
-          text: label + who + '已退场'
+          kind: 'person', label: '人员动态', nav: 'users', usersTab: 'workers', sub: 'workers', day: day, order: 1,
+          text: label + who + '已退场',
+          ids: uniqIds(arr.map(function (x) { return x.id; }))
         });
       }
     });
@@ -123,7 +140,7 @@
   function materialMessages(imports, materials, today) {
     var byDay = {};
     function slot(day) {
-      return byDay[day] || (byDay[day] = { rowsTotal: 0, added: 0, manual: 0, hasBatch: false });
+      return byDay[day] || (byDay[day] = { rowsTotal: 0, added: 0, manual: 0, hasBatch: false, ids: [] });
     }
     (imports || []).forEach(function (b) {
       if (!b || b.deleted) return;
@@ -133,20 +150,24 @@
       e.hasBatch = true;
       e.rowsTotal += Number(b.rowsTotal) || 0;
       e.added += Array.isArray(b.materialIds) ? b.materialIds.length : (Number(b.rows) || 0);
+      if (Array.isArray(b.materialIds)) e.ids = e.ids.concat(b.materialIds);
     });
     (materials || []).forEach(function (m) {
       if (!m || m.deleted || m.importId) return;
       var day = bjDay(m.createdAt);
       if (!inWindow(day, today)) return;
-      slot(day).manual += 1;
+      var s2 = slot(day);
+      s2.manual += 1;
+      s2.ids.push(m.id);
     });
     return Object.keys(byDay).map(function (day) {
       var e = byDay[day], label = dayLabel(day, today);
       return {
-        kind: 'material', label: '材料动态', nav: 'materials', day: day,
+        kind: 'material', label: '材料动态', nav: 'materials', sub: 'detail', day: day,
         text: e.hasBatch
           ? label + '录入材料 ' + e.rowsTotal + ' 条，新增 ' + e.added + ' 条'
-          : label + '新增材料 ' + e.manual + ' 条'
+          : label + '新增材料 ' + e.manual + ' 条',
+        ids: uniqIds(e.ids)
       };
     });
   }
@@ -160,8 +181,9 @@
       if (!inWindow(day, today)) return;
       var t = String(p.planType || '');
       if (t !== '周计划' && t !== '月计划') return;
-      var e = byDay[day] || (byDay[day] = {});
+      var e = byDay[day] || (byDay[day] = { ids: { } });
       e[t] = (e[t] || 0) + 1;
+      (e.ids[t] = e.ids[t] || []).push(p.id);
     });
     var out = [];
     Object.keys(byDay).forEach(function (day) {
@@ -170,7 +192,8 @@
         if (!byDay[day][t]) return;
         out.push({
           kind: 'plan', label: '计划动态', nav: 'plans', day: day, order: i,
-          text: label + '新增' + t + ' ' + byDay[day][t] + ' 条'
+          text: label + '新增' + t + ' ' + byDay[day][t] + ' 条',
+          ids: uniqIds(byDay[day].ids[t])
         });
       });
     });
@@ -184,12 +207,14 @@
       if (!b || b.deleted) return;
       var day = bjDay(b.createdAt);
       if (!inWindow(day, today)) return;
-      byDay[day] = (byDay[day] || 0) + 1;
+      var e = byDay[day] || (byDay[day] = { n: 0, ids: [] });
+      e.n += 1; e.ids.push(b.id);
     });
     return Object.keys(byDay).map(function (day) {
       return {
         kind: 'borrow', label: '借工动态', nav: 'borrow', day: day,
-        text: dayLabel(day, today) + '新增借工记录 ' + byDay[day] + ' 条'
+        text: dayLabel(day, today) + '新增借工记录 ' + byDay[day].n + ' 条',
+        ids: uniqIds(byDay[day].ids)
       };
     });
   }
@@ -208,13 +233,17 @@
       }
       var day = bjDay(raw);
       if (!inWindow(day, today)) return;
-      byDay[day] = (byDay[day] || 0) + 1;
+      var e = byDay[day] || (byDay[day] = { n: 0, ids: [] });
+      e.n += 1; e.ids.push(x.id);
     });
     return Object.keys(byDay).map(function (day) {
-      return {
+      var msg = {
         kind: cfg.kind, label: cfg.label, nav: cfg.nav, day: day,
-        text: dayLabel(day, today) + '新增' + cfg.noun + ' ' + byDay[day] + ' ' + cfg.unit
+        text: dayLabel(day, today) + '新增' + cfg.noun + ' ' + byDay[day].n + ' ' + cfg.unit,
+        ids: uniqIds(byDay[day].ids)
       };
+      if (cfg.sub) msg.sub = cfg.sub;
+      return msg;
     });
   }
   /* ---------- 来源六～十：项目 / 领料单 / 出库单 / 实际工作量 / 竣工资料 ----------
@@ -223,10 +252,10 @@
     return createdMessages(list, today, { kind: 'project', label: '项目动态', nav: 'projects', noun: '项目', unit: '个' });
   }
   function requisitionMessages(list, today) {
-    return createdMessages(list, today, { kind: 'requisition', label: '领料动态', nav: 'materials', noun: '领料单', unit: '张' });
+    return createdMessages(list, today, { kind: 'requisition', label: '领料动态', nav: 'materials', sub: 'requisition', noun: '领料单', unit: '张' });
   }
   function outboundMessages(list, today) {
-    return createdMessages(list, today, { kind: 'outbound', label: '出库动态', nav: 'materials', noun: '出库单', unit: '张' });
+    return createdMessages(list, today, { kind: 'outbound', label: '出库动态', nav: 'materials', sub: 'outbound-orders', noun: '出库单', unit: '张' });
   }
   function workMessages(list, today) {
     // 施工量历史记录只有 submittedAt（北京时间串），新记录两者都有；createdAt 优先
@@ -280,7 +309,7 @@
   }
 
   var api = {
-    TECH_IDENTITY: TECH_IDENTITY, bjDay: bjDay, shiftDay: shiftDay,
+    TECH_IDENTITY: TECH_IDENTITY, uniqIds: uniqIds, bjDay: bjDay, shiftDay: shiftDay,
     dayLabel: dayLabel, inWindow: inWindow, techFirst: techFirst,
     alertMessage: alertMessage, personMessages: personMessages,
     materialMessages: materialMessages, planMessages: planMessages,

@@ -18,6 +18,156 @@ const MENU_ICONS = {
   init: _ico('<path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7z"/><path d="M18.3 15.6l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/>')
 };
 
+/* ===== 首页「工作动态」跳转定位通道 =====
+ * 单槽 pending + 全局序号；序号只由「用户动作」推进：① 点动态发起新定位 ② 菜单导航
+ * ③ 清除定位 ④ 用户主动切离被定位的列表。**组件卸载不动序号**（否则旧页面一卸载就会
+ * 误杀刚写入的新定位）。清除类动作必须先核对所有权（seq）后清。
+ * 事件：locate-new（同页替换，已挂载叶子重新消费）/ locate-end（失效或清除，reason 区分）。 */
+window.__locateSeq = window.__locateSeq || 0;
+window.__pendingLocate = window.__pendingLocate || null;
+window.__erpRoute = window.__erpRoute || '';
+window.Locate = {
+  seq: function () { return window.__locateSeq || 0; },
+  bump: function () { window.__locateSeq = this.seq() + 1; return window.__locateSeq; },
+  pending: function () { return window.__pendingLocate || null; },
+  // 核对所有权后取走；seq 不符（已有更新的定位）一律不清，交给新会话
+  take: function (seq) {
+    var p = window.__pendingLocate;
+    if (!p) return null;
+    if (seq !== undefined && p.seq !== seq) return null;
+    window.__pendingLocate = null;
+    return p;
+  },
+  drop: function (seq) {
+    var p = window.__pendingLocate;
+    if (!p) return true;
+    if (seq !== undefined && p.seq !== seq) return false;
+    window.__pendingLocate = null;
+    return true;
+  },
+  // 失效结束 / 清除：序号 +1、丢弃 pending、立即通知已挂载组件（reason: menu|clear|leave）
+  end: function (reason) {
+    var s = this.bump();
+    window.__pendingLocate = null;
+    window.dispatchEvent(new CustomEvent('locate-end', { detail: { seq: s, reason: reason || 'leave' } }));
+    return s;
+  },
+  // 同页替换：pending 已写好（序号已+1），通知已挂载叶子重新消费；不再推进序号
+  notifyNew: function () {
+    window.dispatchEvent(new CustomEvent('locate-new', { detail: { seq: this.seq() } }));
+  },
+  idsSet: function (ids) {
+    var set = new Set();
+    (ids || []).forEach(function (x) {
+      if (x === null || x === undefined) return;
+      var k = String(x);
+      if (k) set.add(k);
+    });
+    return set;
+  },
+  /* 通用定位会话工厂：各列表页只需提供 base()/snap()/restore()/groupOf()，
+   * 命中计算、快照时序（首次存/替换沿用）、零命中与失败态、事件监听都在这里统一实现。 */
+  make: function (cfg) {
+    var st = reactive({
+      active: false, seq: 0, text: '', total: 0, missing: 0, failed: false, refreshFailed: false,
+      group: '', groups: [], set: null, snap: null
+    });
+    function hit(x) { return !!(st.active && st.set && x && st.set.has(String(x.id))); }
+    function takeSnap() { if (!st.snap) st.snap = cfg.snap(); }
+    function restoreSnap() { if (st.snap) { cfg.restore(st.snap); st.snap = null; } }
+    function countGroups(hits) {
+      if (!cfg.groupOf) return { groups: [], group: '' };
+      var map = {}, order = cfg.groups || [];
+      hits.forEach(function (x) { var g = cfg.groupOf(x); if (g) map[g] = (map[g] || 0) + 1; });
+      var groups = order.filter(function (g) { return map[g]; })
+        .map(function (g) { return { key: g, label: (cfg.groupLabel ? cfg.groupLabel(g) : g), n: map[g] }; });
+      return { groups: groups, group: groups.length ? groups[0].key : '' };
+    }
+    function afterApply(hits) {
+      var g = countGroups(hits);
+      st.groups = g.groups; st.group = g.group;
+      if (cfg.afterApply) cfg.afterApply(hits, g.group);
+    }
+    function apply(p) {
+      var set = window.Locate.idsSet(p.ids);
+      var hits = cfg.base().filter(function (x) { return set.has(String(x.id)); });
+      st.text = p.text || ''; st.seq = p.seq || 0; st.failed = false; st.refreshFailed = false;
+      if (!hits.length) {
+        // 零命中：首次不动展示；同页替换则先撤旧展示并恢复最初快照（补充一）
+        if (st.active) { restoreSnap(); st.set = null; }
+        st.active = true; st.total = 0; st.missing = set.size; st.groups = []; st.group = '';
+        if (cfg.onZero) cfg.onZero('initial', set);
+        return;
+      }
+      takeSnap();                         // 首次进入才落快照；替换沿用第一份
+      st.set = set; st.active = true; st.total = hits.length;
+      st.missing = Math.max(0, set.size - hits.length);
+      afterApply(hits);
+    }
+    function consume() {
+      var p = window.Locate.pending();
+      if (!p || p.nav !== cfg.nav) return false;
+      if ((p.sub || '') !== (cfg.sub || '')) return false;      // 落点细分不符：不消费、不清
+      if (p.seq !== window.Locate.seq()) { window.Locate.drop(p.seq); return false; }  // 迟到：只清自己的
+      window.Locate.take(p.seq);
+      if (cfg.onFirst) cfg.onFirst(p);
+      apply(p);
+      return true;
+    }
+    // 数据刷新后按同一批 ids 重算；归零 → 恢复快照后再显示零命中横幅（三.4 第 6 步）
+    function recompute() {
+      if (!st.active || !st.set) return;
+      var hits = cfg.base().filter(hit);
+      st.total = hits.length;
+      st.missing = Math.max(0, st.set.size - hits.length);
+      if (!hits.length) {
+        restoreSnap(); st.set = null; st.groups = []; st.group = '';
+        if (cfg.onZero) cfg.onZero('refresh', null);
+        return;
+      }
+      afterApply(hits);
+      if (cfg.afterRecompute) cfg.afterRecompute(hits);
+    }
+    // 刷新失败：保留快照与上次成功结果，只提示（补充三）
+    function refreshFailed() { if (st.active) { st.refreshFailed = true; } }
+    function pick(key) {
+      if (!st.active || !key || key === st.group) return;
+      st.group = key;
+      if (cfg.onPick) cfg.onPick(key);
+    }
+    function clear() {
+      if (!st.active) return;
+      restoreSnap();
+      st.active = false; st.set = null; st.groups = []; st.group = ''; st.refreshFailed = false; st.failed = false;
+      window.Locate.end('clear');
+    }
+    function exit() {
+      // 失效结束（菜单/切离/新定位接管）：直接结束，不恢复快照
+      st.active = false; st.set = null; st.groups = []; st.group = ''; st.refreshFailed = false; st.failed = false; st.snap = null;
+    }
+    function fail() {
+      // 加载失败：不存快照、不改展示（首次）；若已有会话则保留上次结果
+      st.failed = true;
+      if (!st.snap) { st.active = true; st.total = 0; }
+    }
+    function onEnd(e) {
+      if (!st.active) return;
+      var reason = e && e.detail && e.detail.reason;
+      if (reason === 'clear') return;         // 自己发起的清除已在 clear() 内处理
+      exit();
+    }
+    function onNew() { if (!st.failed) consume(); }
+    window.addEventListener('locate-end', onEnd);
+    window.addEventListener('locate-new', onNew);
+    function dispose() {
+      window.removeEventListener('locate-end', onEnd);
+      window.removeEventListener('locate-new', onNew);
+    }
+    return { st: st, hit: hit, apply: apply, consume: consume, recompute: recompute, refreshFailed: refreshFailed,
+      pick: pick, clear: clear, exit: exit, fail: fail, dispose: dispose };
+  }
+};
+
 /* ========== 全局「星期开始于」共享状态 ==========
  * settings.weekStart：0-6（JS getDay 口径，0=星期日、1=星期一、…、6=星期六）。
  * 未设置/非法 → 视为 1（星期一）。全应用的日历（自研 PlanDateTime + Element Plus 日期选择器）都跟随它。
@@ -171,19 +321,26 @@ const App = {
     }
     function logout() { localStorage.removeItem('erp_token'); Auth.loaded = false; Auth.isAdmin = false; Auth.writeModules = []; token.value = ''; location.reload(); }
     // 页面跳转：移动端自动收起抽屉；未完成初始化时，除「文档中心/全局设置/用户管理」外一律转跳回初始化向导
-    function go(key) {
+    function go(key, opts) {
       if (initMode.value && !INIT_ALLOWED.includes(key)) {
         route.value = 'init';
         if (typeof window !== 'undefined' && window.innerWidth < 768) collapsed.value = true;
         ElementPlus.ElMessage.info('请先完成系统初始化设置');
         return;
       }
+      // 菜单导航（含项目详情跳转）＝用户主动接管：先递增序号，再无条件丢弃定位 pending，
+      // 并立即通知已挂载组件结束定位（同路由再次进入也必须清掉旧定位）。
+      // 首页「工作动态」的 nav-to 走 opts.fromFeed，保留它刚写好的 pending。
+      if (!(opts && opts.fromFeed)) window.Locate.end('menu');
       route.value = key;
       if (typeof window !== 'undefined' && window.innerWidth < 768) collapsed.value = true;
     }
 
     // 安全网：任何非经 go() 直接修改 route 的路径，未初始化时若落在受限页面，强制转跳
-    watch(route, (v) => { if (initMode.value && !INIT_ALLOWED.includes(v)) route.value = 'init'; });
+    watch(route, (v) => {
+      window.__erpRoute = v;
+      if (initMode.value && !INIT_ALLOWED.includes(v)) route.value = 'init';
+    });
     // 星期开始于：设置变更时同步到 Element Plus 日期选择器（dayjs locale weekStart），下次打开即生效
     watch(() => WeekStart.value, (v) => applyWeekStartToDayjs(v));
     // 初始化完成：放行业务页面并进入首页（不依赖 fetchMe 异步时序）
@@ -209,7 +366,7 @@ const App = {
       // 跨模块跳转同样受初始化守卫约束：未初始化时业务页面一律转跳初始化向导
       function navMaterials() { go('materials'); }
       function navPlans() { go('plans'); }
-      function navTo(e) { go(e.detail); }
+      function navTo(e) { go(e.detail, { fromFeed: true }); }
       window.addEventListener('nav-materials', navMaterials);
       window.addEventListener('nav-plans', navPlans);
       window.addEventListener('nav-to', navTo);
@@ -317,6 +474,25 @@ const App = {
 const app = createApp(App);
 
 // 全局权限助手：各组件模板可直接用 canWrite('模块') / canAdmin()
+const LocBanner = {
+  props: { st: { type: Object, required: true } },
+  emits: ['clear', 'pick'],
+  template: `
+  <div v-if="st.active" class="loc-bar" :class="{ 'is-fail': st.failed, 'is-zero': !st.failed && !st.total }">
+    <span v-if="st.failed">定位数据未能加载</span>
+    <span v-else>来自工作动态：{{ st.text }}</span>
+    <template v-if="!st.failed && st.total">
+      <span>· 当前找到 <b>{{ st.total }}</b> 条</span>
+      <span v-if="st.missing">，另有 {{ st.missing }} 条未找到</span>
+    </template>
+    <span v-else-if="!st.failed">· 未找到对应记录，可能已删除或状态已变化</span>
+    <span v-if="st.refreshFailed" class="loc-warn">刷新失败，当前显示上次成功结果</span>
+    <span v-for="g in st.groups" :key="g.key" class="loc-chip" :class="{ 'is-on': st.group === g.key }"
+      @click="$emit('pick', g.key)">{{ g.label }} <b>{{ g.n }}</b></span>
+    <span class="loc-tip">定位期间筛选已锁定，清除定位后可调整筛选</span>
+    <el-button size="small" link type="primary" @click="$emit('clear')">清除定位</el-button>
+  </div>`
+};
 app.mixin({
   methods: {
     canWrite(mod) {
@@ -330,6 +506,7 @@ app.mixin({
 });
 const lp = (typeof ElementPlusLocaleZhCn !== 'undefined') ? { locale: ElementPlusLocaleZhCn } : ((ElementPlus.lang && ElementPlus.lang.zhCn) ? { locale: ElementPlus.lang.zhCn } : {});
 app.use(ElementPlus, lp);
+app.component('LocBanner', LocBanner);
 app.component('FunnelIcon', FunnelIcon);
 app.component('CrudView', CrudView);
 app.component('BorrowView', BorrowView);

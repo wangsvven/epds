@@ -36,7 +36,8 @@ const ProjectsView = {
         materials.value = Array.isArray(ms) ? ms : (ms.data || []);
         workPlans.value = Array.isArray(wp) ? wp : (wp.data || []);
         units.value = Array.isArray(un) ? un : (un.data || []);
-      } catch (e) { ElementPlus.ElMessage.error(e.message); }
+        if (loc && loc.st.active) loc.recompute();
+      } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { unitsLoading.value = false; }
     }
     // 分包（己方）单位：来自全局设置「单位维护」中 type=分包单位 的字典
@@ -171,9 +172,34 @@ const ProjectsView = {
         return true;
       });
     });
-    const pagedList = computed(() => filteredList.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
+    /* ----- 首页「工作动态」定位：按分段分类分组，绕过业务筛选 ----- */
+    const LOC_GROUPS = ['自有工程', '客户工程', '已竣工'];
+    const locGroupOf = (p) => (p && p.completed ? '已竣工' : ((p && p.category) || '自有工程'));
+    const loc = window.Locate.make({
+      nav: 'projects', sub: '',
+      base: () => projects.value,
+      snap: () => ({ tab: activeTab.value, page: page.value, f: JSON.parse(JSON.stringify(filters)) }),
+      restore: (s) => { activeTab.value = s.tab; page.value = s.page; Object.assign(filters, s.f); },
+      groups: LOC_GROUPS,
+      groupOf: locGroupOf,
+      afterApply: (hits, group) => { if (group) activeTab.value = group; page.value = 1; },
+      onPick: (key) => { activeTab.value = key; page.value = 1; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    // 定位路径：基础集合 ∩ ids ∩ 当前组；普通路径保持原筛选链
+    const pagedList = computed(() => {
+      if (loc.st.active && loc.st.total) {
+        const rows = projects.value.filter(x => loc.hit(x) && (!loc.st.group || locGroupOf(x) === loc.st.group));
+        return rows.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+      }
+      return filteredList.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+    });
 
-    function switchTab(t) { activeTab.value = t; page.value = 1; }
+    function switchTab(t) {
+      if (loc.st.active && t !== loc.st.group) window.Locate.end('leave');   // 用户主动切离被定位的列表
+      activeTab.value = t; page.value = 1;
+    }
     function resetFilters() { Object.assign(filters, { keyword: '', annualPlan: '', batch: '', substation: '', leader: '' }); page.value = 1; }
 
     // 局计划进度：深蓝=电杆、浅蓝=线材、灰=设备；完成 100% 隐藏，<1% 显示 <1%，超额显示超出比例
@@ -361,7 +387,8 @@ const ProjectsView = {
       return 'info';
     }
 
-    onMounted(load);
+    onMounted(async () => { await load(); loc.consume(); });
+    Vue.onUnmounted(() => loc.dispose());
 
     return {
       activeTab, projects, annualPlans, substations, users, filters, page, pageSize,
@@ -373,7 +400,8 @@ const ProjectsView = {
       projFileInput, projFiles, triggerProjUpload, onProjUpload, delProjFile, packProjDownload, fmtDT,
       projMaterials, projPlans, ledger, enterMaterials, enterPlans, fmtQty, pkgColor, statusTagType,
       planText, planRange, planStatusType,
-      projInfoFields, projProgressChips, projProgressHasData
+      projInfoFields, projProgressChips, projProgressHasData,
+      loc, locActive, locRowClass
     };
   },
   template: `
@@ -389,30 +417,32 @@ const ProjectsView = {
       <el-button v-if="activeTab!=='已竣工' && canWrite('projects')" type="primary" @click="openAdd">新增项目</el-button>
     </div>
 
+    <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+
     <!-- 筛选 -->
     <div class="panel" style="padding:14px 16px;margin:14px 0 12px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-size:14px;color:var(--text-1)">筛选：</span>
-        <el-input v-model="filters.keyword" placeholder="项目名称（包）/子项目..." clearable style="width:200px" @input="page=1" />
-        <el-select v-model="filters.annualPlan" placeholder="年度计划" clearable style="width:170px" @change="page=1">
+        <el-input v-model="filters.keyword" placeholder="项目名称（包）/子项目..." clearable :disabled="locActive" style="width:200px" @input="page=1" />
+        <el-select v-model="filters.annualPlan" placeholder="年度计划" clearable :disabled="locActive" style="width:170px" @change="page=1">
           <el-option v-for="a in annualPlans" :key="a.id" :label="a.name" :value="a.name" />
         </el-select>
-        <el-select v-model="filters.batch" placeholder="批次" clearable style="width:120px" @change="page=1">
+        <el-select v-model="filters.batch" placeholder="批次" clearable :disabled="locActive" style="width:120px" @change="page=1">
           <el-option v-for="b in batchOptions" :key="b" :label="b" :value="b" />
         </el-select>
-        <el-select v-model="filters.substation" placeholder="属地供电所" clearable style="width:150px" @change="page=1">
+        <el-select v-model="filters.substation" placeholder="属地供电所" clearable :disabled="locActive" style="width:150px" @change="page=1">
           <el-option v-for="s in substations" :key="s.id" :label="s.name" :value="s.name" />
         </el-select>
-        <el-select v-model="filters.leader" placeholder="班组长" clearable style="width:130px" @change="page=1">
+        <el-select v-model="filters.leader" placeholder="班组长" clearable :disabled="locActive" style="width:130px" @change="page=1">
           <el-option v-for="u in users" :key="u.id" :label="u.name" :value="u.name" />
         </el-select>
-        <el-button @click="resetFilters">重置</el-button>
+        <el-button :disabled="locActive" @click="resetFilters">重置</el-button>
       </div>
       <div style="color:var(--text-3);font-size:12px;margin-top:10px">过滤分组排序：电杆、线材、设备；深蓝=电杆，浅蓝=线材，灰=设备（括内显示数量，完成 100% 时隐藏，超额时显示超出比例）</div>
     </div>
 
     <!-- 列表 -->
-    <el-table :data="pagedList" style="width:100%">
+    <el-table :data="pagedList" style="width:100%" :row-class-name="locRowClass">
       <el-table-column type="index" label="序号" width="70" align="center" />
       <el-table-column prop="name" label="工程名称" min-width="260" show-overflow-tooltip>
         <template #default="{row}">

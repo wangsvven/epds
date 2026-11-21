@@ -164,7 +164,7 @@ const PlansView = {
         const arr = Array.isArray(r) ? r : (r.data || []);
         arr.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
         list.value = arr;
-      } catch (e) { ElementPlus.ElMessage.error(e.message); } finally { loading.value = false; }
+      } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); } finally { loading.value = false; }
     }
     const tabList = computed(() => list.value.filter(p => {
       if (tab.value === 'week') return p.planType === '周计划' && !['已归档', '已取消', '已执行', '已结算'].includes(p.status);
@@ -199,7 +199,52 @@ const PlansView = {
       if (calSelDay.value && !coversDay(p, calSelDay.value)) return false;
       return true;
     }));
-    const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
+    /* ----- 首页「工作动态」定位：PlansView 消费并持有会话；月面板只接收 props ----- */
+    const LOC_GROUPS = ['week', 'month', 'archived', 'executed', 'settled', 'canceled'];
+    const LOC_LABEL = { week: '周计划', month: '月计划', archived: '已归档', executed: '已执行', settled: '已结算', canceled: '已取消' };
+    // 归组谓词严格按一.5 现行渲染口径（互斥；已执行/已结算不限 planType，故先于 month 判定）
+    function locGroupOf(p) {
+      const t = String(p && p.planType || ''), st = String(p && p.status || '');
+      if (t === '周计划' && ['已归档', '已取消', '已执行', '已结算'].indexOf(st) < 0) return 'week';
+      if (t === '月计划' && st === '未执行') return 'month';
+      if (t === '月计划' && st === '已归档') return 'archived';
+      if (st === '已执行') return 'executed';
+      if (st === '已结算') return 'settled';
+      if (t === '周计划' && st === '已取消') return 'canceled';
+      return '';                       // 无组可归（如已取消的月计划）：计入「未找到」
+    }
+    const panelRef = ref(null);
+    const loc = window.Locate.make({
+      nav: 'plans', sub: '',
+      base: () => list.value,
+      snap: () => ({
+        tab: tab.value, page: page.value, cal: calSelDay.value,
+        f: JSON.parse(JSON.stringify(filters)), scopeLabel: scopeLabel.value,
+        panel: (panelRef.value && panelRef.value.locSnap) ? panelRef.value.locSnap() : { f: {}, page: 1 }
+      }),
+      restore: (sn) => {
+        Object.assign(filters, sn.f); tab.value = sn.tab; page.value = sn.page;
+        calSelDay.value = sn.cal || ''; scopeLabel.value = sn.scopeLabel || '';
+        if (panelRef.value && panelRef.value.locApplySnap) panelRef.value.locApplySnap(sn.panel);
+      },
+      groups: LOC_GROUPS,
+      groupLabel: (g) => LOC_LABEL[g] || g,
+      groupOf: locGroupOf,
+      afterApply: (hits, group) => { if (group) tab.value = group; page.value = 1; },
+      onPick: (key) => { tab.value = key; page.value = 1; }
+    });
+    const locActive = computed(() => loc.st.active);
+    const locIds = computed(() => (loc.st.set ? Array.from(loc.st.set) : []));
+    // 月/已归档两组由月面板渲染，给它本组命中的 ids
+    const locPanelIds = computed(() => list.value.filter(x => loc.hit(x) && locGroupOf(x) === loc.st.group && (loc.st.group === 'month' || loc.st.group === 'archived')).map(x => x.id));
+    const locRowClass = ({ row }) => (loc.hit(row) ? 'loc-row' : '');
+    const paged = computed(() => {
+      if (loc.st.active && loc.st.total && !isMonthTab.value) {
+        const rows = list.value.filter(x => loc.hit(x) && locGroupOf(x) === loc.st.group);
+        return rows.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+      }
+      return filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+    });
     // 空状态文案：状态类页签（已执行/已结算/已取消）给针对性引导，避免只显示通用的「暂无数据」
     const isFiltered = computed(() => !!(filters.startDate || filters.endDate || filters.name || filters.content || filters.noProject || filters.team || filters.leader || filters.ticketType || (filters.projectScope && filters.projectScope.length) || calSelDay.value));
     const EMPTY_HINT = {
@@ -1508,7 +1553,11 @@ const PlansView = {
       } catch (e) { ElementPlus.ElMessage.error(e.message); }
     }
     // 切页签同时重拉列表：月计划面板的状态流转会改 status，共用页签需拿到最新数据
-    function onTab() { page.value = 1; calSelDay.value = ''; load(); }
+    function onTab() {
+      if (loc.st.active && tab.value !== loc.st.group) window.Locate.end('leave');   // 用户主动切离
+      page.value = 1; calSelDay.value = ''; load();
+    }
+    const rowClassAll = (o) => [rowClass(o), loc.hit(o.row) ? 'loc-row' : ''].filter(Boolean).join(' ');
     // 项目详情「查看月/周计划」：切到对应页签，并把列表限定在该项目（含其子项目）
     const scopeLabel = ref('');
     function clearProjectScope() { filters.projectScope = []; scopeLabel.value = ''; page.value = 1; }
@@ -1574,7 +1623,7 @@ const PlansView = {
     }
     function onTicketNoInput() { dlg.ticketNoDirty = true; }
 
-    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, calSelDay, calDayLabel, toggleCalDay, clearCalDay, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, splitBadge, canSplit };
+    return { TABS, tab, isMonthTab, list, loading, projects, projectsFull, teams, workers, riskFactors, filters, page, pageSize, paged, loc, locActive, locIds, locPanelIds, locRowClass, rowClassAll, calSelDay, calDayLabel, toggleCalDay, clearCalDay, filtered, scopeLabel, clearProjectScope, emptyTitle, emptyTip, isFiltered, dlg, upcoming, calendarDays, fmtDT, dash, fmtVoltage, rowClass, planAct, copyPlan, execPlan, cancelPlan, restorePlan, monthSettle, monthReopen, notePlan, openPlanMaterials, matDlg, matTodo, matDrawings, matDrawingInput, triggerDrawingUpload, onDrawingUpload, matFmtTime, matDownloadDrawing, matDeleteDrawing, matPackage, matPackInput, triggerPackUpload, onPackUpload, matDownloadPackage, matDeletePackage, matSurveyed, matGenFiles, matGenEmpty, matDownloadGen, matDeleteGen, surveyDlg, openSurveyEditor, onSurveyBeforeClose, SURVEY_GROUPING_OPTS, surveyPeople, svUnitOpts, svGroupCount, svGrouped, onGroupingChange, svMembersText, svPick, svPickTitle, svPickGroups, svPickAllOn, svPickSomeOn, svToggleAll, svToggleRow, svOpenLeader, svOpenMembers, svConfirmPick, svRemoveMember, svPeopleList, svMultiTeam, svBadges, svSecondTicket, svLowTicket, svNoGroup, svHideGround10, svHideGround04, surveyTitle, sxLines, onScopeTextInput, hazardPick, hazardGroups, hpOpen, toggleHp, openHp, hpScopeOpts, hpScopeOf, onTitleClick, renameHazard, addHazardFromLib, addCustomHazard, canRestoreMeasure, restoreMeasure, moveHazard, removeHazard, saveSurvey, saveAndGenerate, openMaterialsFromEditor, TICKET_TYPES, VOLTAGE_LEVELS, WORK_TYPES, SPECIALTIES, DEPTS, RISK_LEVELS, GRID_RISKS, MAJOR_RISKS, genMeasures, subProjectOptions, unitsByType, workersFull, contacts, staffPick, groupedTeams, staffKey, openStaffPick, confirmStaffPick, toggleIdentity, staffConflict, onChargePersonInput, oneKeyFill, load, onTab, openAdd, openEdit, onProjectSelect, makeWeekFromMonth, submit, leaderAccounts, leaderOptsForm, leaderOptsFilter, remove, importPlans, downloadImportTemplate, importDlg, importFileRef, pickImportFile, onImportFileChange, exportPlans, qtyDlg, QTY_FIELDS, openQuantities, submitQuantities, onTicketTypeChange, onTicketNoInput, splitDlg, openSplit, onSplitDone, splitBadge, canSplit };
   },
   template: `
   <div class="plans-view">
@@ -1619,7 +1668,8 @@ const PlansView = {
       </div>
 
       <!-- 月计划管理 / 已归档月计划：检修口径专用面板 -->
-      <month-plans-panel v-if="isMonthTab" :tab="tab" :project-scope="filters.projectScope" @make-week="makeWeekFromMonth" />
+      <loc-banner :st="loc.st" @clear="loc.clear" @pick="loc.pick" />
+      <month-plans-panel v-if="isMonthTab" ref="panelRef" :tab="tab" :project-scope="filters.projectScope" :locate-active="locActive" :locate-ids="locPanelIds" @make-week="makeWeekFromMonth" />
 
       <template v-else>
       <div class="plan-filters">
@@ -1652,10 +1702,10 @@ const PlansView = {
       <div class="plan-toolbar">
         <el-button v-if="canWrite('plans')" type="primary" size="small" @click="openAdd">新增</el-button>
         <el-button v-if="canWrite('plans')" size="small" @click="importPlans">导入 xlsx</el-button>
-        <el-button size="small" :disabled="filtered.length === 0" :title="filtered.length === 0 ? '当前没有可导出的计划' : '导出当前页签筛选后的计划为 xlsx'" @click="exportPlans">导出 xlsx</el-button>
+        <el-button size="small" :disabled="filtered.length === 0 || locActive" :title="locActive ? '定位期间不可用，清除定位后使用' : (filtered.length === 0 ? '当前没有可导出的计划' : '导出当前页签筛选后的计划为 xlsx')" @click="exportPlans">导出 xlsx</el-button>
       </div>
 
-      <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClass">
+      <el-table :data="paged" v-loading="loading" class="plan-table" style="width:100%" :row-class-name="rowClassAll">
         <el-table-column label="序号" width="48" align="center">
           <template #default="{ row, $index }">
             <span class="plan-idx">{{ (page - 1) * pageSize + $index + 1 }}</span>
