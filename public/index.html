@@ -51,6 +51,8 @@
       --ok-bg:#f2fcf5; --ok-line:#bfe8cc; --ok-text:#12864a;
       --warn-bg:#fff8ee; --warn-line:#ffdfb0; --warn-text:#b25e09;
       --danger-bg:#fef4f4; --danger-line:#f9cfcf; --danger-text:#c0392b;
+      /* 首页动态定位：命中行黄底 + 左侧细线 */
+      --loc-bg:#fff8d8; --loc-bg-hover:#fdf0bf; --loc-line:#d9a600;
       --radius:12px; --radius-sm:8px;
       --shadow-sm:0 1px 2px rgba(16,24,40,.05);
       --shadow-md:0 8px 24px -10px rgba(16,24,40,.18), 0 2px 6px rgba(16,24,40,.05);
@@ -99,6 +101,7 @@
       --ok-bg:#12251b; --ok-line:#1f4432; --ok-text:#66d19e;
       --warn-bg:#2a1f10; --warn-line:#4a3618; --warn-text:#f0b866;
       --danger-bg:#2a1618; --danger-line:#4a2528; --danger-text:#f08a8a;
+      --loc-bg:#2b2611; --loc-bg-hover:#37301a; --loc-line:#b08d2a;
       --shadow-sm:0 1px 2px rgba(0,0,0,.4);
       --shadow-md:0 10px 28px -12px rgba(0,0,0,.7), 0 2px 6px rgba(0,0,0,.35);
       --el-color-primary: #5b8cff;
@@ -1667,6 +1670,25 @@
   .wk-alert-list::-webkit-scrollbar-track { background: transparent; }
   .wk-alert-item { flex: 0 0 auto; box-sizing: border-box; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-size: 13px; background: var(--surface); }
   .wk-alert-item:hover { border-color: var(--line-strong); background: var(--hover); }
+
+  /* ===== 首页「工作动态」跳转定位：横幅 + 命中行高亮 ===== */
+  .loc-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 12px; padding:8px 12px;
+    border:1px solid var(--info-line); background:var(--info-bg); border-radius:var(--radius-sm);
+    font-size:13px; color:var(--info-text); line-height:20px; }
+  .loc-bar.is-zero { border-color:var(--warn-line); background:var(--warn-bg); color:var(--warn-text); }
+  .loc-bar.is-fail { border-color:var(--danger-line); background:var(--danger-bg); color:var(--danger-text); }
+  .loc-bar b { font-variant-numeric:tabular-nums; font-weight:600; }
+  .loc-bar .loc-tip { color:var(--text-3); font-size:12px; }
+  .loc-bar .loc-warn { color:var(--danger-text); }
+  .loc-chip { display:inline-flex; align-items:center; gap:4px; padding:1px 10px; border-radius:999px;
+    border:1px solid var(--line-strong); background:var(--surface); color:var(--text-2); font-size:12px; cursor:pointer; }
+  .loc-chip:hover { border-color:var(--brand); color:var(--brand-text); }
+  .loc-chip.is-on { border-color:var(--brand); background:var(--brand-soft); color:var(--brand-text); font-weight:600; }
+  /* 高亮须压过条纹、预警行（wk-warn-row）与勾选行：用更高特异性 + !important */
+  .el-table .el-table__body .loc-row > td,
+  .el-table .el-table__body .loc-row.el-table__row > td { background:var(--loc-bg) !important; }
+  .el-table .el-table__body .loc-row > td:first-child { box-shadow: inset 3px 0 0 var(--loc-line); }
+  .el-table .el-table__body .loc-row:hover > td { background:var(--loc-bg-hover) !important; }
   .fd-tag { flex: 0 0 auto; box-sizing: border-box; height: 20px; line-height: 18px; padding: 0 6px; border: 1px solid; border-radius: 3px; font-size: 11.5px; white-space: nowrap; }
   .fd-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-1); font-variant-numeric: tabular-nums; }
   /* 中国传统色五色淡版：极淡底 + 同色系深一号字 + 同色系细边 */
