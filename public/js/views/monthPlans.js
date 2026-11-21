@@ -208,6 +208,7 @@ const MonthPlansPanel = {
     const locSet = computed(() => window.Locate.idsSet(props.locateIds));
     const locRows = computed(() => props.locateActive ? tabList.value.filter(p => locSet.value.has(String(p.id))) : []);
     const locRowClass = ({ row }) => (props.locateActive && locSet.value.has(String(row.id)) ? 'loc-row' : '');
+    const locCount = computed(() => locRows.value.length);
     const filtered = computed(() => props.locateActive ? locRows.value : tabList.value.filter(p => {
       if (props.projectScope && props.projectScope.length) {
         const hitScope = props.projectScope.includes(p.project) || props.projectScope.includes(p.projectName);
