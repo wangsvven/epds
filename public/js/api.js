@@ -4,13 +4,29 @@
 const { createApp, ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
 
 /* ---------------- API 助手 ---------------- */
+/* 登录接口自身返回 401（账号密码错误等）属于「业务失败」，须留给登录表单就地反馈：
+ * 既不清理会话，也不整页刷新（否则表单内的失败分支永远不可达，用户只看到页面闪一下）。
+ * 其余任何请求的 401 仍按「会话失效」处理——清 token + 回登录页，逻辑保持不变。 */
+const LOGIN_ENDPOINT = '/api/login';
+function isLoginEndpoint(url) {
+  return String(url || '').split('?')[0] === LOGIN_ENDPOINT;
+}
 const api = {
   async req(method, url, body) {
     const token = localStorage.getItem('erp_token');
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
-    if (res.status === 401) { localStorage.removeItem('erp_token'); location.reload(); throw new Error('unauth'); }
+    if (res.status === 401) {
+      if (isLoginEndpoint(url)) {
+        const d = await res.json().catch(() => ({}));
+        const err = new Error(d.error || '用户名或密码错误');
+        err.status = 401;
+        err.data = d;
+        throw err;                       // 交回调用方（登录表单）就地提示
+      }
+      localStorage.removeItem('erp_token'); location.reload(); throw new Error('unauth');
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.error || '请求失败');
