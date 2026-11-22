@@ -3496,8 +3496,13 @@ async function runSmoke() {
       '既有日期区间筛选应保持包含口径不变');
     // ④ 空状态文案与页签隔离
     need(/const isFiltered = computed\(\(\) => [^;]*calSelDay\.value/.test(p), 'isFiltered 应纳入 calSelDay');
-    need(/function onTab\(\) \{ page\.value = 1; calSelDay\.value = ''; load\(\); \}/.test(p),
-      'onTab 应清空 calSelDay（筛选不得带到其他页签）');
+    // onTab 体内后来插入了定位会话守卫（loc.end），不再是一行；改为按「函数体」判定，
+    // 逐项要求 重置分页 / 清空 calSelDay / 重拉列表，防回归强度只增不减
+    const onTabBody = (p.match(/function onTab\(\) \{([\s\S]{0,400}?)\n    \}/) || [])[1] || '';
+    need(!!onTabBody, 'onTab 函数应存在');
+    need(/page\.value = 1;/.test(onTabBody), 'onTab 应把分页复位到第 1 页');
+    need(/calSelDay\.value = '';/.test(onTabBody), 'onTab 应清空 calSelDay（筛选不得带到其他页签）');
+    need(/load\(\);/.test(onTabBody), 'onTab 应重拉列表');
     // ⑤ 清除标签：M月D日 文案 + 可关闭 + 处理函数
     need(/v-if="calSelDay" closable[\s\S]{0,140}@close="clearCalDay"/.test(p) &&
       /按 \{\{ calDayLabel \}\} 筛选/.test(p), '日历标题行应有可关闭的「按 M月D日 筛选」标签');
