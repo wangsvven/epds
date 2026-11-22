@@ -3506,8 +3506,11 @@ async function runSmoke() {
     // ⑤ 清除标签：M月D日 文案 + 可关闭 + 处理函数
     need(/v-if="calSelDay" closable[\s\S]{0,140}@close="clearCalDay"/.test(p) &&
       /按 \{\{ calDayLabel \}\} 筛选/.test(p), '日历标题行应有可关闭的「按 M月D日 筛选」标签');
-    need(/function clearCalDay\(\) \{ calSelDay\.value = ''; page\.value = 1; \}/.test(p),
-      'clearCalDay 应清空选中并复位分页');
+    // 同理不锁整行：按函数体逐项要求「清空选中 + 复位分页」，函数以后加行也不会误报
+    const clearCalDayBody = (p.match(/function clearCalDay\(\) \{([^}]*)\}/) || [])[1] || '';
+    need(!!clearCalDayBody, 'clearCalDay 函数应存在');
+    need(/calSelDay\.value = '';/.test(clearCalDayBody), 'clearCalDay 应清空选中');
+    need(/page\.value = 1;/.test(clearCalDayBody), 'clearCalDay 应复位分页');
     need(/calSelDay, calDayLabel, toggleCalDay, clearCalDay/.test(p),
       'setup 应暴露 calSelDay / calDayLabel / toggleCalDay / clearCalDay');
     return '卡片可点+选中态 / coversDay 单点两处调用 / calSelDay 叠加与 isFiltered / onTab 清空 / 标签清除 / 暴露';

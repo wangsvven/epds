@@ -772,6 +772,17 @@ function plansHarness() {
   const sb = { console, setTimeout, clearTimeout, encodeURIComponent };
   vm.createContext(sb);
   vm.runInContext('globalThis.window = globalThis;', sb);
+  /* 定位会话桩：本测试验的是票号/预填/拆分，不验「工作动态」定位跳转。
+     视图 setup 顶层会调 window.Locate.make()，缺桩会直接抛
+     "Cannot read properties of undefined (reading 'make')" 而连坐 O/U 两组。 */
+  sb.Locate = {
+    pending: () => null, seq: () => 0, end: () => {}, bump: () => 0, take: () => null, drop: () => {},
+    notifyNew: () => {}, idsSet: () => new Set(),
+    make: () => ({
+      st: { active: false, total: 0, set: new Set(), group: '', on: false },
+      hit: () => false, apply: () => {}, consume: () => false, recompute: () => false, refreshFailed: () => {}
+    })
+  };
   sb.addEventListener = () => {}; sb.removeEventListener = () => {};
   sb.document = {
     querySelectorAll: () => [], getElementById: () => null,

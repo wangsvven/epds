@@ -523,6 +523,17 @@ function matHarness(opts) {
   const sb = { console: console, setTimeout: setTimeout, clearTimeout: clearTimeout, JSON: JSON, Date: Date, Math: Math, Number: Number, String: String, Boolean: Boolean, Array: Array, Object: Object, RegExp: RegExp, Promise: Promise, isNaN: isNaN, parseFloat: parseFloat, parseInt: parseInt };
   vm.createContext(sb);
   vm.runInContext('globalThis.window = globalThis;', sb);
+  /* 定位会话桩：本测试只验截至日出库核算，不验「工作动态」定位跳转。
+     视图 setup 顶层会调 window.Locate.make()，缺桩会直接抛
+     "Cannot read properties of undefined (reading 'make')" 而连坐全部用例。 */
+  sb.Locate = {
+    pending: () => null, seq: () => 0, end: () => {}, bump: () => 0, take: () => null, drop: () => {},
+    notifyNew: () => {}, idsSet: () => new Set(),
+    make: () => ({
+      st: { active: false, total: 0, set: new Set(), group: '', on: false },
+      hit: () => false, apply: () => {}, consume: () => false, recompute: () => false, refreshFailed: () => {}
+    })
+  };
   sb.Vue = {
     ref: v => ({ value: v }),
     reactive: obj => obj,
