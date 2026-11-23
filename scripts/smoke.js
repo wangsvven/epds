@@ -3706,8 +3706,13 @@ async function runSmoke() {
       .concat((await listOk('/api/workPlans', token)).filter(x => !x.deleted && x.parentPlanId === dtOnly.id));
     dtRecs.forEach(r => need(String(r.startDate).slice(0, 10) === String(r.endDate).slice(0, 10),
       '无时段拆分产物起止应同日：' + r.id + ' ' + r.startDate + ' ~ ' + r.endDate));
-    dtRecs.forEach(r => need(String(r.startDate).slice(11) === '00:00:00' && String(r.endDate).slice(11) === '23:59:59',
-      '无时段拆分产物应为全天：' + r.id + ' ' + r.startDate + ' ~ ' + r.endDate));
+    /* 开始时刻允许「空」：父记录（首日）startDate 保持源原样，源只填日期时它就是 YYYY-MM-DD；
+       子记录由 dayRange 写成 00:00:00。结束时刻必须 23:59:59（严格，不得放宽）。 */
+    dtRecs.forEach(r => {
+      const st = String(r.startDate).slice(11);
+      need((st === '' || st === '00:00:00') && String(r.endDate).slice(11) === '23:59:59',
+        '无时段拆分产物应为全天（开始可无时刻、结束必须 23:59:59）：' + r.id + ' ' + r.startDate + ' ~ ' + r.endDate);
+    });
 
     // 同一请求再次确认 → 精确重放 200（不是已拆拒绝）
     const again = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: {
