@@ -8,11 +8,15 @@
  * 安全边界：
  *   - 只接受显式 --db <path>，无默认路径；直接读写 JSON 文件，**不加载 server/core/db**
  *     （避免触发迁移 / saveDB / 令牌等副作用）。
- *   - 识别条件严格（缺一不可）：未软删、splitBatchId 非空、startDate 与 endDate 均严格符合
- *     `YYYY-MM-DD HH:MM:SS`（空格分隔、无 T、无毫秒、无时区）、startDate 时刻为 00:00:00、
- *     endDate 时刻为 00:00:00、endDate 日期恰为 startDate 次日。
- *     手工录入的跨天计划（无 splitBatchId）形态再像也不命中。
- *   - 变换只改 endDate 一个字段，其余字段不动。
+ *   - 识别条件（两模式互斥，缺一不可）：
+ *       · 记录未软删；
+ *       · splitBatchId 非空（手工录入的跨天计划形态再像也不命中）；
+ *       · startDate 与 endDate 均严格符合 `YYYY-MM-DD HH:MM:SS`（空格分隔、无 T、无毫秒、无时区；
+ *         异形格式不处理，单独成段列出）；
+ *       · endDate 时刻为 00:00:00，且 endDate 日期恰为 startDate 次日；
+ *       · **模式 A**：startDate 时刻也是 00:00:00（旧 dayRange 把「只存日期」顺延次日）；
+ *         **模式 B**：startDate 时刻非 00:00:00（旧 dayRange 把「结束零点」顺延次日）。
+ *   - 变换两模式相同：只改 endDate → startDate 的日期部分 + ` 23:59:59`，其余字段不动。
  *
  * 用法：
  *   node scripts/repair-split-dayranges.js --db <db.json> [--dry-run]   只读，打印差异清单（默认）
@@ -87,12 +91,11 @@ for (const p of plans) {
   const s = String(p.startDate == null ? '' : p.startDate);
   const e = String(p.endDate == null ? '' : p.endDate);
 
-  // 先看时刻形态是否「双端零点 + 日期相邻」，用于把异形格式单独摘出来
+  // 先看时刻形态是否「结束零点 + 日期相邻」，用于把异形格式单独摘出来（A/B 两模式都算）
   const stLoose = s.length >= 19 ? s.slice(11, 19) : '';
   const etLoose = e.length >= 19 ? e.slice(11, 19) : '';
   const sdLoose = s.slice(0, 10), edLoose = e.slice(0, 10);
-  const looksLikeTarget = stLoose === '00:00:00' && etLoose === '00:00:00' &&
-    /^\d{4}-\d{2}-\d{2}$/.test(sdLoose) && edLoose === nextDayOf(sdLoose);
+  const looksLikeTarget = etLoose === '00:00:00' && /^\d{4}-\d{2}-\d{2}$/.test(sdLoose) && edLoose === nextDayOf(sdLoose);
 
   const strictOk = STRICT.test(s) && STRICT.test(e);
   if (!strictOk) {
@@ -100,11 +103,12 @@ for (const p of plans) {
     continue;
   }
   const sd = s.slice(0, 10), ed = e.slice(0, 10);
-  if (stLoose !== '00:00:00') continue;                 // 开始时刻非零：不是本类问题
   if (etLoose !== '00:00:00') continue;                 // 结束时刻非零：保持现有行为
   if (ed !== nextDayOf(sd)) continue;                   // 结束日期不是次日：不属本类坏形态
+  // 模式 A：开始也为零点（只存日期）；模式 B：开始有真实时刻（结束零点被顺延）
+  const mode = stLoose === '00:00:00' ? 'A' : 'B';
   candidates.push({
-    id: p.id, batch: p.splitBatchId, status: p.status, deleted: !!p.deleted,
+    id: p.id, batch: p.splitBatchId, status: p.status, deleted: !!p.deleted, mode,
     from: e, to: sd + ' 23:59:59'
   });
 }
@@ -115,11 +119,13 @@ function printReport() {
   console.log('周计划总数：' + plans.length + '（其中带 splitBatchId：' +
     plans.filter(p => p && p.splitBatchId).length + '；因软删跳过：' + skippedDeleted + '）');
   console.log('');
-  console.log('可修复候选：' + candidates.length + ' 条');
+  console.log('可修复候选：' + candidates.length + ' 条（模式 A ' +
+    candidates.filter(c => c.mode === 'A').length + ' 条 · 模式 B ' +
+    candidates.filter(c => c.mode === 'B').length + ' 条）');
   if (candidates.length) {
-    console.log('  id          批次         状态     软删  改前 endDate          → 改后 endDate');
+    console.log('  id          批次         模式  状态     软删  改前 endDate          → 改后 endDate');
     for (const c of candidates) {
-      console.log('  ' + c.id.padEnd(12) + c.batch.padEnd(13) + String(c.status || '-').padEnd(9) +
+      console.log('  ' + c.id.padEnd(12) + c.batch.padEnd(13) + c.mode.padEnd(5) + String(c.status || '-').padEnd(9) +
         (c.deleted ? '是' : '否').padEnd(6) + c.from + '  →  ' + c.to);
     }
   }
@@ -183,12 +189,12 @@ for (const rec of afterPlans) {
   if (!rec || targetIds.has(rec.id)) continue;
   if (JSON.stringify(rec) !== beforeById.get(rec.id)) problems.push('非目标记录被改动：' + rec.id);
 }
-// 幂等复核：按同一识别条件再扫一遍，应为 0
+// 幂等复核：按同一识别条件再扫一遍（含模式 B），应为 0
 const stillBad = afterPlans.filter(p => {
   if (!p || !p.splitBatchId || p.deleted) return false;
   const s = String(p.startDate || ''), e = String(p.endDate || '');
   if (!STRICT.test(s) || !STRICT.test(e)) return false;
-  return s.slice(11) === '00:00:00' && e.slice(11) === '00:00:00' && e.slice(0, 10) === nextDayOf(s.slice(0, 10));
+  return e.slice(11) === '00:00:00' && e.slice(0, 10) === nextDayOf(s.slice(0, 10));
 }).length;
 
 console.log('已写入：' + DB_PATH);

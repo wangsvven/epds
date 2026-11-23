@@ -2449,12 +2449,15 @@ t('X9 存量修复脚本：dry-run 只列坏形态(含已执行)，异形单列�
   const fixture = {
     settings: {},
     workPlans: [
-      mk('fx-a', { splitBatchId: 'sp-a', startDate: '2026-12-01 00:00:00', endDate: '2026-12-02 00:00:00' }),      // (a) 坏形态
+      mk('fx-a', { splitBatchId: 'sp-a', startDate: '2026-12-01 00:00:00', endDate: '2026-12-02 00:00:00' }),      // (a) 坏形态·模式A
       mk('fx-b', { splitBatchId: 'sp-b', startDate: '2026-12-01 00:00:00', endDate: '2026-12-01 23:59:59' }),      // (b) 好形态
       mk('fx-c', { startDate: '2026-12-05 00:00:00', endDate: '2026-12-06 00:00:00' }),                            // (c) 无批次
       mk('fx-d', { splitBatchId: 'sp-d', startDate: '2026-12-03 07:30:00', endDate: '2026-12-03 18:30:00' }),      // (d) 真实时段
       mk('fx-e', { splitBatchId: 'sp-e', startDate: '2026-12-04T00:00:00', endDate: '2026-12-05T00:00:00' }),      // (e) 异形 T
-      mk('fx-f', { splitBatchId: 'sp-f', startDate: '2026-12-07 00:00:00', endDate: '2026-12-08 00:00:00', status: '已执行' }) // (f) 已执行
+      mk('fx-f', { splitBatchId: 'sp-f', startDate: '2026-12-07 00:00:00', endDate: '2026-12-08 00:00:00', status: '已执行' }), // (f) 已执行·模式A
+      mk('fx-g', { splitBatchId: 'sp-g', startDate: '2026-12-09 18:49:00', endDate: '2026-12-10 00:00:00' }),      // (g) 结束零点·模式B
+      mk('fx-h', { startDate: '2026-12-09 18:49:00', endDate: '2026-12-10 00:00:00' }),                            // (h) 无批次·同 (g) 形态
+      mk('fx-i', { splitBatchId: 'sp-i', startDate: '2026-12-11 18:49:00', endDate: '2026-12-11 00:00:00' })       // (i) 结束零点但同日（非顺延）
     ]
   };
   fs.writeFileSync(fx, JSON.stringify(fixture, null, 2));
@@ -2462,21 +2465,26 @@ t('X9 存量修复脚本：dry-run 只列坏形态(含已执行)，异形单列�
   const run = (...args) => execFileSync(process.execPath, [SCRIPT, '--db', fx, ...args], { encoding: 'utf8' });
 
   const dry = run();
-  assert.ok(/可修复候选：2 条/.test(dry), 'dry-run 应恰有 2 条候选');
-  assert.ok(/fx-a/.test(dry) && /fx-f/.test(dry), '候选应含 a 与 f');
+  assert.ok(/可修复候选：3 条（模式 A 2 条 · 模式 B 1 条）/.test(dry), 'dry-run 应为 3 条（A 2 + B 1）：' + dry.split('\n').slice(0, 4).join(' | '));
+  assert.ok(/fx-a/.test(dry) && /fx-f/.test(dry) && /fx-g/.test(dry), '候选应含 a/f（A）与 g（B）');
+  assert.ok(/fx-g\s+sp-g\s+B\s/.test(dry), 'fx-g 应标注为模式 B：' + (dry.split('\n').find(l => /fx-g/.test(l)) || ''));
+  assert.ok(/fx-a\s+sp-a\s+A\s/.test(dry), 'fx-a 应标注为模式 A');
   assert.ok(!/fx-b/.test(dry) && !/fx-c/.test(dry) && !/fx-d/.test(dry), '好形态/无批次/真实时段不得命中');
+  assert.ok(!/fx-h/.test(dry), '(h) 无批次、形态同 (g) → 不得命中');
+  assert.ok(!/fx-i/.test(dry), '(i) 结束零点但结束日期同日（非顺延）→ 两模式均不命中');
   assert.ok(/异形格式/.test(dry) && /fx-e/.test(dry), '异形格式应单独成段列出');
   assert.ok(/已执行/.test(dry), '状态应在清单中可见');
   assert.ok(/2026-12-02 00:00:00  →  2026-12-01 23:59:59/.test(dry), '改前→改后应可见');
   assert.deepEqual(fs.readFileSync(fx), raw0, 'dry-run 不得改动文件');
 
   const ap = run('--apply');
-  assert.ok(/已备份/.test(ap) && /修改条数：2/.test(ap), ap);
+  assert.ok(/已备份/.test(ap) && /修改条数：3/.test(ap), ap);
   const after = JSON.parse(fs.readFileSync(fx, 'utf8'));
   const byId = new Map(after.workPlans.map(p => [p.id, p]));
   assert.equal(byId.get('fx-a').endDate, '2026-12-01 23:59:59');
   assert.equal(byId.get('fx-f').endDate, '2026-12-07 23:59:59');
-  for (const id of ['fx-b', 'fx-c', 'fx-d', 'fx-e']) {
+  assert.equal(byId.get('fx-g').endDate, '2026-12-09 23:59:59', '(g) 模式 B 应改为开始日期当天 23:59:59');
+  for (const id of ['fx-b', 'fx-c', 'fx-d', 'fx-e', 'fx-h', 'fx-i']) {
     const before = fixture.workPlans.find(p => p.id === id);
     assert.equal(byId.get(id).endDate, before.endDate, id + ' 的 endDate 不得被改');
   }
