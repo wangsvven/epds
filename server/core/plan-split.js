@@ -328,6 +328,14 @@ function parseDailyContent(content, startDate, endDate) {
 }
 
 /* 每天起止时刻 = 当天日期 + 父计划原开始/结束时刻；结束时刻 ≤ 开始时刻则结束顺延次日 */
+/* 拆分后某一天的起止：沿用源计划两端时刻，按天平移。
+ * 口径（2026-11-23 定版，「无时段」按全天处理，落在同一自然日）：
+ *   - et > st           ：当天 st 起、当天 et 止（沿用源时段）。
+ *   - et <= st 且 et 为 00:00:00：结束写当天 23:59:59。两端都为零点即「只存了日期、
+ *                         没有具体时刻」→ 全天 00:00:00–23:59:59；仅结束为零点同样归入本档。
+ *                         **不得**把无时段编造成 00:00 → 次日 00:00。
+ *   - et <= st 且 et 非零：真实跨夜（或非零时刻相等）→ 结束顺延次日，行为保持不变。
+ */
 function dayRange(date, startDate, endDate) {
   const d = String(date || '').slice(0, 10);
   const st = String(startDate || '').slice(11) || '00:00:00';
@@ -335,11 +343,12 @@ function dayRange(date, startDate, endDate) {
   const start = d + ' ' + st;
   let endDay = d;
   if (et <= st) {
+    if (et === '00:00:00') return { start: start, end: d + ' 23:59:59' };
     const dt = new Date(d + 'T00:00:00Z');
     dt.setUTCDate(dt.getUTCDate() + 1);
     endDay = dt.toISOString().slice(0, 10);
   }
-  return { start, end: endDay + ' ' + et };
+  return { start: start, end: endDay + ' ' + et };
 }
 
 /* 用户确认稿的工作量覆盖：显式数字覆盖，显式空串删除，未传沿用解析值 */
