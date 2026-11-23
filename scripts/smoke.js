@@ -3679,6 +3679,36 @@ async function runSmoke() {
     need(!c1.survey, '不复制勘察对象（各日共用源勘察号）：' + brief(c1.survey));
     need(!c1.splitCommitVersion, '仅首日写 splitCommitVersion');
 
+    /* 拆分日计划时间形态（2026-11-23 定版）：产物一律落在同一自然日。
+     * 源计划带真实时段 → 时刻沿用；源计划只存日期（两端 00:00:00）→ 全天 00:00:00–23:59:59，
+     * 不得再编造成 00:00 → 次日 00:00（那会让日历每条多显示一天）。 */
+    [p].concat(allKids).forEach(r => need(String(r.startDate).slice(0, 10) === String(r.endDate).slice(0, 10),
+      '真实时段源计划：产物起止应同日：' + r.id + ' ' + r.startDate + ' ~ ' + r.endDate));
+    allKids.forEach(k => need(String(k.startDate).slice(11) === '08:00:00' && String(k.endDate).slice(11) === '10:00:00',
+      '真实时段源计划：子记录应保留源时刻 08:00:00–10:00:00：' + k.id + ' ' + k.startDate + ' ~ ' + k.endDate));
+
+    const dtOnly = needOk(await api('POST', '/api/workPlans', { token, body: {
+      planType: '周计划', name: '冒烟拆分无时段计划', status: '未执行',
+      startDate: '2026-11-13', endDate: '2026-11-14',
+      content: '13日：电杆组立2根；14日：电杆组立1根', surveyNo: '202611002'
+    } }), 'POST 无时段父计划');
+    const pv2 = needOk(await api('POST', '/api/workPlans/' + dtOnly.id + '/split/preview', { token, body: {} }), 'preview 无时段');
+    need(pv2.days.every(d => String(d.start).slice(0, 10) === d.date && String(d.end).slice(0, 10) === d.date),
+      '无时段源计划：每天起止应同日：' + brief(pv2.days.map(d => d.start + '~' + d.end)));
+    need(pv2.days.every(d => String(d.start).slice(11) === '00:00:00' && String(d.end).slice(11) === '23:59:59'),
+      '无时段源计划：应写 00:00:00–23:59:59：' + brief(pv2.days.map(d => d.start + '~' + d.end)));
+    const sp2 = needOk(await api('POST', '/api/workPlans/' + dtOnly.id + '/split', { token, body: {
+      previewVersion: pv2.previewVersion,
+      days: pv2.days.map(d => ({ date: d.date, content: d.content, quantities: d.quantities }))
+    } }), 'split 无时段');
+    need(sp2.createdPlanIds.length === 1, '无时段两日计划应生成 1 条子记录：' + brief(sp2));
+    const dtRecs = [needOk(await api('GET', '/api/workPlans/' + dtOnly.id, { token }), '无时段父详情')]
+      .concat((await listOk('/api/workPlans', token)).filter(x => !x.deleted && x.parentPlanId === dtOnly.id));
+    dtRecs.forEach(r => need(String(r.startDate).slice(0, 10) === String(r.endDate).slice(0, 10),
+      '无时段拆分产物起止应同日：' + r.id + ' ' + r.startDate + ' ~ ' + r.endDate));
+    dtRecs.forEach(r => need(String(r.startDate).slice(11) === '00:00:00' && String(r.endDate).slice(11) === '23:59:59',
+      '无时段拆分产物应为全天：' + r.id + ' ' + r.startDate + ' ~ ' + r.endDate));
+
     // 同一请求再次确认 → 精确重放 200（不是已拆拒绝）
     const again = await api('POST', '/api/workPlans/' + parent.id + '/split', { token, body: {
       previewVersion: pv.previewVersion,

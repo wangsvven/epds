@@ -2301,6 +2301,196 @@ t('W5 非递增 ID 夹具：顺序按 id、日期不被顺序推断（日期完�
   assert.equal(a.content, '导线架设2.5km');
 });
 
+/* ========== X 拆分日计划时间形态（无时段按全天 · 同日落库 · 存量修复脚本） ==========
+ * 旧实现把「源计划两端 00:00:00」拆成「当天 00:00 → 次日 00:00」，日历含结束日 → 每条多显示一天。
+ * 本组锁死新口径：et 为零点 → 当天 23:59:59；真实跨夜保持顺延；并验证修复脚本全流程。 */
+g('X 拆分日计划时间形态（无时段按全天 · 同日落库 · 修复脚本）');
+const PSC = require('../server/core/plan-split');
+const sameDay = (a, b) => String(a).slice(0, 10) === String(b).slice(0, 10);
+
+t('X1 源计划有真实时段(08:30→次日17:30)：每条同日、时刻沿用，预览与落库一致', () => {
+  const S = '2026-12-01 08:30:00', E = '2026-12-02 17:30:00';
+  const seed = () => [spPlan({ startDate: S, endDate: E })];
+  const days = [
+    { date: '2026-12-01', content: '电杆组立3根', quantities: {} },
+    { date: '2026-12-02', content: '电缆敷设1200米', quantities: {} }
+  ];
+  const pv = prevCall({ days }, seed()).res.payload;
+  assert.equal(pv.days.length, 2);
+  for (const d of pv.days) {
+    assert.equal(d.start.slice(11), '08:30:00', '开始时刻应沿用源：' + d.start);
+    assert.equal(d.end.slice(11), '17:30:00', '结束时刻应沿用源：' + d.end);
+    assert.ok(sameDay(d.start, d.end), '每条应落在同一自然日：' + d.start + ' / ' + d.end);
+  }
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), seed());
+  assert.equal(c.res.statusCode, 200, JSON.stringify(c.res.payload));
+  // 落库结果与预览逐条一致（父=首日，子=后续日）
+  const parent = DB.workPlans.find(x => x.id === SP_ID);
+  const kids = DB.workPlans.filter(x => x.parentPlanId === SP_ID);
+  assert.deepEqual([parent.startDate, parent.endDate], [pv.days[0].start, pv.days[0].end]);
+  assert.deepEqual([kids[0].startDate, kids[0].endDate], [pv.days[1].start, pv.days[1].end]);
+});
+
+t('X2 源计划两端 00:00:00：每条 00:00:00–23:59:59 且同日（数据层保证日历每天一条）', () => {
+  const seed = () => [spPlan({ startDate: '2026-12-01 00:00:00', endDate: '2026-12-02 00:00:00' })];
+  const days = [
+    { date: '2026-12-01', content: 'a', quantities: {} },
+    { date: '2026-12-02', content: 'b', quantities: {} }
+  ];
+  const pv = prevCall({ days }, seed()).res.payload;
+  for (const d of pv.days) {
+    assert.equal(d.start, d.date + ' 00:00:00');
+    assert.equal(d.end, d.date + ' 23:59:59');
+    assert.ok(sameDay(d.start, d.end), '应同日：' + d.start + ' / ' + d.end);
+  }
+  const c = splitCall(splitCommitH, SP_ID, confirmPayload(pv), seed());
+  assert.equal(c.res.statusCode, 200);
+  const parent = DB.workPlans.find(x => x.id === SP_ID);
+  const kids = DB.workPlans.filter(x => x.parentPlanId === SP_ID);
+  assert.equal(parent.endDate, '2026-12-01 23:59:59');
+  assert.equal(kids[0].startDate, '2026-12-02 00:00:00');
+  assert.equal(kids[0].endDate, '2026-12-02 23:59:59');
+  for (const r of [parent, ...kids]) assert.ok(sameDay(r.startDate, r.endDate), r.id + ' 应同日');
+});
+
+t('X3 源计划只有日期、无时刻部分：结果同两端零点（全天）', () => {
+  const seed = () => [spPlan({ startDate: '2026-12-01', endDate: '2026-12-02' })];
+  const days = [
+    { date: '2026-12-01', content: 'a', quantities: {} },
+    { date: '2026-12-02', content: 'b', quantities: {} }
+  ];
+  const pv = prevCall({ days }, seed()).res.payload;
+  assert.deepEqual(pv.days.map(d => d.start), ['2026-12-01 00:00:00', '2026-12-02 00:00:00']);
+  assert.deepEqual(pv.days.map(d => d.end), ['2026-12-01 23:59:59', '2026-12-02 23:59:59']);
+});
+
+t('X4 仅结束为 00:00:00（开始有真实时刻）：结束写当天 23:59:59、开始时刻保留', () => {
+  const seed = () => [spPlan({ startDate: '2026-12-01 18:49:00', endDate: '2026-12-02 00:00:00' })];
+  const days = [
+    { date: '2026-12-01', content: 'a', quantities: {} },
+    { date: '2026-12-02', content: 'b', quantities: {} }
+  ];
+  const pv = prevCall({ days }, seed()).res.payload;
+  for (const d of pv.days) {
+    assert.equal(d.start, d.date + ' 18:49:00', '开始时刻应保留');
+    assert.equal(d.end, d.date + ' 23:59:59', '结束应为当天 23:59:59');
+    assert.ok(sameDay(d.start, d.end));
+  }
+});
+
+t('X5 跨月(11-29→12-02)与跨年(2026-12-30→2027-01-02)：日期正确、每条同日', () => {
+  const run = (S, E, dates) => {
+    const seed = () => [spPlan({ startDate: S, endDate: E })];
+    const days = dates.map(dt => ({ date: dt, content: 'x', quantities: {} }));
+    const pv = prevCall({ days }, seed()).res.payload;
+    assert.deepEqual(pv.days.map(d => d.date), dates, '日期序列应正确');
+    for (const d of pv.days) {
+      assert.equal(d.start, d.date + ' 00:00:00');
+      assert.equal(d.end, d.date + ' 23:59:59');
+      assert.ok(sameDay(d.start, d.end), '应同日：' + d.start + ' / ' + d.end);
+    }
+  };
+  run('2026-11-29 00:00:00', '2026-12-02 00:00:00', ['2026-11-29', '2026-11-30', '2026-12-01', '2026-12-02']);
+  run('2026-12-30 00:00:00', '2027-01-02 00:00:00', ['2026-12-30', '2026-12-31', '2027-01-01', '2027-01-02']);
+  // 纯函数层面同样覆盖跨年边界
+  assert.deepEqual(PSC.dayRange('2027-01-01', '2026-12-30 00:00:00', '2027-01-02 00:00:00'),
+    { start: '2027-01-01 00:00:00', end: '2027-01-01 23:59:59' });
+});
+
+t('X6 精确重放：同版本同 days 重放 → 同批 id 且各记录 JSON 逐字不变', () => {
+  const seed = () => [spPlan({ startDate: '2026-12-01 00:00:00', endDate: '2026-12-02 00:00:00' })];
+  const days = [
+    { date: '2026-12-01', content: 'a', quantities: {} },
+    { date: '2026-12-02', content: 'b', quantities: {} }
+  ];
+  const pv = prevCall({ days }, seed()).res.payload;
+  const body = confirmPayload(pv);
+  const c1 = splitCall(splitCommitH, SP_ID, body, seed());
+  assert.equal(c1.res.statusCode, 200);
+  const snap = DB.workPlans.map(x => JSON.stringify(x)).join('\n');
+  const c2 = splitCall(splitCommitH, SP_ID, body, null, true);
+  assert.equal(c2.res.statusCode, 200);
+  assert.equal(c2.res.payload.replay, true);
+  assert.equal(c2.res.payload.splitBatchId, c1.res.payload.splitBatchId);
+  assert.deepEqual(c2.res.payload.createdPlanIds, c1.res.payload.createdPlanIds);
+  assert.equal(DB.workPlans.map(x => JSON.stringify(x)).join('\n'), snap, '重放不得改动任何记录');
+});
+
+t('X7 真正跨天的未拆分计划：dayList 仍跨多日，且逐日平移仍保持跨夜（不被本批逻辑触碰）', () => {
+  const S = '2026-12-30 22:00:00', E = '2027-01-01 06:00:00';
+  const ds = PSC.dayList(S, E);
+  assert.deepEqual(ds, ['2026-12-30', '2026-12-31', '2027-01-01'], '源计划仍应跨 3 天');
+  const r = PSC.dayRange('2026-12-30', S, E);
+  assert.equal(r.start, '2026-12-30 22:00:00');
+  assert.equal(r.end, '2026-12-31 06:00:00', '真实跨夜仍顺延次日（既有行为不变）');
+  assert.ok(!sameDay(r.start, r.end));
+  // 非零时刻相等同样保持顺延（不属无时段口径）
+  const eq = PSC.dayRange('2026-11-03', '2026-11-03 20:13:00', '2026-11-03 20:13:00');
+  assert.equal(eq.end, '2026-11-04 20:13:00');
+});
+
+t('X8 撤销端点仍 410 SPLIT_IRREVERSIBLE，调用前后库零变化', () => {
+  reset([spPlan()]);
+  const snap = JSON.stringify(DB.workPlans);
+  const c = splitCall(splitUndoH, SP_ID, {}, null, true);
+  assert.equal(c.res.statusCode, 410);
+  assert.equal(c.res.payload.error, 'SPLIT_IRREVERSIBLE');
+  assert.equal(JSON.stringify(DB.workPlans), snap, '撤销不得改动任何记录');
+  assert.equal(state.saveCalls, 0, '撤销不得落库');
+});
+
+t('X9 存量修复脚本：dry-run 只列坏形态(含已执行)，异形单列；apply 备份+只改目标；幂等；rollback 逐字节还原', () => {
+  const { execFileSync } = require('child_process');
+  const os = require('os');
+  const SCRIPT = path.join(__dirname, 'repair-split-dayranges.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'splitfix-'));
+  const fx = path.join(tmp, 'fixture.json');
+  const mk = (id, extra) => Object.assign({ id, planType: '周计划', name: '夹具-' + id, status: '未执行', deleted: false }, extra || {});
+  const fixture = {
+    settings: {},
+    workPlans: [
+      mk('fx-a', { splitBatchId: 'sp-a', startDate: '2026-12-01 00:00:00', endDate: '2026-12-02 00:00:00' }),      // (a) 坏形态
+      mk('fx-b', { splitBatchId: 'sp-b', startDate: '2026-12-01 00:00:00', endDate: '2026-12-01 23:59:59' }),      // (b) 好形态
+      mk('fx-c', { startDate: '2026-12-05 00:00:00', endDate: '2026-12-06 00:00:00' }),                            // (c) 无批次
+      mk('fx-d', { splitBatchId: 'sp-d', startDate: '2026-12-03 07:30:00', endDate: '2026-12-03 18:30:00' }),      // (d) 真实时段
+      mk('fx-e', { splitBatchId: 'sp-e', startDate: '2026-12-04T00:00:00', endDate: '2026-12-05T00:00:00' }),      // (e) 异形 T
+      mk('fx-f', { splitBatchId: 'sp-f', startDate: '2026-12-07 00:00:00', endDate: '2026-12-08 00:00:00', status: '已执行' }) // (f) 已执行
+    ]
+  };
+  fs.writeFileSync(fx, JSON.stringify(fixture, null, 2));
+  const raw0 = fs.readFileSync(fx);
+  const run = (...args) => execFileSync(process.execPath, [SCRIPT, '--db', fx, ...args], { encoding: 'utf8' });
+
+  const dry = run();
+  assert.ok(/可修复候选：2 条/.test(dry), 'dry-run 应恰有 2 条候选');
+  assert.ok(/fx-a/.test(dry) && /fx-f/.test(dry), '候选应含 a 与 f');
+  assert.ok(!/fx-b/.test(dry) && !/fx-c/.test(dry) && !/fx-d/.test(dry), '好形态/无批次/真实时段不得命中');
+  assert.ok(/异形格式/.test(dry) && /fx-e/.test(dry), '异形格式应单独成段列出');
+  assert.ok(/已执行/.test(dry), '状态应在清单中可见');
+  assert.ok(/2026-12-02 00:00:00  →  2026-12-01 23:59:59/.test(dry), '改前→改后应可见');
+  assert.deepEqual(fs.readFileSync(fx), raw0, 'dry-run 不得改动文件');
+
+  const ap = run('--apply');
+  assert.ok(/已备份/.test(ap) && /修改条数：2/.test(ap), ap);
+  const after = JSON.parse(fs.readFileSync(fx, 'utf8'));
+  const byId = new Map(after.workPlans.map(p => [p.id, p]));
+  assert.equal(byId.get('fx-a').endDate, '2026-12-01 23:59:59');
+  assert.equal(byId.get('fx-f').endDate, '2026-12-07 23:59:59');
+  for (const id of ['fx-b', 'fx-c', 'fx-d', 'fx-e']) {
+    const before = fixture.workPlans.find(p => p.id === id);
+    assert.equal(byId.get(id).endDate, before.endDate, id + ' 的 endDate 不得被改');
+  }
+  assert.equal(after.workPlans.length, fixture.workPlans.length, '记录数不变');
+  assert.ok(fs.readdirSync(tmp).some(f => /before-splitfix-/.test(f)), '应生成同目录备份');
+
+  assert.ok(/可修复候选：0 条/.test(run()), 'apply 后 dry-run 应为 0（幂等）');
+
+  const bk = fs.readdirSync(tmp).find(f => /before-splitfix-/.test(f));
+  run('--rollback', path.join(tmp, bk));
+  assert.deepEqual(fs.readFileSync(fx), raw0, 'rollback 后应与原始夹具逐字节一致');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 /* ---------- 执行与汇总 ---------- */
 async function run() {
   console.log('计划管理优化 Step 3 / 4 / 5A / 5B · 进程内隔离测试（不监听端口 / 不启服务 / 不写生产库）');
