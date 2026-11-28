@@ -3231,7 +3231,7 @@ async function runSmoke() {
     return '退场写入 / 恢复清空 / 派生不可选 / 导入枚举对齐 / 存量无字段不报错';
   });
 
-  await step('feed', '工作动态九类来源：项目/领料/出库/作业/资料 + 新增人员 / 窗口与同天合并', async () => {
+  await step('feed', '工作动态十类来源：项目/领料/出库/调拨/作业/资料 + 新增人员 / 窗口与同天合并', async () => {
     const vm = require('vm');
     const sb = { window: {}, module: { exports: {} } };
     vm.createContext(sb);
@@ -3254,30 +3254,43 @@ async function runSmoke() {
       outbound: [{ id: 'o1', createdAt: iso('2026-11-09') }],
       works: [{ id: 'k1', createdAt: iso(T) }],
       docs: [{ id: 'd1', createdAt: iso(T) }],
+      transfers: [
+        { id: 't1', kind: '调拨', createdAt: T + ' 09:10' },          // 北京时间串（调拨单真实形态）
+        { id: 't2', kind: '借调', createdAt: T + ' 10:20' },
+        { id: 't3', kind: '调拨', createdAt: '2026-11-01 09:00' },     // 窗口外
+        { id: 't4', kind: '调拨', createdAt: T + ' 11:00', deleted: true },
+        { id: 't5', kind: '调拨', createdAt: T + ' 12:30', status: '已撤销' }   // 撤销单不计入
+      ],
       borrow: []
     });
     const texts = out.messages.map(m => m.text);
     [
       '今日新增作业人员 2 人', '今日新增项目 2 个', '今日新增领料单 3 张',
       '今日新增周计划 1 条', '今日新增实际工作量记录 1 条', '今日新增竣工资料 1 份',
-      '昨日新增出库单 1 张', '昨日走丁已退场'
+      '昨日新增出库单 1 张', '昨日走丁已退场',
+      '今日新增调拨单 2 张（调拨 1 · 借调 1）'
     ].forEach(t => need(texts.indexOf(t) > -1, '缺少「' + t + '」，实际：' + brief(texts)));
     need(!/老丙/.test(texts.join('|')) && !/10-30/.test(texts.join('|')), '窗口外的项目 / 新增人员不应出现');
     need(!/新增作业人员 3/.test(texts.join('|')), '窗口外的新增人员不应计数');
+    need(!/新增调拨单 3/.test(texts.join('|')), '窗口外 / 已删除 / 已撤销的调拨单不应计数');
     const kinds = out.messages.map(m => m.kind);
-    ['project', 'requisition', 'outbound', 'work', 'doc'].forEach(k =>
-      need(kinds.indexOf(k) > -1, '九类来源缺 kind=' + k + '：' + brief(kinds)));
-    return '8 条（新增人员/项目/领料/计划/作业/资料 + 昨日出库/退场）+ 窗口过滤';
+    ['project', 'requisition', 'outbound', 'work', 'doc', 'transfer'].forEach(k =>
+      need(kinds.indexOf(k) > -1, '十类来源缺 kind=' + k + '：' + brief(kinds)));
+    // 调拨动态必须落到「材料台账 · 调拨管理」页签
+    const tm = out.messages.find(m => m.kind === 'transfer');
+    need(tm.nav === 'materials' && tm.sub === 'transfer', '调拨动态落点应为 materials/transfer：' + tm.nav + '/' + tm.sub);
+    need(JSON.stringify(tm.ids.slice().sort()) === JSON.stringify(['t1', 't2']), '调拨动态 ids 应只含窗口内未删除的两张：' + tm.ids.join(','));
+    return '9 条（新增人员/项目/领料/计划/作业/资料/调拨 + 昨日出库/退场）+ 窗口过滤';
   });
 
-  await step('结构', '首页工作动态：来源模块加载顺序 + 十类标签 + 卡片形态静态断言', async () => {
+  await step('结构', '首页工作动态：来源模块加载顺序 + 十一类标签 + 卡片形态静态断言', async () => {
     const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
     const dash = fs.readFileSync(path.join(ROOT, 'public', 'js', 'views', 'dashboard.js'), 'utf8');
     const iU = html.indexOf('<script src="/js/utils.js"></script>');
     const iF = html.indexOf('<script src="/js/work-feed.js"></script>');
     const iD = html.indexOf('<script src="/js/views/dashboard.js"></script>');
     need(iU > -1 && iF > iU && iD > iF, 'work-feed.js 必须在 utils 之后、dashboard 之前加载');
-    ['alert', 'person', 'material', 'plan', 'borrow', 'project', 'requisition', 'outbound', 'work', 'doc'].forEach(function (k) {
+    ['alert', 'person', 'material', 'plan', 'borrow', 'project', 'requisition', 'outbound', 'work', 'doc', 'transfer'].forEach(function (k) {
       need(html.includes('.fd-tag-' + k + ' {'), '缺少标签样式 .fd-tag-' + k);
       need(html.includes('html.dark .fd-tag-' + k + ' {'), '缺少深色模式样式 .fd-tag-' + k);
     });
@@ -3285,12 +3298,12 @@ async function runSmoke() {
     need(html.includes('flex: 0 0 33.3333%'), '卡片应保持约 1/3 宽');
     need(dash.includes('工作动态') && dash.includes('近 3 天无新增记录') && dash.includes('WorkFeed.build'), '标题 / 空态 / 聚合入口');
     need(/const pick = async/.test(dash), '各接口应独立容错，不得再用 Promise.all 一处失败整块清空');
-    need(dash.includes("projects: p") && dash.includes("requisitions: r") && dash.includes("outbound: outs"),
-      '九类来源应全部接入 build()');
-    need(dash.includes('/api/materialOutbound') && dash.includes('/api/actualWorks') && dash.includes('/api/completionDocuments'),
-      '应取领料 / 出库 / 作业 / 资料接口');
+    need(dash.includes("projects: p") && dash.includes("requisitions: r") && dash.includes("outbound: outs") && dash.includes("transfers: trs"),
+      '十类来源应全部接入 build()');
+    need(dash.includes('/api/materialOutbound') && dash.includes('/api/actualWorks') && dash.includes('/api/completionDocuments') && dash.includes('/api/materialTransfers'),
+      '应取领料 / 出库 / 作业 / 资料 / 调拨接口');
     need(!dash.includes('__pendingFocusWorker = {'), '预警点击不得再直开编辑弹窗');
-    return '脚本顺序 / 十类浅深两套 / 5 条滚动 / 1/3 宽 / 标题空态 / 按源容错 / 九类接线';
+    return '脚本顺序 / 十一类浅深两套 / 5 条滚动 / 1/3 宽 / 标题空态 / 按源容错 / 十类接线';
   });
 
   await step('users', '导入白名单两值 + 已退场导出映射为待定（导出回导入闭环）', async () => {
@@ -4563,6 +4576,46 @@ async function runSmoke() {
     const r2 = await api('POST', '/api/materialOutbound/none/entries/none/correct', { body: { reason: 'ZT测试' }, token });
     need(r2.status >= 400 && r2.status < 500, 'POST 出库更正应 4xx，实际 ' + r2.status);
     return '更正路由/按钮/连带更正均不存在，POST 均 4xx';
+  });
+
+  // 项目间调拨闭环（S6 新增；既有步零改动）
+  await step('materials', 'Q-调拨闭环：草稿→生效→补回→结清→作废补回→再补回→撤销', async () => {
+    const d = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+    const P1 = '冒烟测试项目', P2 = '冒烟测试项目B';
+    const code = 'SMOKE-MT-Q1', desc = '冒烟调拨材料';
+    const c1 = await api('POST', '/api/materials', { token, body: { project: P1, source: '甲供材料', description: desc, qtyRequired: 200, unit: '个', code } });
+    need(c1.status === 200, '建调出材料行失败：' + c1.status + ' ' + JSON.stringify(c1.data));
+    const c2 = await api('POST', '/api/materials', { token, body: { project: P2, source: '甲供材料', description: desc, qtyRequired: 200, unit: '个', code } });
+    need(c2.status === 200, '建调入材料行失败：' + c2.status + ' ' + JSON.stringify(c2.data));
+    const A = c1.data.id, B = c2.data.id;
+    const rq = await api('POST', '/api/requisitions/create', { token, body: { items: [{ id: A, qty: 200 }], reqDate: d } });
+    need(rq.status === 200, '建领料单失败：' + rq.status + ' ' + JSON.stringify(rq.data));
+    const cf = await api('PUT', '/api/materialRequisitions/' + rq.data.data.id + '/confirm', { token, body: { arrivalDate: d, rows: [{ materialId: A, thisQty: 200 }] } });
+    need(cf.status === 200, '确认入库失败：' + cf.status + ' ' + JSON.stringify(cf.data));
+
+    const base = { kind: '借调', fromProject: P1, toProject: P2, items: [{ fromMaterialId: A, toMaterialId: B, qty: 40 }], transferDate: d, reason: '冒烟调拨' };
+    const d1 = await api('POST', '/api/materialTransfers', { token, body: base });
+    need(d1.status === 200, '建借调草稿失败：' + d1.status + ' ' + JSON.stringify(d1.data));
+    const id = d1.data.data.id;
+    need(d1.data.data.transferNo === '' && d1.data.data.status === '草稿', '草稿应无单号：' + JSON.stringify({ no: d1.data.data.transferNo, st: d1.data.data.status }));
+    const e1 = await api('PUT', '/api/materialTransfers/' + id + '/effect', { token, body: {} });
+    need(e1.status === 200 && /^DB-\d{8}-\d{4}$/.test((e1.data.data || {}).transferNo), '生效取号失败：' + JSON.stringify(e1.data));
+    const itemId = (d1.data.data.items || [])[0].id;
+    const r1 = await api('PUT', '/api/materialTransfers/' + id + '/return', { token, body: { itemId, qty: 40, returnDate: d } });
+    need(r1.status === 200 && r1.data.data.status === '已结清', '补满应结清：' + JSON.stringify(r1.data && r1.data.data && r1.data.data.status));
+    const v1 = await api('PUT', '/api/materialTransfers/' + id + '/return/void', { token, body: { itemId, reason: '冒烟作废补回' } });
+    need(v1.status === 200 && v1.data.data.status === '已生效' && Number(v1.data.data.outstandingQty) === 40,
+      '作废补回应退回已生效且未还 40：' + JSON.stringify(v1.data && v1.data.data && { s: v1.data.data.status, o: v1.data.data.outstandingQty }));
+    const r2 = await api('PUT', '/api/materialTransfers/' + id + '/return', { token, body: { itemId, qty: 40, returnDate: d } });
+    need(r2.status === 200 && r2.data.data.status === '已结清', '再次补回应再结清：' + JSON.stringify(r2.data && r2.data.data && r2.data.data.status));
+
+    const d2 = await api('POST', '/api/materialTransfers', { token, body: Object.assign({}, base, { kind: '调拨', items: [{ fromMaterialId: A, toMaterialId: B, qty: 10 }] }) });
+    need(d2.status === 200, '建调拨草稿失败：' + JSON.stringify(d2.data));
+    const e2 = await api('PUT', '/api/materialTransfers/' + d2.data.data.id + '/effect', { token, body: {} });
+    need(e2.status === 200, '调拨生效失败：' + JSON.stringify(e2.data));
+    const v2 = await api('PUT', '/api/materialTransfers/' + d2.data.data.id + '/void', { token, body: { reason: '冒烟撤销' } });
+    need(v2.status === 200 && v2.data.data.status === '已撤销', '撤销应成功：' + JSON.stringify(v2.data && v2.data.data && v2.data.data.status));
+    return '草稿→生效→补回→结清→作废补回→再补回→调拨撤销 全通';
   });
 
   /* ---------- 汇总 ---------- */
