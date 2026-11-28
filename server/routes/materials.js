@@ -7,7 +7,7 @@ const upload = require('../core/upload');
 const { crud } = require('../core/crud');
 const { DB, saveDB } = require('../core/db');
 const { genId, nowISO, aliveFilter, fmtNow, bjStr } = require('../core/util');
-const { withGen, materialStatus, roundQty, replayAvailability, availableAsOf } = require('../core/material-calc');
+const { withGen, materialStatus, roundQty, replayAvailability, availableAsOf, transferStats, availableWithTransfers } = require('../core/material-calc');
 const { isAdmin } = require('../core/auth');
 const { isWorkerAdmitted } = require('../core/worker-status');
 const { docNoKey, cmpDocNo, cmpDocNoTopToday, nextDocNo, alignPlan, refPatchPlan } = require('../core/doc-no');
@@ -131,20 +131,24 @@ app.get('/api/materialOutbound/stock', (req, res) => {
   const project = String(req.query.project || '');
   if (!project) return res.json([]);
   // includeZero=1：把「曾入库、当前已耗尽」的材料一并返回（available: 0），供登记弹窗按截至日核算。
-  // 过滤基线仍是 qtyArrived > 0 —— 从未入库的材料不因此出现。不带参数时响应与改前逐字一致。
+  // 出现基线（调拨接入后）：qtyArrived > 0 或 净调入 > 0 —— 纯调入行也要可见、可出库。
   const includeZero = String(req.query.includeZero || '') === '1';
   const stats = outboundStats(project);
   const rows = [];
   DB.materials.filter(aliveFilter()).forEach(m => {
     if (m.project !== project) return;
     const inQty = roundQty(m.qtyArrived);
-    if (inQty <= 0) return;
+    const tf = transferStats(m.id);
+    const transferIn = roundQty(tf.inQty);
+    const transferOut = roundQty(tf.outQty);
+    const netIn = roundQty(transferIn - transferOut);
+    if (inQty <= 0 && netIn <= 0) return;
     const st = stats[m.id] || { taken: 0, returned: 0 };
     const net = roundQty(st.taken - st.returned);
-    const available = roundQty(Math.max(0, inQty - net));
+    const available = roundQty(Math.max(0, roundQty(inQty + netIn - net)));
     if (available <= 0 && !includeZero) return; // 已全部出库的材料默认不再出现在可出库列表
     const hasRecords = DB.materialOutbound.some(o => !o.deleted && o.project === project && (o.items || []).some(it => it.materialId === m.id));
-    rows.push({ id: m.id, description: m.description, code: m.code, unit: m.unit, inQty, taken: st.taken, returned: st.returned, net, available, hasRecords });
+    rows.push({ id: m.id, description: m.description, code: m.code, unit: m.unit, inQty, taken: st.taken, returned: st.returned, net, available, hasRecords, transferIn, transferOut });
   });
   res.json(rows);
 });
@@ -358,7 +362,10 @@ app.post('/api/materialOutbound/create', (req, res) => {
     const qty = roundQty(Number(e.qty));
     if (!(qty > 0)) return res.status(400).json({ error: '物料「' + m.description + '」出库数量必须大于 0' });
     const st = stats[m.id] || { taken: 0, returned: 0 };
-    const avail = roundQty(Math.max(0, roundQty(m.qtyArrived) - roundQty(st.taken - st.returned)));
+    // 可用 = 已到 + 净调入 − 净出库（调拨接入；clamp 与文案结构保持原样）
+    const tf = transferStats(m.id);
+    const netIn = roundQty(tf.inQty - tf.outQty);
+    const avail = roundQty(Math.max(0, roundQty(m.qtyArrived) + netIn - roundQty(st.taken - st.returned)));
     const overAvail = qty > avail + 1e-9;
     if (overAvail && !availErr) availErr = '物料「' + m.description + '」本次出库 ' + qty + ' 超过可用库存 ' + avail;
     // P1：来源领料单（可选）—— 须存在/未删除/未作废/属于本项目/含此材料，且不超过该单剩余可出
@@ -605,9 +612,11 @@ app.get('/api/materials/audit/inconsistencies', (req, res) => {
     const inb = inbound.get(m.id) || { sum: 0, reqNos: [] };
     const acts = actives.get(m.id) || [];
     const net = roundQty(acts.reduce((s, x) => s + x.net, 0));
+    const tf = transferStats(m.id);
+    const netIn = roundQty(tf.inQty - tf.outQty);
     const outNos = [];
     acts.forEach(x => { const no = x.out.outNo || ''; if (no && outNos.indexOf(no) < 0) outNos.push(no); });
-    const avail = roundQty(arrived - net);
+    const avail = roundQty(arrived + netIn - net);
     if (arrived > 0 && roundQty(arrived - inb.sum) !== 0) {
       add('arrived_without_inbound', m, inb.reqNos, { required, arrived, inboundSum: inb.sum, diff: roundQty(arrived - inb.sum) },
         '已到与入库记录对不上：先核对领料/入库单据，缺确认的补确认，确无来源的按实际到货补录入库或调整应到');
@@ -684,7 +693,29 @@ app.get('/api/materials/audit/inconsistencies', (req, res) => {
   res.json(rows);
 });
 
-app.get('/api/materials', (req, res) => res.json(DB.materials.filter(aliveFilter()).map(withGen)));
+app.get('/api/materials', (req, res) => {
+  const rows = DB.materials.filter(aliveFilter()).map(withGen);
+  // withAvailable=1：附带当前可用量（材料明细显示「可用」用）。
+  // 口径走 availableWithTransfers（已到 + 净调入 − 有效出库净额），与出库登记/调拨新建完全一致。
+  if (String(req.query.withAvailable || '') !== '1') return res.json(rows);
+  const net = {};   // 有效出库净额：一次遍历预聚合，避免逐行扫出库表
+  (DB.materialOutbound || []).forEach(o => {
+    if (!o || o.deleted || o.status !== '有效') return;
+    (o.items || []).forEach(it => {
+      if (!it || !it.materialId) return;
+      net[it.materialId] = roundQty((net[it.materialId] || 0) + (Number(it.qty) || 0) - (Number(it.returned) || 0));
+    });
+  });
+  res.json(rows.map(m => {
+    const st = transferStats(m.id);   // 供材料明细显示「调出/调入/借出未还」，解释「已到」与「可用」的差额
+    return Object.assign({}, m, {
+      available: availableWithTransfers(m, net[m.id] || 0),
+      transferIn: st.inQty,
+      transferOut: st.outQty,
+      transferBorrowOut: st.borrowOutQty,
+    });
+  }));
+});
 app.get('/api/materials/:id', (req, res) => {
   const it = DB.materials.find(x => x.id === req.params.id);
   if (!it || it.deleted) return res.status(404).json({ error: '未找到' });
@@ -1164,7 +1195,10 @@ function voidAvailabilityCheck(rec) {
     if (!statsCache[m.project]) statsCache[m.project] = outboundStats(m.project);
     const st = statsCache[m.project][m.id] || { taken: 0, returned: 0 };
     const net = roundQty(st.taken - st.returned);
-    const availableAfter = roundQty(arrivedAfter - net);
+    // 冲销后可用 =（已到 − 本单入库）+ 净调入 − 净出库
+    const tf = transferStats(m.id);
+    const netIn = roundQty(tf.inQty - tf.outQty);
+    const availableAfter = roundQty(arrivedAfter + netIn - net);
     if (availableAfter >= -1e-9) return;
     bad = true;
     // 列出占用该材料（净出库 > 0）的有效出库单，供前端逐条展示
@@ -1177,9 +1211,30 @@ function voidAvailabilityCheck(rec) {
         const oNet = roundQty(qty - returned);
         if (oNet <= 0) return;
         refs.push({
+          type: 'outbound',
           outNo: o.outNo || '', outboundId: o.id, materialId: m.id,
           code: oi.code || m.code || '', description: oi.description || m.description || '',
           qty, returned, net: oNet, availableAfter, receiver: o.receiver || ''
+        });
+      });
+    });
+    // 调拨占用：该材料作为**某明细行的调出方**、且该行净调出 > 0 的已生效/已结清记录
+    // （借调该行已全部补回的净占用为 0，不算；一张单多行，逐行判断）
+    (DB.materialTransfers || []).forEach(t => {
+      if (!t || t.deleted) return;
+      if (t.status !== '已生效' && t.status !== '已结清') return;
+      (t.items || []).forEach(it => {
+        if (!it || it.fromMaterialId !== m.id) return;
+        const q = roundQty(it.qty);
+        let back = 0;
+        (it.returns || []).forEach(r => { if (r && !r.voided) back += Number(r.qty) || 0; });
+        const oNet = roundQty(q - roundQty(back));
+        if (oNet <= 0) return;
+        refs.push({
+          type: 'transfer',
+          transferNo: t.transferNo || '', transferId: t.id, materialId: m.id,
+          code: m.code || '', description: m.description || '',
+          qty: q, returned: roundQty(back), net: oNet, availableAfter, direction: 'out'
         });
       });
     });

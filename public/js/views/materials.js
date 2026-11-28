@@ -10,7 +10,9 @@ const MaterialsView = {
     function locPeekTab() {
       const p = window.Locate.pending();
       if (!p || p.nav !== 'materials') return;
-      tab.value = p.sub === 'requisition' ? 'requisition' : (p.sub === 'outbound-orders' ? 'outbound' : 'detail');
+      tab.value = p.sub === 'requisition' ? 'requisition'
+        : (p.sub === 'outbound-orders' ? 'outbound'
+          : (p.sub === 'transfer' ? 'transfer' : 'detail'));
       locTab = tab.value;
     }
     locPeekTab();   // setup 阶段就定好，首帧即渲染正确的叶子
@@ -42,12 +44,31 @@ const MaterialsView = {
     async function load() {
       loading.value = true;
       try {
-        const [ms, ps, os] = await Promise.all([api.get('/api/materials'), api.get('/api/projects'), api.get('/api/materialOutbound/orders').catch(() => [])]);
+        const [ms, ps, os, ts] = await Promise.all([api.get('/api/materials?withAvailable=1'), api.get('/api/projects'), api.get('/api/materialOutbound/orders').catch(() => []), api.get('/api/materialTransfers').catch(() => [])]);
         list.value = ms; projects.value = ps;
         outOrders.value = Array.isArray(os) ? os : [];
+        mtOrders.value = Array.isArray(ts) ? ts : (ts && ts.data) || [];
         if (loc && loc.st.active) loc.recompute();
       } catch (e) { ElementPlus.ElMessage.error(e.message); if (loc) loc.refreshFailed(); }
       finally { loading.value = false; }
+    }
+    // 调拨/借调数量文案：解释「已到」与「可用」的差额（调出/调入/借出未还），无调拨时返回空串
+    function transferNote(row) {
+      const out = Number(row.transferOut) || 0;
+      const inn = Number(row.transferIn) || 0;
+      const borrow = Number(row.transferBorrowOut) || 0;
+      const parts = [];
+      const pureOut = Math.round((out - borrow) * 10000) / 10000;
+      if (pureOut > 0) parts.push('调出 ' + fmtQty(pureOut));
+      if (inn > 0) parts.push('调入 ' + fmtQty(inn));
+      if (borrow > 0) parts.push('借出未还 ' + fmtQty(borrow));
+      return parts.join(' · ');
+    }
+    // 可用量是否低于已到（被出库或调出占用过）——用于把「可用」标成橙色引起注意
+    function availLow(row) {
+      const a = Number(row.available);
+      const arr = Number(row.qtyArrived) || 0;
+      return !isNaN(a) && a < arr - 1e-9;
     }
     // 出库记录映射：materialId → 有效出库单数（已作废不计），用于材料明细「有出库记录」标识
     const outOrders = ref([]);
@@ -59,6 +80,41 @@ const MaterialsView = {
       });
       return mp;
     });
+    // 调拨记录映射：materialId → [{ 单号/日期/类型/方向/数量/对方项目/状态 }]（草稿与已撤销也列出，便于追溯）
+    const mtOrders = ref([]);
+    const mtMap = computed(() => {
+      const mp = {};
+      mtOrders.value.forEach(t => {
+        if (!t || t.deleted) return;
+        // 已撤销不产生任何库存变化：不进「有调拨记录」标签，也不出现在材料明细跳转的列表里
+        // （已撤销仍可在「调拨管理」自行筛选查看，保留追溯能力）
+        if (t.status === '已撤销') return;
+        (t.items || []).forEach(it => {
+          if (it.fromMaterialId) {
+            (mp[it.fromMaterialId] = mp[it.fromMaterialId] || []).push({
+              no: t.transferNo || '', date: t.transferDate || '', kind: t.kind || '', dir: 'out',
+              qty: it.qty, other: t.toProject || '', status: t.status || '', id: t.id, itemId: it.id,
+            });
+          }
+          if (it.toMaterialId) {
+            (mp[it.toMaterialId] = mp[it.toMaterialId] || []).push({
+              no: t.transferNo || '', date: t.transferDate || '', kind: t.kind || '', dir: 'in',
+              qty: it.qty, other: t.fromProject || '', status: t.status || '', id: t.id, itemId: it.id,
+            });
+          }
+        });
+      });
+      Object.keys(mp).forEach(k => mp[k].sort((a, b) => String(b.date).localeCompare(String(a.date))));
+      return mp;
+    });
+    /* 与「出库单」同构：切到调拨管理页签并按该材料过滤（不弹窗） */
+    function goTransferDocs(row) {
+      const detail = { id: row.id, description: row.description, code: row.code, project: row.project };
+      window.__mtFocusMaterial = detail;
+      tab.value = 'transfer';
+      nextTick(() => window.dispatchEvent(new CustomEvent('transfers-focus-material', { detail })));
+    }
+
     // 跳转到出库管理-出库单页签，并按该材料过滤
     function goOutbound(row) {
       // Outbounds 为懒挂载（v-else-if），事件可能先于监听器注册：先全局暂存，挂载时消费；事件作已挂载场景的兜底
@@ -468,7 +524,7 @@ const MaterialsView = {
 
     return { tab, list, loading, selection, filters, dialogVisible, editingId, form, SOURCE_TYPES, sourceColors, statusColors,
       projectOptions, projectCandidates, filtered, statCount, detailPage, detailPageSize, detailPaged, loc, locActive, locRowClass, sumRequired, sumArrived, sumNot, fullCount, partCount, notCount,
-      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, genSaving, gToday, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, idlg, previewImport, doImport, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound };
+      load, onSel, canSelect, openAdd, colFilters, tmpFilters, projectFilterOptions, unitOptions, sourceFilterOptions, statusFilterOptions, fActive, applyTmp, resetTmp, resetArr, openEdit, submit, remove, addStaging, showStaging, staging, stagingQty, stagingTotalQty, onStagingTab, mainTable, stagingVisible, stagingPage, stagingPageSize, stagingRows, stagedProjects, removeStaging, clearStaging, genRequisition, genSaving, gToday, relDlg, relPaged, openRelated, relLoad, relItem, relHist, relArrived, relStockReason, relStatusType, relDownload, relVoid, downloadTemplate, importMaterials, idlg, previewImport, doImport, chipStyle, inOver, inRemain, fmtQty, fmt2, outMap, goOutbound, availLow, mtMap, goTransferDocs, transferNote };
   },
   template: `
   <div>
@@ -477,6 +533,7 @@ const MaterialsView = {
       <el-tab-pane label="领料单" name="requisition" />
       <el-tab-pane label="导入批次" name="import" />
       <el-tab-pane label="出库管理" name="outbound" />
+      <el-tab-pane label="调拨管理" name="transfer" />
       <el-tab-pane label="到货统计" name="arrival" />
     </el-tabs>
 
@@ -565,9 +622,15 @@ const MaterialsView = {
           </template>
           <template #default="{row}">
             <div class="mat-desc" :title="row.description">{{ row.description }}</div>
-            <div v-if="outMap[row.id]" class="mat-desc-extra">
-              <span :style="chipStyle('#3370ff')">有出库记录</span>
-              <el-link type="primary" :underline="false" style="font-size:12px" @click="goOutbound(row)">查看出库单</el-link>
+            <div v-if="outMap[row.id] || mtMap[row.id]" class="mat-desc-extra" style="flex-wrap:wrap;row-gap:2px">
+              <span v-if="outMap[row.id]" style="display:inline-flex;align-items:center;gap:6px">
+                <span :style="chipStyle('#3370ff') + 'white-space:nowrap;'">有出库记录</span>
+                <el-link type="primary" :underline="false" style="font-size:12px;white-space:nowrap" @click="goOutbound(row)">出库单</el-link>
+              </span>
+              <span v-if="mtMap[row.id]" style="display:inline-flex;align-items:center;gap:6px">
+                <span :style="chipStyle('#7a5af8') + 'white-space:nowrap;'">有调拨记录</span>
+                <el-link type="primary" :underline="false" style="font-size:12px;white-space:nowrap" @click="goTransferDocs(row)">调拨单</el-link>
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -582,7 +645,19 @@ const MaterialsView = {
               <span class="mat-qty-cell"><span class="mat-qty-lb">未到</span><b>{{ fmtQty(row.qtyNotArrived) }}</b></span>
             </div>
             <div class="mat-qty-sub mat-num">已生成领料单 {{ fmtQty(row.qtyGenerated || 0) }} / 可继续领料 {{ fmtQty(row.qtyCanGen || 0) }}</div>
-            <div v-if="(Number(row.qtyArrived) || 0) > 0" class="mat-qty-foot mat-num">累计入库 {{ fmtQty(row.qtyArrived) }} {{ row.unit || '' }}</div>
+            <div v-if="(Number(row.qtyArrived) || 0) > 0" class="mat-qty-foot mat-num">
+              累计入库 {{ fmtQty(row.qtyArrived) }} {{ row.unit || '' }}
+              <template v-if="row.available !== undefined">
+                <span style="color:var(--text-3);margin:0 4px">·</span>
+                <span :style="availLow(row) ? { color: '#e6932c', fontWeight: 600 } : { color: 'var(--text-2)' }">可用 {{ fmtQty(row.available) }} {{ row.unit || '' }}</span>
+              </template>
+            </div>
+            <div v-if="transferNote(row)" class="mat-qty-foot mat-num" style="color:#7a5af8">{{ transferNote(row) }}</div>
+            <!-- 纯调入行（自身未入库、靠调拨得来）：已到为 0，但仍有可用 -->
+            <div v-else-if="(Number(row.available) || 0) > 0" class="mat-qty-foot mat-num">
+              <span style="color:#e6932c;font-weight:600">可用 {{ fmtQty(row.available) }} {{ row.unit || '' }}</span>
+              <span style="color:var(--text-3)">（调拨调入，未入库）</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="入库核对" width="132">
@@ -658,7 +733,7 @@ const MaterialsView = {
           </div></template>
           <template #default="{row}"><span :style="chipStyle(statusColors[row.status] || 'var(--text-3)') + 'cursor:pointer'" title="点击查看关联领料单" @click="openRelated(row)">{{ row.status }}</span></template>
         </el-table-column>
-        <el-table-column v-if="canWrite('materials')" label="操作" width="98" align="center">
+        <el-table-column v-if="canWrite('materials')" label="操作" width="110" align="center">
           <template #default="{row}">
             <div class="mat-acts">
               <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
@@ -774,6 +849,8 @@ const MaterialsView = {
             :page-sizes="[30, 50, 100]" layout="total, sizes, prev, pager, next" background />
         </div>
       </el-dialog>
+
+
     </div>
 
     <div v-else-if="tab==='requisition'">
@@ -784,6 +861,9 @@ const MaterialsView = {
     </div>
     <div v-else-if="tab==='outbound'">
       <Outbounds />
+    </div>
+    <div v-else-if="tab==='transfer'">
+      <MaterialTransfers />
     </div>
     <div v-else-if="tab==='arrival'">
       <ArrivalStats />
