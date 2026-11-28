@@ -25,10 +25,11 @@ const Dashboard = {
       stats.projects = p.length; stats.materials = m.length; stats.requisitions = r.length;
       stats.documents = d.length; stats.borrow = b.length;
       try { me.value = (await api.get('/api/me')).user; } catch (e) {}
-      // 工作动态：九类来源各自只读自己模块的现有接口，聚合与排序交给 WorkFeed 纯函数
-      const [w, ims, plans, outs, works, docs] = await Promise.all([
+      // 工作动态：十类来源各自只读自己模块的现有接口，聚合与排序交给 WorkFeed 纯函数
+      const [w, ims, plans, outs, works, docs, trs] = await Promise.all([
         pick('/api/workers'), pick('/api/materialImports'), pick('/api/workPlans'),
-        pick('/api/materialOutbound'), pick('/api/actualWorks'), pick('/api/completionDocuments')
+        pick('/api/materialOutbound'), pick('/api/actualWorks'), pick('/api/completionDocuments'),
+        pick('/api/materialTransfers')
       ]);
       try {
         const today = ServerTime.ymd();
@@ -36,7 +37,7 @@ const Dashboard = {
         const feed = window.WorkFeed.build({
           workers: w, alerts, today,
           imports: ims, materials: m, plans, borrow: b,
-          projects: p, requisitions: r, outbound: outs, works, docs
+          projects: p, requisitions: r, outbound: outs, works, docs, transfers: trs
         });
         messages.value = feed.messages;
         alertCount.value = feed.alertCount;

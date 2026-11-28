@@ -55,6 +55,22 @@ t('requisition / outbound / doc / borrow / project / work：ids 与 sub', () => 
   assert.deepStrictEqual(ids(W.projectMessages(one, T)[0]), ['x1']);
 });
 
+t('transfer：调拨/借调同天各算一张，sub=transfer，窗口外/已删除/已撤销排除', () => {
+  const ts = [
+    { id: 't1', kind: '调拨', createdAt: T + ' 09:10' },
+    { id: 't2', kind: '借调', createdAt: T + ' 10:20' },
+    { id: 't3', kind: '调拨', createdAt: '2026-10-01 09:00' },
+    { id: 't4', kind: '调拨', createdAt: T + ' 11:00', deleted: true },
+    { id: 't5', kind: '调拨', createdAt: T + ' 12:00', status: '已撤销' }   // 撤销单不计入（与材料明细口径一致）
+  ];
+  const ms = W.transferMessages(ts, T);
+  assert.strictEqual(ms.length, 1);
+  assert.deepStrictEqual(ids(ms[0]), ['t1', 't2']);
+  assert.strictEqual(ms[0].sub, 'transfer');
+  assert.strictEqual(ms[0].kind, 'transfer');
+  assert.ok(ms[0].text.indexOf('（调拨 1 · 借调 1）') > -1, ms[0].text);
+});
+
 t('createdMessages：submittedAt 回退路径也带 ids', () => {
   const m = W.workMessages([{ id: 'k1', submittedAt: '2026-11-19 08:00' }], T)[0];
   assert.deepStrictEqual(ids(m), ['k1']);

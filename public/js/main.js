@@ -547,6 +547,7 @@ app.component('BorrowView', BorrowView);
 app.component('ProjectsView', ProjectsView);
 app.component('DocumentsView', DocumentsView);
 app.component('MaterialsView', MaterialsView);
+app.component('MaterialTransfers', MaterialTransfers);
 app.component('Dashboard', Dashboard);
 app.component('SettingsView', SettingsView);
 app.component('InitView', InitView);

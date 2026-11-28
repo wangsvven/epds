@@ -219,6 +219,32 @@
     });
   }
 
+  /* ---------- 来源十一：调拨动态（按天汇总新增调拨单，附调拨 / 借调拆分） ----------
+     统计口径与「材料明细 → 调拨单」一致：**排除已撤销**（撤销单不产生任何库存变化，
+     计入只会让首页显示一堆作废尝试）；草稿保留（待办仍需可见）。
+     createdAt 是北京时间 'YYYY-MM-DD HH:mm'，bjDay 直接取前 10 位。
+     sub='transfer'：材料台账容器按此定位到「调拨管理」页签。 */
+  function transferMessages(list, today) {
+    var byDay = {};
+    (list || []).forEach(function (t) {
+      if (!t || t.deleted || t.status === '已撤销') return;
+      var day = bjDay(t.createdAt);
+      if (!inWindow(day, today)) return;
+      var e = byDay[day] || (byDay[day] = { n: 0, diao: 0, jie: 0, ids: [] });
+      e.n += 1; e.ids.push(t.id);
+      if (t.kind === '借调') e.jie += 1; else e.diao += 1;
+    });
+    return Object.keys(byDay).map(function (day) {
+      var e = byDay[day];
+      var mix = (e.diao && e.jie) ? '（调拨 ' + e.diao + ' · 借调 ' + e.jie + '）' : '';
+      return {
+        kind: 'transfer', label: '调拨动态', nav: 'materials', sub: 'transfer', day: day,
+        text: dayLabel(day, today) + '新增调拨单 ' + e.n + ' 张' + mix,
+        ids: uniqIds(e.ids)
+      };
+    });
+  }
+
   /* ---------- 通用：按天汇总某集合的新增条数 ----------
      cfg = { kind, label, nav, noun, unit, timeKeys }；同一自然日只出一行，避免刷屏。
      timeKeys 按顺序取第一个非空字段（默认 createdAt）；施工量等老记录只有 submittedAt，用回退兼容。 */
@@ -269,7 +295,8 @@
     return createdMessages(list, today, { kind: 'doc', label: '资料动态', nav: 'completion', noun: '竣工资料', unit: '份' });
   }
 
-  var KIND_ORDER = { person: 0, material: 1, project: 2, plan: 3, work: 4, requisition: 5, outbound: 6, doc: 7, borrow: 8 };
+  /* 同一天内排序：材料 → 计划 → 作业 → 领料 → 出库 → 调拨 → 资料 → 借工 */
+  var KIND_ORDER = { person: 0, material: 1, project: 2, plan: 3, work: 4, requisition: 5, outbound: 6, transfer: 7, doc: 8, borrow: 9 };
   /* 聚合层：预警置顶，其余按日期倒序，同日内按 KIND_ORDER 排。 */
   function collect(parts) {
     var dyn = [];
@@ -288,7 +315,7 @@
   }
 
   /* build() 只做「取各来源 → 收集排序」，不含任何业务判断。
-     新增入参（projects / requisitions / outbound / works / docs）缺失时各自为空数组，
+     新增入参（projects / requisitions / outbound / works / docs / transfers）缺失时各自为空数组，
      老调用方不传也能正常工作。 */
   function build(input) {
     var o = input || {};
@@ -302,6 +329,7 @@
       work: workMessages(o.works, o.today),
       requisition: requisitionMessages(o.requisitions, o.today),
       outbound: outboundMessages(o.outbound, o.today),
+      transfer: transferMessages(o.transfers, o.today),
       doc: docMessages(o.docs, o.today),
       borrow: borrowMessages(o.borrow, o.today)
     };
@@ -316,6 +344,7 @@
     borrowMessages: borrowMessages, createdMessages: createdMessages,
     projectMessages: projectMessages, requisitionMessages: requisitionMessages,
     outboundMessages: outboundMessages, workMessages: workMessages, docMessages: docMessages,
+    transferMessages: transferMessages,
     collect: collect, build: build
   };
   if (typeof window !== 'undefined') window.WorkFeed = api;
