@@ -51,7 +51,7 @@ function fmtKm(n) {
  * 纯函数、无依赖；window.MaterialNo 供冒烟脚本（vm 加载）与前端共用。 */
 function reqNoKey(no) {
   const s = String(no == null ? '' : no);
-  const m = s.match(/^(?:LL-)?(\d{8})-(\d+)$/);
+  const m = s.match(/^(?:(?:LL|OUT|DB)-)?(\d{8})-(\d+)$/);
   if (!m) return null;
   const suf = m[2];
   // 6 位数字后缀按「时间」语义处理，其余（3/4/5/7+ 位）按「流水」语义

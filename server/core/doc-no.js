@@ -12,7 +12,7 @@
  */
 
 // 单号解析：前缀可选、日期 8 位、流水为纯数字（位数不限）
-const DOC_NO_RE = /^(?:(LL|OUT)-)?(\d{8})-(\d+)$/;
+const DOC_NO_RE = /^(?:(LL|OUT|DB)-)?(\d{8})-(\d+)$/;
 
 /** 拆解单号 → { prefix, date, width, grp, seq }；无法识别返回 null。
  *  grp：6 位后缀按「时间」语义分组（排在同日 4 位流水之后），与 public/js/utils.js 的 reqNoKey 逐字对齐。 */

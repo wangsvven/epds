@@ -61,9 +61,14 @@ function dayPart(v) {
   const s = String(v == null ? '' : v).slice(0, 10);
   return DAY_RE.test(s) ? s : '';
 }
+/* 统一输出到秒：'YYYY-MM-DD HH:mm:ss'
+ * 原实现截断到分钟，导致同一分钟内连续两笔单据无法排序（详情「调出前后」会算错）。
+ * 所有比较点两侧都经过本函数，改成秒级后口径仍一致。 */
 function timePart(v) {
-  const s = String(v == null ? '' : v).trim().slice(0, 16);
-  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s) ? s : '';
+  const t = String(v == null ? '' : v).trim();
+  const m = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})(?::(\d{2}))?/.exec(t);
+  if (!m) return '';
+  return m[1] + ':' + (m[2] || '00');
 }
 function eventsOf(materialId) {
   const DB = DB_();
@@ -94,6 +99,36 @@ function eventsOf(materialId) {
       const rd = dayPart(x.returnDate) || d;
       if (!rd) return;
       out.push({ date: rd, kind: 'in', qty: rq, refNo: o.outNo || '', self: false, at: timePart(x.at) });
+    });
+  });
+  /* 第四类：项目间调拨（PLAN v2.2：一张单多行明细）
+   *   已生效/已结清记录 → 每个明细行在生效日产生一对事件（调出侧 out / 调入侧 in，同 transferNo）
+   *   每行的每笔未作废补回 → 补回日一对反向事件（调入侧 out / 调出侧 in，同 transferNo）
+   *   草稿/已撤销/已删除、已作废补回笔不产生事件。
+   *   at 取实际落库时间（effectedAt / 行内 returns[].at）——期初折算按 at ≤ openingAt 视为已含在期初，
+   *   按业务日伪造 at 会让事件被跳过，回放与聚合从此对不上。 */
+  (DB.materialTransfers || []).forEach(t => {
+    if (!t || t.deleted) return;
+    if (t.status !== '已生效' && t.status !== '已结清') return;
+    const no = t.transferNo || '';
+    const d = dayPart(t.transferDate);
+    const at = timePart(t.effectedAtSec || t.effectedAt);
+    (t.items || []).forEach(it => {
+      if (!it) return;
+      const qty = Number(it.qty) || 0;
+      if (qty > 0 && d) {
+        if (it.fromMaterialId === materialId) out.push({ date: d, kind: 'out', qty, refNo: no, self: false, at });
+        if (it.toMaterialId === materialId) out.push({ date: d, kind: 'in', qty, refNo: no, self: false, at });
+      }
+      (it.returns || []).forEach(r => {
+        if (!r || r.voided) return;
+        const rq = Number(r.qty) || 0;
+        if (!(rq > 0)) return;
+        const rd = dayPart(r.returnDate);
+        if (!rd) return;
+        if (it.fromMaterialId === materialId) out.push({ date: rd, kind: 'in', qty: rq, refNo: no, self: false, at: timePart(r.at) });
+        if (it.toMaterialId === materialId) out.push({ date: rd, kind: 'out', qty: rq, refNo: no, self: false, at: timePart(r.at) });
+      });
     });
   });
   return out;
@@ -255,7 +290,10 @@ function inboundDatesOf(materialId) {
   });
   return out;
 }
-function availableAsOf(materialId, date) {
+/* excludeRefNo：忽略指定单号产生的事件（详情页算「本单发生前的余额」用）
+ * beforeAt    ：同日内只累计"落库时间早于该时刻"的事件（'YYYY-MM-DD HH:mm'），
+ *               用于同日多笔时还原「本单发生那一刻」的余额；为空则按当日末口径。 */
+function availableAsOf(materialId, date, excludeRefNo, beforeAt) {
   const DB = DB_();
   const mat = (DB.materials || []).find(x => x && x.id === materialId);
   const d = dayPart(date);
@@ -283,9 +321,19 @@ function availableAsOf(materialId, date) {
     events.push(e);
   });
   // 累加至 date（含当日）：同日先入后出不影响截至日终值
+  // excludeRefNo 命中时跳过该单事件（含其补回）→ 得「若没有这笔单」的余额
+  const skipNo = String(excludeRefNo == null ? '' : excludeRefNo);
+  const cutoff = timePart(beforeAt);   // 秒级
   let avail = base;
   events.forEach(e => {
+    if (skipNo && e.refNo === skipNo) return;
     if (!e.date || e.date > d) return;
+    // 同日：只算本单落库之前发生的；无时间戳的历史事件视为当日最早
+    if (cutoff && e.date === d && e.at) {
+      if (e.at > cutoff) return;
+      // 同一秒内多笔：按单号先后定序（DB-YYYYMMDD-NNNN 单调递增）
+      if (e.at === cutoff && skipNo && String(e.refNo || '') > skipNo) return;
+    }
     avail = roundQty(avail + (e.kind === 'in' ? e.qty : -e.qty));
   });
   // notYetIn：可核查（有期初字段）且期初净额为 0 且截至日无任何有效入库，
@@ -299,4 +347,52 @@ function availableAsOf(materialId, date) {
   return { materialId, available: avail, notYetIn, beforeOpening: false, openingDate };
 }
 
-module.exports = { roundQty, qtyGeneratedOf, qtyOutstandingOf, withGen, materialStatus, eventsOf, replayAvailability, availableAsOf };
+/* ---------- 调拨聚合统计（与 eventsOf 同一状态过滤） ----------
+ * transferStats(materialId) → { inQty, outQty, borrowOutQty }
+ *   inQty        以本行为调入方的生效量 + 以本行为调出方收到的未作废补回量
+ *   outQty       以本行为调出方的生效量 + 以本行为调入方退回的未作废补回量
+ *   borrowOutQty 以本行为调出方的借调未补回余额（Σ行 qty − Σ行未作废补回），仅借调、仅调出侧
+ * 一张单含多行明细：逐行判断本材料是调出方还是调入方，按行累加。
+ * 净调入 = inQty − outQty；借调未补回净额已含在 in/out 口径内，不得重复计。
+ * 只读派生、不写库；状态过滤（已生效/已结清计入，草稿/已撤销/已删除不计）与 eventsOf 逐字一致。
+ */
+function transferStats(materialId) {
+  const DB = DB_();
+  let inQty = 0, outQty = 0, borrowOutQty = 0;
+  (DB.materialTransfers || []).forEach(t => {
+    if (!t || t.deleted) return;
+    if (t.status !== '已生效' && t.status !== '已结清') return;
+    const isBorrow = t.kind === '借调';
+    (t.items || []).forEach(it => {
+      if (!it) return;
+      const isFrom = it.fromMaterialId === materialId;
+      const isTo = it.toMaterialId === materialId;
+      if (!isFrom && !isTo) return;
+      const qty = Number(it.qty) || 0;
+      if (isFrom) outQty += qty;
+      if (isTo) inQty += qty;
+      if (!isBorrow) return;
+      let returned = 0;
+      (it.returns || []).forEach(r => {
+        if (!r || r.voided) return;
+        const rq = Number(r.qty) || 0;
+        if (!(rq > 0)) return;
+        returned += rq;
+        if (isFrom) inQty += rq;   // 补回回到调出方
+        if (isTo) outQty += rq;    // 补回从调入方出
+      });
+      if (isFrom) borrowOutQty += Math.max(0, roundQty(qty - returned));
+    });
+  });
+  return { inQty: roundQty(inQty), outQty: roundQty(outQty), borrowOutQty: roundQty(borrowOutQty) };
+}
+
+/* 聚合可用（含调拨）：qtyArrived + 净调入 − netOutbound，四位小数。
+ * 可为负、不 clamp——是否截零由各调用点按既有口径决定。
+ * 无调拨数据时与现行 qtyArrived − netOutbound 逐值相等。 */
+function availableWithTransfers(m, netOutbound) {
+  const st = transferStats(m.id);
+  return roundQty((Number(m.qtyArrived) || 0) + roundQty(st.inQty - st.outQty) - (Number(netOutbound) || 0));
+}
+
+module.exports = { roundQty, qtyGeneratedOf, qtyOutstandingOf, withGen, materialStatus, eventsOf, replayAvailability, availableAsOf, transferStats, availableWithTransfers, timePart };
