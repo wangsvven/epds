@@ -652,12 +652,15 @@ const MaterialsView = {
                 <span :style="availLow(row) ? { color: '#e6932c', fontWeight: 600 } : { color: 'var(--text-2)' }">可用 {{ fmtQty(row.available) }} {{ row.unit || '' }}</span>
               </template>
             </div>
-            <div v-if="transferNote(row)" class="mat-qty-foot mat-num" style="color:#7a5af8">{{ transferNote(row) }}</div>
-            <!-- 纯调入行（自身未入库、靠调拨得来）：已到为 0，但仍有可用 -->
-            <div v-else-if="(Number(row.available) || 0) > 0" class="mat-qty-foot mat-num">
+            <!-- 纯调入行（自身未入库、靠调拨得来）：已到 = 0 且仍有可用。
+                 用「显式互斥条件」而不是 v-else-if：v-else-if 只认「上一个同级元素」，
+                 中间一旦插入别的元素就会悄悄改绑（v2.25.0 的缺陷即由此产生）。 -->
+            <div v-if="(Number(row.qtyArrived) || 0) <= 0 && (Number(row.available) || 0) > 0" class="mat-qty-foot mat-num">
               <span style="color:#e6932c;font-weight:600">可用 {{ fmtQty(row.available) }} {{ row.unit || '' }}</span>
               <span style="color:var(--text-3)">（调拨调入，未入库）</span>
             </div>
+            <!-- 调拨 / 借调数量（解释已到与可用的差额）：独立一行，有调拨才显示 -->
+            <div v-if="transferNote(row)" class="mat-qty-foot mat-num" style="color:#7a5af8">{{ transferNote(row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="入库核对" width="132">
