@@ -63,6 +63,8 @@ function seedDB() {
     materialRequisitions: [],
     materialImports: [],
     materialOutbound: [],
+    // 项目间调拨：新装实例为空；存量库由 routes/material-transfers.js 惰性初始化（本处不写迁移）
+    materialTransfers: [],
     // 作业人员（用户管理-作业人员名单）：初始为空
     workers: [],
     // 外部通讯录（用户管理第三个标签页）：初始为空

@@ -29,6 +29,7 @@ app.use('/api', authMiddleware);
 system.registerAuthed();
 
 require('./server/routes/materials');
+require('./server/routes/material-transfers'); // 项目间调拨：专用路由（状态机 + 回放），不走通用 CRUD
 require('./server/routes/projects');
 // 专用路由须早于 routes/plans.js 的通用 /:id 与静态路径注册（顺序不可随意调整）
 require('./server/routes/borrow');       // 借工：佐证 / 借工单 / 前置校验 + borrowWorks CRUD

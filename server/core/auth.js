@@ -26,7 +26,7 @@ function canWriteModule(u, mod) {
 function moduleOfPath(fp) {
   if (/^\/api\/projects(\/|$)/.test(fp)) return 'projects';
   if (/^\/api\/plans(\/|$)/.test(fp) || /^\/api\/workPlans(\/|$)/.test(fp)) return 'plans';
-  if (/^\/api\/materials(\/|$)/.test(fp) || /^\/api\/materialRequisitions(\/|$)/.test(fp) || /^\/api\/materialImports(\/|$)/.test(fp) || /^\/api\/materialOutbound(\/|$)/.test(fp)) return 'materials';
+  if (/^\/api\/materials(\/|$)/.test(fp) || /^\/api\/materialRequisitions(\/|$)/.test(fp) || /^\/api\/materialImports(\/|$)/.test(fp) || /^\/api\/materialOutbound(\/|$)/.test(fp) || /^\/api\/materialTransfers(\/|$)/.test(fp)) return 'materials';
   if (/^\/api\/borrowWorks(\/|$)/.test(fp)) return 'borrow';
   if (/^\/api\/completionDocuments(\/|$)/.test(fp)) return 'completion';
   if (/^\/api\/actualWorks(\/|$)/.test(fp)) return 'actualWorks';
